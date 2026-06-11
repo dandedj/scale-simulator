@@ -1,14 +1,12 @@
 # RTB Fabric — Connection Storm Simulator
 
-An animated, browser-based discrete-event simulation that teaches how **TLS
-connection retry storms** ignite in a high-throughput RTB proxy fabric — and
-why the protection mechanisms (load shedding, error pacing, TLS handshake
-concurrency limits, bounded queues, circuit breakers) are what stand between
-"brief shedding" and "catastrophic, self-sustaining collapse."
-
-Built for one specific argument: **raising limits to avoid shedding makes
-storms more likely and more severe.** Here you can raise the limits yourself
-and watch what the next traffic pulse does.
+An animated, browser-based discrete-event simulation of **TLS connection
+retry storms** in a high-throughput RTB proxy fabric. It models the full
+feedback loop — timeouts, connection teardown, TLS handshake cost, shared
+CPU — and lets you experiment live with limit settings and protection
+mechanisms (load shedding, error pacing, TLS handshake concurrency limits,
+bounded queues, circuit breakers) to see how each changes the system's
+response to load surges.
 
 ## Run it
 
@@ -57,13 +55,14 @@ out, and queued requests are discovered dead only at dequeue.
 
 - **Healthy** — conservative limits, all protections on. Pulse it: brief
   shedding, fast recovery.
-- **Storm-prone** — "we raised the limits so we'd stop shedding": 16× the
+- **Storm-prone** — raised limits with protections disabled: 16× the
   handshake concurrency, shedding off, 3 un-jittered retries. Stable at
-  baseline; a single 3× pulse tips it into a storm that **persists after the
-  pulse ends** (a metastable failure — the trigger is gone, the retry/handshake
-  feedback loop sustains the collapse).
-- **Protected** — the A/B against Storm-prone: identical aggressive clients,
-  but the fabric keeps its limits. The same pulse sheds briefly and recovers.
+  baseline; after a 3× pulse the storm **persists once the pulse ends** (a
+  metastable failure — the trigger is gone, the retry/handshake feedback loop
+  sustains the overload).
+- **Protected** — the counterpart to Storm-prone: identical client settings,
+  with the fabric's limits and protections enabled, so the two configurations
+  can be compared under the same pulse.
 - **Overwhelmed** — offered load beyond capacity, no protections: goodput → ~0
   and stays there until traffic is removed.
 
@@ -80,8 +79,9 @@ Every run is deterministic for a given seed: a demo replays identically.
   the accept-queue count, the CPU column (overflow hatching + slowdown factor
   when demand exceeds capacity), per-downstream queues, the error-pacing tray,
   and the protection chips (SHED / PACE / QCAP).
-- **The graveyard**: failed requests pile up under the fabric. An orange pile
-  (sheds) is the system working; a red pile (timeouts) is the system dying.
+- **The graveyard**: failed requests pile up under the fabric. Orange motes
+  are shed requests (rejected cheaply, connections kept alive); red motes are
+  timeouts (connections torn down, retries and re-handshakes follow).
 - **Amplification (HUD)**: attempts sent ÷ successes over the last second.
   Green ≤1.1; red >1.5 means the retry feedback loop is winning.
 - **Charts** (60s rolling): latency p50/p99 vs the client-timeout line,

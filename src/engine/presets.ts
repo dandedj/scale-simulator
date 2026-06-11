@@ -72,7 +72,7 @@ export const PRESETS: Preset[] = [
     id: 'storm-prone',
     name: 'Storm-prone',
     description:
-      '"We raised the limits so we\'d stop shedding." 16x the handshake concurrency, shedding off, 3 un-jittered retries. Stable… until a pulse tips it into a storm it cannot exit.',
+      'Raised limits, protections disabled: 16x the handshake concurrency, shedding off, 3 un-jittered retries. Stable at baseline — try a traffic pulse and watch what happens after it ends.',
     config: (() => {
       const c = base();
       c.clients.requestTimeoutMs = 250;
@@ -94,7 +94,7 @@ export const PRESETS: Preset[] = [
     id: 'protected',
     name: 'Protected',
     description:
-      'Same aggressive clients as Storm-prone (3 retries, tight timeouts) but the fabric keeps its limits and protections. Pulse it: shedding and pacing absorb what melted the other config.',
+      'Identical client settings to Storm-prone (3 retries, tight timeouts), with the fabric limits and protections enabled. Compare the two under the same pulse.',
     config: (() => {
       const c = base();
       c.clients.requestTimeoutMs = 250;
