@@ -22,9 +22,13 @@ export class App {
   private charts: ChartRail;
   private controls: ControlPanel;
   private timeScale = DEFAULT_TIME_SCALE;
-  private paused = false;
+  /** Starts paused behind the start gate so settings can be tuned first. */
+  private paused = true;
+  /** True until the current run is started for the first time. */
+  private gateArmed = true;
   private pausedByVisibility = false;
   private lastWall = 0;
+  private startGate: HTMLElement;
 
   private hudClock: HTMLElement;
   private hudAmp: HTMLElement;
@@ -41,6 +45,8 @@ export class App {
     this.hudAmp = document.getElementById('hud-amp')!;
     this.hudSuccess = document.getElementById('hud-success')!;
     this.stormBadge = document.getElementById('storm-badge')!;
+    this.startGate = document.getElementById('start-gate')!;
+    document.getElementById('start-btn')!.addEventListener('click', () => this.setPaused(false));
 
     this.controls = new ControlPanel(
       document.getElementById('side')!,
@@ -50,9 +56,7 @@ export class App {
         loadPreset: (id) => this.loadPreset(id),
         reset: () => this.reset(this.sim.cfg),
         pulse: (factor, durationMs) => this.sim.triggerPulse(factor, durationMs),
-        setPaused: (p) => {
-          this.paused = p;
-        },
+        setPaused: (p) => this.setPaused(p),
         isPaused: () => this.paused,
         setTimeScale: (s) => {
           this.timeScale = s;
@@ -97,6 +101,18 @@ export class App {
     this.renderer.reset();
     this.controls.resetLog();
     this.controls.refreshKnobs();
+    // Re-arm the start gate: tune the fresh run before traffic flows.
+    this.gateArmed = true;
+    this.setPaused(true);
+  }
+
+  private setPaused(p: boolean): void {
+    this.paused = p;
+    this.pausedByVisibility = false;
+    if (!p) this.gateArmed = false;
+    // The gate shows only for a fresh (never-started) run; mid-run pauses
+    // just freeze the scene.
+    this.startGate.classList.toggle('hidden', !(this.paused && this.gateArmed));
   }
 
   private frame = (wallNow: number): void => {

@@ -119,6 +119,16 @@ function graveyardSwatch(): string {
   );
 }
 
+function shedTlsMote(): string {
+  return svg(`<circle cx="${c}" cy="${c}" r="3.5" fill="none" stroke="${SEMANTIC.tlsPulse}" stroke-width="1.5"/>`);
+}
+
+function shedConnMote(): string {
+  return svg(
+    `<path d="M${c} ${c - 4} L${c + 4} ${c + 3} L${c - 4} ${c + 3} Z" fill="none" stroke="${SEMANTIC.shed}" stroke-width="1.5"/>`,
+  );
+}
+
 const SECTIONS: LegendSection[] = [
   {
     title: 'Requests (particles)',
@@ -148,7 +158,9 @@ const SECTIONS: LegendSection[] = [
       { swatch: ring(SEMANTIC.tlsPulse, 5), label: 'TLS permits', detail: 'Each slot is one concurrent handshake. “+N permit wait” connections are waiting; past the permit wait they are shed·tls (RST). There is no TLS queue.' },
       { swatch: gauge(SEMANTIC.cpuBad, 0.95), label: 'CPU column', detail: 'Demanded work vs capacity. Hatching above = overload; “×N slow” = every in-flight operation stretched by contention.' },
       { swatch: gauge(SEMANTIC.shed, 0.6), label: 'Downstream queues', detail: 'Requests waiting for a fabric→downstream connection, colored by age (blue→red).' },
-      { swatch: graveyardSwatch(), label: 'Graveyard', detail: 'Failed requests pile up below the fabric: red timeouts, orange rejections, yellow errors.' },
+      { swatch: graveyardSwatch(), label: 'Graveyard', detail: 'Failures pile up below the fabric and slowly settle downward as they fade. Squares are request fates: red timeouts, orange rejections, yellow errors.' },
+      { swatch: shedTlsMote(), label: 'Shed TLS conn', detail: 'Hollow ring in the graveyard: a connection shed by RST because TLS permits stayed occupied past the permit wait.' },
+      { swatch: shedConnMote(), label: 'Shed at conn limit', detail: 'Hollow triangle in the graveyard: a connection shed by RST at the connection limit, before any TLS work.' },
     ],
   },
   {
@@ -156,7 +168,7 @@ const SECTIONS: LegendSection[] = [
     entries: [
       { swatch: poolDots(), label: 'Pool dots', detail: 'One per connection slot: dim idle, blue busy, cyan handshaking, hollow unused.' },
       { swatch: dot(SEMANTIC.success, 3.5), label: 'Breaker closed', detail: 'Circuit breaker healthy (clients when enabled, and each downstream).' },
-      { swatch: breakerOpen(), label: 'Breaker open', detail: 'Arc fills over the cooldown, then the breaker half-opens and sends one probe (full orange ring).' },
+      { swatch: breakerOpen(), label: 'Breaker open', detail: 'Arc fills over the cooldown. Downstreams are ejected from the random rotation and re-enter directly; an open client breaker half-opens and sends one probe (full orange ring).' },
       { swatch: gauge(SEMANTIC.cpuWarn, 0.8), label: 'Downstream load', detail: 'In-flight vs concurrency capacity; past capacity its latency inflates.' },
     ],
   },

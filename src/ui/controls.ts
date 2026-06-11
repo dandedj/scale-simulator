@@ -52,6 +52,7 @@ const GROUPS: Array<{ name: string; knobs: KnobDef[]; toggles: ToggleDef[] }> = 
       { label: 'Pool size', min: 1, max: 24, step: 1, get: (c) => c.clients.poolSize, set: (c, v) => (c.clients.poolSize = v) },
       { label: 'Request timeout', min: 50, max: 1000, step: 10, get: (c) => c.clients.requestTimeoutMs, set: (c, v) => (c.clients.requestTimeoutMs = v), format: ms },
       { label: 'Pool wait limit', min: 50, max: 1000, step: 10, get: (c) => c.clients.poolAcquireTimeoutMs, set: (c, v) => (c.clients.poolAcquireTimeoutMs = v), format: ms },
+      { label: 'Connect timeout', min: 100, max: 3000, step: 50, get: (c) => c.clients.connectTimeoutMs, set: (c, v) => (c.clients.connectTimeoutMs = v), format: ms },
       { label: 'Max retries', min: 0, max: 5, step: 1, get: (c) => c.clients.maxRetries, set: (c, v) => (c.clients.maxRetries = v) },
       { label: 'Backoff base', min: 5, max: 250, step: 5, get: (c) => c.clients.retryBackoffBaseMs, set: (c, v) => (c.clients.retryBackoffBaseMs = v), format: ms },
       { label: 'Breaker trip ratio', min: 0.1, max: 0.9, step: 0.05, get: (c) => c.clients.breakerFailureRatio, set: (c, v) => (c.clients.breakerFailureRatio = v), format: (v) => `${Math.round(v * 100)}%` },
@@ -122,6 +123,7 @@ export class ControlPanel {
   private renderedEvents = 0;
   private pulseFactor = 3;
   private pulseDurationMs = 5000;
+  private pauseBtn!: HTMLButtonElement;
   private side: HTMLElement;
   private header: HTMLElement;
   private hooks: ControlHooks;
@@ -154,24 +156,16 @@ export class ControlPanel {
     pulseFactor.title = 'Pulse intensity';
     wrap.appendChild(pulseFactor);
 
-    const pauseBtn = el('button', 'btn', '⏸');
-    pauseBtn.title = 'Pause / resume (space)';
-    const syncPause = () => {
-      pauseBtn.textContent = this.hooks.isPaused() ? '▶' : '⏸';
-      pauseBtn.classList.toggle('active', this.hooks.isPaused());
-    };
-    pauseBtn.addEventListener('click', () => {
-      this.hooks.setPaused(!this.hooks.isPaused());
-      syncPause();
-    });
+    this.pauseBtn = el('button', 'btn', '▶') as HTMLButtonElement;
+    this.pauseBtn.title = 'Pause / resume (space)';
+    this.pauseBtn.addEventListener('click', () => this.hooks.setPaused(!this.hooks.isPaused()));
     window.addEventListener('keydown', (e) => {
       if (e.code === 'Space' && !(e.target instanceof HTMLInputElement)) {
         e.preventDefault();
         this.hooks.setPaused(!this.hooks.isPaused());
-        syncPause();
       }
     });
-    wrap.appendChild(pauseBtn);
+    wrap.appendChild(this.pauseBtn);
 
     // Speed: log slider mapping [0 .. 1] → 0.01x .. 2x sim-speed
     const speedWrap = el('div', 'speed-wrap');
@@ -342,6 +336,11 @@ export class ControlPanel {
 
   /** Called every frame (cheap: only touches DOM on change). */
   update(): void {
+    const glyph = this.hooks.isPaused() ? '▶' : '⏸';
+    if (this.pauseBtn.textContent !== glyph) {
+      this.pauseBtn.textContent = glyph;
+      this.pauseBtn.classList.toggle('active', this.hooks.isPaused());
+    }
     const sim = this.hooks.getSim();
     const t = sim.metrics.totals;
     const successRate = t.arrivals > 0 ? (t.successes / t.arrivals) * 100 : 100;

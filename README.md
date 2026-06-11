@@ -30,7 +30,10 @@ slower; slider from 100× slower to 2× faster).
 The storm is **not scripted**. It emerges from three coupled rules:
 
 1. **A request timeout poisons its connection** (HTTP/1.1 semantics). The
-   client tears it down and must eventually re-handshake.
+   client tears it down and must eventually re-handshake. The pool's connect
+   timeout outlives the request timeout, so even at peak CPU occasional
+   (mostly resumed) handshakes land and a trickle of traffic survives —
+   goodput collapses toward zero in a storm but never to a hard zero.
 2. **A full TLS handshake costs ~25× the CPU** of proxying a request over a
    warm connection (measured range 15–70×; see sources). Resumed handshakes
    cost a configurable fraction of that (default 40%); the resumption rate
@@ -47,8 +50,8 @@ CPU contention stretches everything → more timeouts. The control mechanisms:
 | Connection limit | Beyond the cap, new connections are **shed with an RST** before any TLS work happens. |
 | Error pacing | Error responses are held for a pacing delay — a client slot can only retry once per (pacing delay + backoff), rate-limiting tight retry loops. |
 | TLS session resumption | A configurable share of handshakes resume a prior session, skipping most of the asymmetric crypto. |
-| Downstream circuit breaker | One slow downstream can't absorb the fabric's entire connection budget; the fabric fails fast and probes for recovery. |
-| Client circuit breaker | A client that sees sustained failures stops sending entirely, removing its load until a probe succeeds. |
+| Downstream circuit breaker | Ejection-style (random IP selection preserved): a failing downstream is ejected from the rotation, then re-enters directly after the cooldown with a fresh window — no probe serialization, so recovered traffic re-spreads across all downstreams immediately. |
+| Client circuit breaker | A client that sees sustained failures stops sending entirely, removing its load until a half-open probe succeeds. |
 
 **"Shed" here means connection-level rejection**, and the simulator counts
 the two causes separately: `shed·tls` (TLS permits stayed occupied past the
@@ -89,10 +92,13 @@ Every run is deterministic for a given seed: a demo replays identically.
   slowdown factor when demand exceeds capacity), per-downstream queues, the
   error-pacing tray, lifetime shed counters split by cause, and the PACE chip.
 - **Breaker dots**: each downstream and (when enabled) each client shows its
-  breaker state — green dot closed, orange arc = open with cooldown progress,
-  orange ring = half-open probing.
-- **The graveyard**: failed requests pile up under the fabric — red motes are
-  timeouts, orange are rejections, yellow are errors.
+  breaker state — green dot closed; orange arc = ejected/open with cooldown
+  progress; a client breaker also shows an orange ring while its half-open
+  probe is out.
+- **The graveyard**: failures pile up under the fabric and settle downward as
+  they fade. Squares are request fates (red timeout, orange rejection, yellow
+  error); hollow rings are TLS-permit sheds; hollow triangles are
+  connection-limit sheds.
 - **Success rate + amplification (HUD)**: rolling success rate (successes ÷
   arrivals) and attempts sent ÷ successes over the last couple of seconds.
 - **Charts** (60s rolling): latency p50/p99 vs the client-timeout line,

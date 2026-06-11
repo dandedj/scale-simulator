@@ -106,6 +106,10 @@ describe('storm-prone preset (metastability)', () => {
     // sustaining effect (retries + handshake CPU) keeps goodput collapsed.
     const after = statsBetween(sim, 30_000, 45_000);
     expect(after.successRate).toBeLessThan(0.5);
+    // ...but never a hard zero: even at peak CPU, the pool's connect timeout
+    // outlives the request timeout, so occasional (mostly resumed) handshakes
+    // land and a trickle of requests gets through on the rebuilt connections.
+    expect(after.successRate).toBeGreaterThan(0.005);
     expect(after.handshakesStarted).toBeGreaterThan(after.arrivals * 0.3);
   });
 });
@@ -142,6 +146,35 @@ describe('client circuit breaker', () => {
     expect(sim.clients.every((c) => c.breaker === 'closed')).toBe(true);
     const recovered = statsBetween(sim, 25_000, 30_000);
     expect(recovered.successRate).toBeGreaterThan(0.9);
+  });
+});
+
+describe('downstream selection', () => {
+  it('re-spreads across all downstreams after a stall clears (random IP selection)', () => {
+    const sim = newSim('healthy');
+    run(sim, 10_000);
+    sim.cfg.downstreams.responseTimeMedianMs = 600; // every downstream stalls
+    run(sim, 6_000);
+    sim.cfg.downstreams.responseTimeMedianMs = 100; // stall clears
+    // Measure how work distributes across downstreams during recovery by
+    // integrating per-downstream in-flight over the window.
+    const share = new Array(sim.downstreams.length).fill(0);
+    const STEP = 2;
+    for (let t = 0; t < 10_000; t += STEP) {
+      sim.step(STEP);
+      for (let i = 0; i < sim.downstreams.length; i++) share[i] += sim.downstreams[i].inFlight;
+    }
+    const total = share.reduce((a, b) => a + b, 0);
+    expect(total).toBeGreaterThan(0);
+    for (const s of share) {
+      // Random selection: every downstream should carry a meaningful share
+      // shortly after recovery — no sticking to the first one back.
+      expect(s / total).toBeGreaterThan(0.15);
+    }
+    // Full recovery follows once breaker re-entries and pool rebuilds settle.
+    run(sim, 10_000);
+    const recovered = statsBetween(sim, 30_000, 36_000);
+    expect(recovered.successRate).toBeGreaterThan(0.85);
   });
 });
 
@@ -208,7 +241,9 @@ describe('engine invariants', () => {
     expect(sim.requests.size).toBe(0);
     for (const ds of sim.downstreams) {
       expect(ds.inFlight).toBe(0);
-      expect(ds.probeInFlight).toBe(false);
+    }
+    for (const client of sim.clients) {
+      expect(client.probeInFlight).toBe(false);
     }
     // Conservation: after a full drain the fabric's count must equal the
     // client-side view exactly (no phantom or double-freed connections).
@@ -221,10 +256,7 @@ describe('engine invariants', () => {
     expect(sim.fabricConnCount).toBe(counted);
   });
 
-  it('breaker recovers after downstream heals, even when probe clients time out and retry', () => {
-    // The latch scenario: client timeout < downstream timeout, retries on,
-    // breaker enabled, one downstream slow enough to trip it. A probe whose
-    // client gives up and retries must hand the probe slot back.
+  it('ejected downstream cycles through cooldowns while broken and recovers after healing', () => {
     const sim = newSim('healthy', (cfg) => {
       cfg.downstreams.count = 1;
       cfg.downstreams.responseTimeMedianMs = 400;
@@ -234,12 +266,21 @@ describe('engine invariants', () => {
       cfg.downstreamPool.breakerCooldownMs = 1500;
       cfg.downstreamPool.breakerMinSamples = 6;
     });
-    run(sim, 15_000); // downstream is broken; breaker trips and probes churn
-    expect(sim.downstreams[0].breaker).not.toBe('closed');
+    // While broken, the breaker must keep cycling (eject → re-enter → re-trip),
+    // never wedging in a state that blocks recovery.
+    let sawOpen = 0;
+    let sawClosed = 0;
+    const STEP = 2;
+    for (let t = 0; t < 15_000; t += STEP) {
+      sim.step(STEP);
+      if (sim.downstreams[0].breaker === 'open') sawOpen++;
+      else sawClosed++;
+    }
+    expect(sawOpen).toBeGreaterThan(0);
+    expect(sawClosed).toBeGreaterThan(0);
     sim.cfg.downstreams.responseTimeMedianMs = 50; // downstream heals
     run(sim, 20_000);
     expect(sim.downstreams[0].breaker).toBe('closed');
-    expect(sim.downstreams[0].probeInFlight).toBe(false);
     const recovered = statsBetween(sim, 30_000, 35_000);
     expect(recovered.successRate).toBeGreaterThan(0.8);
   });

@@ -25,6 +25,7 @@ function base(): SimulationConfig {
       poolSize: 6,
       requestTimeoutMs: 300,
       poolAcquireTimeoutMs: 250,
+      connectTimeoutMs: 1000,
       maxRetries: 1,
       retryBackoffBaseMs: 25,
       retryJitter: true,
@@ -40,9 +41,9 @@ function base(): SimulationConfig {
       tlsHandshakeMs: 30,
       tlsResumptionRate: 0.7,
       tlsResumptionCostFactor: 0.4,
-      processingMs: 2,
+      processingMs: 4,
       cpuCapacity: 3000,
-      tlsCpuCost: 50,
+      tlsCpuCost: 60,
       errorPacingEnabled: true,
       errorPacingDelayMs: 150,
     },
@@ -120,6 +121,7 @@ export const PRESETS: Preset[] = [
       c.clients.poolSize = 12;
       c.clients.requestTimeoutMs = 200;
       c.clients.poolAcquireTimeoutMs = 150;
+      c.clients.connectTimeoutMs = 800;
       c.clients.maxRetries = 3;
       c.clients.retryBackoffBaseMs = 20;
       c.clients.retryJitter = false;

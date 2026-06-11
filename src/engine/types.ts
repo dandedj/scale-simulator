@@ -21,6 +21,13 @@ export interface ClientConfig {
   requestTimeoutMs: number;
   /** Max time a request waits for a free pooled connection before failing (ms). */
   poolAcquireTimeoutMs: number;
+  /**
+   * The pool abandons a connection attempt after this long (ms). Separate
+   * from (and usually much longer than) the request timeout: the pool keeps
+   * establishing connections for future requests even after the request
+   * that triggered the attempt has given up.
+   */
+  connectTimeoutMs: number;
   /** Retries after a timeout or error (0 = fire once, never retry). */
   maxRetries: number;
   /** Base delay before the first retry (ms); doubles each attempt. */

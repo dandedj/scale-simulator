@@ -14,18 +14,19 @@ import {
   type ConnSim,
   type RequestSim,
 } from '../engine/simulation';
-import type { RequestFate } from '../engine/types';
 import { loadColor, SEMANTIC, SURFACE, withAlpha } from './colors';
 import { clamp01, clientLane, computeLayout, dsLane, lerp, type SceneLayout } from './layout';
 
 const FATE_LINGER_MS = 250;
+
+type MoteKind = 'timeout' | 'rejected' | 'error' | 'shedTls' | 'shedConn';
 
 interface GraveMote {
   x: number;
   y0: number;
   y1: number;
   bornAt: number; // sim time
-  fate: RequestFate;
+  kind: MoteKind;
 }
 
 export class Renderer {
@@ -35,6 +36,8 @@ export class Renderer {
   private seenFates = new Map<number, number>(); // request id → fateTime handled
   private graveyard: GraveMote[] = [];
   private graveSeq = 0;
+  private seenShedTls = 0;
+  private seenShedConn = 0;
   private canvas: HTMLCanvasElement;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -58,6 +61,8 @@ export class Renderer {
     this.seenFates.clear();
     this.graveyard = [];
     this.graveSeq = 0;
+    this.seenShedTls = 0;
+    this.seenShedConn = 0;
   }
 
   draw(sim: Simulation): void {
@@ -74,7 +79,7 @@ export class Renderer {
     this.drawQueues(sim, layout);
     this.collectFates(sim, layout);
     this.drawParticles(sim, layout);
-    this.drawGraveyard(now);
+    this.drawGraveyard(layout, now);
     if (sim.stormActive()) this.drawStormFrame(now);
     if (sim.pulseFactor > 1) this.drawPulseChip(sim, layout);
   }
@@ -423,7 +428,8 @@ export class Renderer {
         ctx.beginPath();
         ctx.arc(bx, by, 4, 0, Math.PI * 2);
         ctx.fill();
-      } else if (ds.breaker === 'open') {
+      } else {
+        // Ejected from rotation; arc shows progress toward re-entry.
         const frac = clamp01((sim.now - ds.breakerSince) / sim.cfg.downstreamPool.breakerCooldownMs);
         ctx.strokeStyle = SEMANTIC.shed;
         ctx.lineWidth = 2;
@@ -433,19 +439,7 @@ export class Renderer {
         ctx.font = '600 9px "IBM Plex Mono", monospace';
         ctx.fillStyle = SEMANTIC.shed;
         ctx.textAlign = 'right';
-        ctx.fillText('OPEN', bx - 9, by + 3);
-        ctx.textAlign = 'left';
-      } else {
-        const p = ((sim.now / 400) % 1) * Math.PI * 2;
-        ctx.strokeStyle = withAlpha(SEMANTIC.shed, 0.6 + 0.4 * Math.sin(p));
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(bx, by, 5, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.font = '600 9px "IBM Plex Mono", monospace';
-        ctx.fillStyle = SEMANTIC.shed;
-        ctx.textAlign = 'right';
-        ctx.fillText('PROBE', bx - 9, by + 3);
+        ctx.fillText('EJECTED', bx - 9, by + 3);
         ctx.textAlign = 'left';
       }
     }
@@ -479,26 +473,38 @@ export class Renderer {
 
   // -- Particles -----------------------------------------------------------------
 
-  /** Note newly-resolved requests → spawn graveyard motes. */
+  /** Drop a mote into the graveyard band below the fabric (stacks downward). */
+  private spawnMote(sim: Simulation, l: SceneLayout, kind: MoteKind): void {
+    const g = l.graveyard;
+    this.graveSeq++;
+    const scatter = (((this.graveSeq * 2654435761) >>> 8) % 1000) / 1000;
+    this.graveyard.push({
+      x: g.x + 8 + scatter * (g.w - 16),
+      y0: l.fabric.y + l.fabric.h,
+      y1: g.y + 4 + ((this.graveSeq * 7919) % 6) * 4,
+      bornAt: sim.now,
+      kind,
+    });
+    if (this.graveyard.length > 320) this.graveyard.shift();
+  }
+
+  /** Note newly-resolved requests and shed connections → graveyard motes. */
   private collectFates(sim: Simulation, l: SceneLayout): void {
     for (const req of sim.requests) {
       if (!req.fate || req.fate === 'success') continue;
       const seen = this.seenFates.get(req.id);
       if (seen === req.fateTime) continue;
       this.seenFates.set(req.id, req.fateTime);
-      const g = l.graveyard;
-      this.graveSeq++;
-      const scatter = ((this.graveSeq * 2654435761) >>> 8) % 1000 / 1000;
-      const pileRow = Math.floor(this.graveyard.length / 40);
-      this.graveyard.push({
-        x: g.x + 8 + scatter * (g.w - 16),
-        y0: l.fabric.y + l.fabric.h,
-        y1: g.y + 12 - pileRow * 5 + ((this.graveSeq * 7919) % 4),
-        bornAt: sim.now,
-        fate: req.fate,
-      });
-      if (this.graveyard.length > 320) this.graveyard.shift();
+      this.spawnMote(sim, l, req.fate);
     }
+    // Connection sheds (RSTs) are events, not requests — diff the totals.
+    const t = sim.metrics.totals;
+    const newTls = Math.min(20, t.shedTls - this.seenShedTls);
+    const newConn = Math.min(20, t.shedConnLimit - this.seenShedConn);
+    for (let i = 0; i < newTls; i++) this.spawnMote(sim, l, 'shedTls');
+    for (let i = 0; i < newConn; i++) this.spawnMote(sim, l, 'shedConn');
+    this.seenShedTls = t.shedTls;
+    this.seenShedConn = t.shedConnLimit;
     // Bound the bookkeeping map.
     if (this.seenFates.size > 4096) {
       const live = new Set<number>();
@@ -702,20 +708,61 @@ export class Renderer {
 
   // -- Graveyard, storm frame, pulse chip -------------------------------------------
 
-  private drawGraveyard(now: number): void {
+  private drawGraveyard(l: SceneLayout, now: number): void {
     const ctx = this.ctx;
     const FALL_MS = 500;
     const FADE_MS = 25_000;
+    const DRIFT_PX = 12;
+    const floor = l.height - 8;
     for (const m of this.graveyard) {
       const age = now - m.bornAt;
       if (age > FADE_MS) continue;
-      const y = age < FALL_MS ? lerp(m.y0, m.y1, clamp01(age / FALL_MS)) : m.y1;
-      const alpha = age < FALL_MS ? 0.9 : 0.9 * (1 - (age - FALL_MS) / FADE_MS);
-      const color =
-        m.fate === 'timeout' ? SEMANTIC.timeout : m.fate === 'rejected' ? SEMANTIC.shed : SEMANTIC.error;
-      ctx.fillStyle = withAlpha(color, alpha);
-      const x = y === m.y1 ? m.x : m.x + Math.sin((now - m.bornAt) / 60) * 2;
-      ctx.fillRect(x, y, 3, 3);
+      let x = m.x;
+      let y: number;
+      let alpha: number;
+      if (age < FALL_MS) {
+        y = lerp(m.y0, m.y1, clamp01(age / FALL_MS));
+        x += Math.sin(age / 60) * 2;
+        alpha = 0.9;
+      } else {
+        // Settled motes keep drifting slowly downward as they fade.
+        const settled = (age - FALL_MS) / (FADE_MS - FALL_MS);
+        y = Math.min(floor, m.y1 + settled * DRIFT_PX);
+        alpha = 0.9 * (1 - settled);
+      }
+      switch (m.kind) {
+        case 'timeout':
+          ctx.fillStyle = withAlpha(SEMANTIC.timeout, alpha);
+          ctx.fillRect(x, y, 3, 3);
+          break;
+        case 'rejected':
+          ctx.fillStyle = withAlpha(SEMANTIC.shed, alpha);
+          ctx.fillRect(x, y, 3, 3);
+          break;
+        case 'error':
+          ctx.fillStyle = withAlpha(SEMANTIC.error, alpha);
+          ctx.fillRect(x, y, 3, 3);
+          break;
+        case 'shedTls':
+          // Shed TLS connection: hollow ring (a handshake that never was).
+          ctx.strokeStyle = withAlpha(SEMANTIC.tlsPulse, alpha);
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.arc(x + 1.5, y + 1.5, 2.6, 0, Math.PI * 2);
+          ctx.stroke();
+          break;
+        case 'shedConn':
+          // Shed at the connection limit: hollow triangle (bounced at the door).
+          ctx.strokeStyle = withAlpha(SEMANTIC.shed, alpha);
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.moveTo(x + 1.5, y - 2);
+          ctx.lineTo(x + 4.5, y + 3);
+          ctx.lineTo(x - 1.5, y + 3);
+          ctx.closePath();
+          ctx.stroke();
+          break;
+      }
     }
   }
 

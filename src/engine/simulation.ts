@@ -180,8 +180,6 @@ export class RequestSim {
   timeoutEvent: ScheduledEvent | null = null;
   acquireEvent: ScheduledEvent | null = null;
   dsTimeoutEvent: ScheduledEvent | null = null;
-  /** True while this request is a downstream breaker's single half-open probe. */
-  isProbe = false;
   /** True while this request is its client breaker's single half-open probe. */
   isClientProbe = false;
   clientId: number;
@@ -252,9 +250,13 @@ interface PermitWaiter {
 
 export class DownstreamSim {
   inFlight = 0;
+  /**
+   * Ejection-style breaker (no half-open probes): open removes the
+   * downstream from the random rotation; after the cooldown it re-enters
+   * directly with a fresh window, re-tripping quickly if still broken.
+   */
   breaker: BreakerState = 'closed';
   breakerSince = 0;
-  probeInFlight = false;
   window = new BreakerWindow();
   /** Fabric-side connections to this downstream. */
   conns: ConnSim[] = [];
@@ -450,11 +452,6 @@ export class Simulation {
     if (client.arrivalEvent) client.arrivalEvent.active = false;
     for (const req of this.requests) {
       if (req.clientId === client.id && !req.fate) {
-        if (req.isProbe) {
-          const ds = this.downstreams[req.downstreamId];
-          if (ds) ds.probeInFlight = false;
-          req.isProbe = false;
-        }
         req.attempt += 1000; // invalidate all in-flight continuations
         this.requests.delete(req);
       }
@@ -470,7 +467,6 @@ export class Simulation {
     for (const entry of ds.queue) {
       this.fabricInFlight--;
       if (entry.expiry) entry.expiry.active = false;
-      this.releaseProbe(entry.req, ds);
       if (entry.req.attempt === entry.attempt && !entry.req.fate) {
         this.respondError(entry.req);
       }
@@ -585,8 +581,11 @@ export class Simulation {
     const conn = new ConnSim(client.id, -1);
     conn.setState('connecting', this.now);
     client.conns.push(conn);
-    // The client abandons the attempt if it takes longer than a request timeout.
-    this.queue.schedule(this.now + this.cfg.clients.requestTimeoutMs, () =>
+    // The pool's connect timeout is independent of (and longer than) the
+    // request timeout: establishment continues for future requests even
+    // after the triggering request gives up. This is why some handshakes
+    // still land under heavy contention and a trickle of traffic survives.
+    this.queue.schedule(this.now + this.cfg.clients.connectTimeoutMs, () =>
       this.onConnectTimeout(client, conn),
     );
     // The SYN reaches the fabric after one network hop.
@@ -712,13 +711,8 @@ export class Simulation {
   }
 
   private beginRetry(client: ClientSim, req: RequestSim): void {
-    // If this request owned a half-open breaker probe, hand the slot back —
-    // otherwise that breaker is wedged out of rotation forever.
-    if (req.isProbe) {
-      const ds = this.downstreams[req.downstreamId];
-      if (ds) ds.probeInFlight = false;
-      req.isProbe = false;
-    }
+    // If this request owned the client breaker's half-open probe, hand the
+    // slot back — otherwise the breaker is wedged out of rotation forever.
     if (req.isClientProbe) {
       client.probeInFlight = false;
       req.isClientProbe = false;
@@ -863,12 +857,11 @@ export class Simulation {
 
   private routeToDownstream(req: RequestSim): void {
     const p = this.cfg.downstreamPool;
-    const healthy = this.downstreams.filter((ds) => {
-      if (!p.circuitBreakerEnabled) return true;
-      if (ds.breaker === 'closed') return true;
-      if (ds.breaker === 'halfOpen' && !ds.probeInFlight) return true;
-      return false;
-    });
+    // Random IP selection across all downstreams in rotation (ejected ones
+    // are skipped until their cooldown re-admits them).
+    const healthy = this.downstreams.filter(
+      (ds) => !p.circuitBreakerEnabled || ds.breaker === 'closed',
+    );
     if (healthy.length === 0) {
       this.fabricInFlight--;
       this.throttledLog('nods', 2000, 'critical', 'All downstreams circuit-broken — failing fast');
@@ -877,10 +870,6 @@ export class Simulation {
     }
     const ds = healthy[Math.floor(this.rng.next() * healthy.length)];
     req.downstreamId = ds.id;
-    if (this.cfg.downstreamPool.circuitBreakerEnabled && ds.breaker === 'halfOpen') {
-      ds.probeInFlight = true;
-      req.isProbe = true;
-    }
     const deadline = this.now + p.requestTimeoutMs;
     const idle = ds.conns.find((c) => c.state === 'idle');
     if (idle) {
@@ -904,7 +893,6 @@ export class Simulation {
     if (idx < 0) return;
     ds.queue.splice(idx, 1);
     this.fabricInFlight--;
-    this.releaseProbe(entry.req, ds);
     if (entry.req.attempt !== entry.attempt || entry.req.fate) return;
     this.respondError(entry.req);
   }
@@ -934,7 +922,6 @@ export class Simulation {
         // The queue did nothing but delay the discovery — the AWS lesson on
         // why queues must be bounded by time.
         this.fabricInFlight--;
-        this.releaseProbe(req, ds);
         continue;
       }
       this.forwardToDownstream(req, ds, idle, deadline);
@@ -989,7 +976,6 @@ export class Simulation {
     if (req.attempt !== attempt) {
       // The connection is fine, but this response belongs to a dead attempt.
       this.fabricInFlight--;
-      this.releaseProbe(req, ds);
       return;
     }
     if (req.dsTimeoutEvent) {
@@ -1028,47 +1014,25 @@ export class Simulation {
     this.respondError(req);
   }
 
-  private recordBreakerResult(ds: DownstreamSim, req: RequestSim, ok: boolean): void {
+  private recordBreakerResult(ds: DownstreamSim, _req: RequestSim, ok: boolean): void {
     const p = this.cfg.downstreamPool;
-    if (req.isProbe) {
-      req.isProbe = false;
-      ds.probeInFlight = false;
-      if (ok) {
-        ds.breaker = 'closed';
-        ds.breakerSince = this.now;
-        ds.window.reset();
-        this.metrics.log(this.now, 'info', `Downstream ${ds.id + 1} breaker closed (probe succeeded)`);
-      } else {
-        ds.breaker = 'open';
-        ds.breakerSince = this.now;
-        this.scheduleBreakerProbe(ds);
-      }
-      return;
-    }
     ds.window.record(this.now, ok);
     if (!p.circuitBreakerEnabled || ds.breaker !== 'closed') return;
     const { failures, total } = ds.window.ratio(this.now);
     if (total >= p.breakerMinSamples && failures / total >= p.breakerFailureRatio) {
       ds.breaker = 'open';
       ds.breakerSince = this.now;
-      this.metrics.log(this.now, 'warn', `Downstream ${ds.id + 1} circuit breaker OPEN`);
-      this.scheduleBreakerProbe(ds);
-    }
-  }
-
-  private scheduleBreakerProbe(ds: DownstreamSim): void {
-    this.queue.schedule(this.now + this.cfg.downstreamPool.breakerCooldownMs, () => {
-      if (ds.breaker === 'open') {
-        ds.breakerSince = this.now;
-        ds.breaker = 'halfOpen';
-      }
-    });
-  }
-
-  private releaseProbe(req: RequestSim, ds: DownstreamSim): void {
-    if (req.isProbe) {
-      req.isProbe = false;
-      ds.probeInFlight = false;
+      this.metrics.log(this.now, 'warn', `Downstream ${ds.id + 1} ejected (breaker open)`);
+      this.queue.schedule(this.now + p.breakerCooldownMs, () => {
+        // Ejection-style re-entry: rejoin the random rotation with a clean
+        // window. If it is still broken, the window re-trips it quickly.
+        if (ds.breaker === 'open') {
+          ds.breaker = 'closed';
+          ds.breakerSince = this.now;
+          ds.window.reset();
+          this.metrics.log(this.now, 'info', `Downstream ${ds.id + 1} re-entered rotation`);
+        }
+      });
     }
   }
 
