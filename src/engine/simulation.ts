@@ -1,0 +1,1064 @@
+/**
+ * The discrete-event simulation of clients → RTB Fabric → downstreams.
+ *
+ * Everything runs on a virtual clock in *real-world* milliseconds; the app
+ * slows playback via a time-dilation factor outside this module.
+ *
+ * The storm mechanism is not scripted — it emerges from three coupled rules:
+ *   1. A request timeout poisons its connection (HTTP/1.1 semantics), so the
+ *      client must tear it down and eventually re-handshake.
+ *   2. TLS handshakes cost ~25x the CPU of proxying a request over a warm
+ *      connection (measured range 15–70x; see Tempesta kernel-TLS study).
+ *   3. Fabric CPU is shared: when demanded work exceeds capacity, *every*
+ *      in-flight operation stretches proportionally (processor sharing).
+ * Timeouts → teardown → handshakes → CPU contention → slower everything →
+ * more timeouts. The protections each break one link of that loop.
+ *
+ * Concurrency note: requests are reused across retry attempts, so every
+ * scheduled continuation captures the attempt number it belongs to and
+ * checks staleness before acting. Storms are made of exactly these races —
+ * responses arriving for clients that already gave up — and the model
+ * accounts for that wasted work explicitly.
+ */
+
+import { EventQueue, type ScheduledEvent } from './eventQueue';
+import { MetricsCollector } from './metrics';
+import { Rng } from './rng';
+import type {
+  BreakerState,
+  ConnectionState,
+  FabricView,
+  RequestFate,
+  RequestPhase,
+  SimulationConfig,
+} from './types';
+
+// --- Fixed model constants (deliberately not knobs — they set the stage) ---
+
+/** One-way network latency, client ↔ fabric (ms). */
+export const NET_CLIENT_FABRIC_MS = 12;
+/** One-way network latency, fabric ↔ downstream (ms). */
+export const NET_FABRIC_DS_MS = 10;
+/** Max integration slice for the CPU model (ms of sim time). */
+const SLICE_MS = 1;
+/** How long a closing connection lingers for the renderer (ms). */
+const CLOSE_LINGER_MS = 150;
+/** How long a resolved request's fate flash lingers (ms). */
+const FATE_LINGER_MS = 250;
+/** Client-side pause after a refused/failed connect before trying again (ms). */
+const CONNECT_BACKOFF_MS = 120;
+/** Cap on exponential retry backoff (ms). */
+const RETRY_BACKOFF_CAP_MS = 2000;
+/**
+ * An abandoned inbound handshake (client gave up while queued) still burns
+ * this fraction of the handshake's CPU before the fabric notices.
+ */
+const ABANDONED_HANDSHAKE_WORK = 0.5;
+/** Outbound (fabric→downstream) TLS client work relative to inbound server work. */
+const OUTBOUND_TLS_CPU_FACTOR = 0.5;
+/** Downstream errors return faster than successes (fraction of sampled time). */
+const ERROR_TIME_FACTOR = 0.5;
+/** Log-normal samples are clamped to this multiple of the median. */
+const LATENCY_CLAMP_FACTOR = 25;
+/** Sim-time width of one circuit-breaker window bucket (ms). */
+const BREAKER_BUCKET_MS = 250;
+const BREAKER_WINDOW_BUCKETS = 8;
+
+// ---------------------------------------------------------------------------
+// CPU model — processor sharing
+// ---------------------------------------------------------------------------
+
+interface CpuOp {
+  /** Nominal duration remaining (ms at zero contention). */
+  remainingMs: number;
+  /** Work-units demanded per nominal ms (1 for requests, much more for TLS). */
+  ratePerMs: number;
+  onComplete: () => void;
+}
+
+class CpuScheduler {
+  private ops = new Set<CpuOp>();
+  private capacityPerMs: number;
+
+  constructor(unitsPerSec: number) {
+    this.capacityPerMs = unitsPerSec / 1000;
+  }
+
+  setCapacity(unitsPerSec: number): void {
+    this.capacityPerMs = unitsPerSec / 1000;
+  }
+
+  add(durationMs: number, totalWork: number, onComplete: () => void): CpuOp {
+    const op: CpuOp = {
+      remainingMs: Math.max(0.01, durationMs),
+      ratePerMs: totalWork / Math.max(0.01, durationMs),
+      onComplete,
+    };
+    this.ops.add(op);
+    return op;
+  }
+
+  demandPerMs(): number {
+    let d = 0;
+    for (const op of this.ops) d += op.ratePerMs;
+    return d;
+  }
+
+  /** Demanded work / capacity. Values > 1 mean everything is stretching. */
+  utilization(): number {
+    return this.demandPerMs() / this.capacityPerMs;
+  }
+
+  /** Multiplier applied to every in-flight operation's duration right now. */
+  slowdownFactor(): number {
+    return Math.max(1, this.utilization());
+  }
+
+  /** Advance all ops by dt sim-ms; fire completions. */
+  advance(dtMs: number): void {
+    if (this.ops.size === 0) return;
+    const speed = Math.min(1, this.capacityPerMs / this.demandPerMs());
+    const progressed = dtMs * speed;
+    const done: CpuOp[] = [];
+    for (const op of this.ops) {
+      op.remainingMs -= progressed;
+      if (op.remainingMs <= 0) done.push(op);
+    }
+    for (const op of done) {
+      this.ops.delete(op);
+      op.onComplete();
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Entities
+// ---------------------------------------------------------------------------
+
+let nextConnId = 1;
+let nextRequestId = 1;
+
+export class ConnSim {
+  id = nextConnId++;
+  state: ConnectionState = 'connecting';
+  stateSince = 0;
+  /** Client gave up on this connection attempt; finishing work is wasted. */
+  abandoned = false;
+  clientId: number;
+  downstreamId: number;
+
+  constructor(clientId: number, downstreamId: number) {
+    this.clientId = clientId;
+    this.downstreamId = downstreamId;
+  }
+
+  setState(state: ConnectionState, now: number): void {
+    this.state = state;
+    this.stateSince = now;
+  }
+}
+
+export class RequestSim {
+  id = nextRequestId++;
+  downstreamId = -1;
+  phase: RequestPhase = 'waitingForConnection';
+  phaseSince = 0;
+  phaseUntil = 0;
+  attempt = 0;
+  fate: RequestFate | null = null;
+  fateTime = 0;
+  /** Sim time the current attempt was put on the wire. */
+  sentAt = 0;
+  /** Client-side connection carrying this attempt. */
+  conn: ConnSim | null = null;
+  /** Fabric→downstream connection carrying this attempt. */
+  dsConn: ConnSim | null = null;
+  timeoutEvent: ScheduledEvent | null = null;
+  acquireEvent: ScheduledEvent | null = null;
+  dsTimeoutEvent: ScheduledEvent | null = null;
+  /** True while this request is the single half-open breaker probe. */
+  isProbe = false;
+  clientId: number;
+
+  constructor(clientId: number) {
+    this.clientId = clientId;
+  }
+
+  setPhase(phase: RequestPhase, now: number, until: number): void {
+    this.phase = phase;
+    this.phaseSince = now;
+    this.phaseUntil = until;
+  }
+}
+
+class BreakerWindow {
+  successes = new Array<number>(BREAKER_WINDOW_BUCKETS).fill(0);
+  failures = new Array<number>(BREAKER_WINDOW_BUCKETS).fill(0);
+  private headTime = 0;
+  private head = 0;
+
+  record(now: number, ok: boolean): void {
+    this.rotate(now);
+    if (ok) this.successes[this.head]++;
+    else this.failures[this.head]++;
+  }
+
+  ratio(now: number): { failures: number; total: number } {
+    this.rotate(now);
+    let s = 0;
+    let f = 0;
+    for (let i = 0; i < BREAKER_WINDOW_BUCKETS; i++) {
+      s += this.successes[i];
+      f += this.failures[i];
+    }
+    return { failures: f, total: s + f };
+  }
+
+  reset(): void {
+    this.successes.fill(0);
+    this.failures.fill(0);
+  }
+
+  private rotate(now: number): void {
+    while (now >= this.headTime + BREAKER_BUCKET_MS) {
+      this.head = (this.head + 1) % BREAKER_WINDOW_BUCKETS;
+      this.successes[this.head] = 0;
+      this.failures[this.head] = 0;
+      this.headTime += BREAKER_BUCKET_MS;
+    }
+  }
+}
+
+/** A request waiting (with its attempt number) for a downstream connection. */
+interface DsQueueEntry {
+  req: RequestSim;
+  attempt: number;
+  /** Absolute sim time at which the fabric abandons this downstream call. */
+  deadline: number;
+  expiry: ScheduledEvent | null;
+}
+
+export class DownstreamSim {
+  inFlight = 0;
+  breaker: BreakerState = 'closed';
+  breakerSince = 0;
+  probeInFlight = false;
+  window = new BreakerWindow();
+  /** Fabric-side connections to this downstream. */
+  conns: ConnSim[] = [];
+  /** Requests waiting for a free fabric→downstream connection. */
+  queue: DsQueueEntry[] = [];
+  id: number;
+
+  constructor(id: number) {
+    this.id = id;
+  }
+
+  loadFactor(capacity: number): number {
+    return Math.max(1, this.inFlight / Math.max(1, capacity));
+  }
+}
+
+export class ClientSim {
+  conns: ConnSim[] = [];
+  waiting: RequestSim[] = [];
+  pendingRetries = 0;
+  /** No new connection attempts until this time (post-refusal backoff). */
+  backoffUntil = 0;
+  arrivalEvent: ScheduledEvent | null = null;
+  id: number;
+
+  constructor(id: number) {
+    this.id = id;
+  }
+
+  idleConn(): ConnSim | null {
+    return this.conns.find((c) => c.state === 'idle') ?? null;
+  }
+
+  connectingCount(): number {
+    return this.conns.filter((c) => c.state === 'connecting' || c.state === 'handshaking').length;
+  }
+
+  liveConnCount(): number {
+    return this.conns.filter((c) => c.state !== 'closing').length;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Simulation
+// ---------------------------------------------------------------------------
+
+export class Simulation {
+  now = 0;
+  readonly rng: Rng;
+  readonly queue = new EventQueue();
+  readonly metrics = new MetricsCollector();
+  readonly cpu: CpuScheduler;
+
+  clients: ClientSim[] = [];
+  downstreams: DownstreamSim[] = [];
+  /** All live requests (renderer iterates this). */
+  requests = new Set<RequestSim>();
+
+  // Fabric state
+  /** Inbound connections established or handshaking (counts toward the cap). */
+  fabricConnCount = 0;
+  handshakesActive = 0;
+  acceptQueue: ConnSim[] = [];
+  /** Requests inside the fabric (processing, queued, or at a downstream). */
+  fabricInFlight = 0;
+
+  // Pulse state
+  pulseFactor = 1;
+  pulseUntil = 0;
+
+  // Log throttling / condition edge detection
+  private lastLogAt: Record<string, number> = {};
+  private shedWasActive = false;
+  private stormWasActive = false;
+  private cpuSaturatedSince: number | null = null;
+
+  cfg: SimulationConfig;
+
+  constructor(cfg: SimulationConfig) {
+    this.cfg = cfg;
+    this.rng = new Rng(cfg.seed);
+    this.cpu = new CpuScheduler(cfg.fabric.cpuCapacity);
+    for (let i = 0; i < cfg.clients.count; i++) this.addClient();
+    for (let i = 0; i < cfg.downstreams.count; i++) this.downstreams.push(new DownstreamSim(i));
+    this.prewarm();
+  }
+
+  /**
+   * Start with warm pools, as a production fabric runs. Without this, t=0 is
+   * itself a thundering herd of cold handshakes — a real failure mode, but
+   * not the scenario the presets are staged to teach.
+   */
+  private prewarm(): void {
+    const perClient = Math.min(
+      this.cfg.clients.poolSize,
+      Math.ceil(this.cfg.clients.requestRatePerSec * 0.2) + 1,
+    );
+    for (const client of this.clients) {
+      for (let i = 0; i < perClient; i++) {
+        if (this.fabricConnCount >= this.cfg.fabric.maxConnections) break;
+        const conn = new ConnSim(client.id, -1);
+        conn.setState('idle', 0);
+        client.conns.push(conn);
+        this.fabricConnCount++;
+      }
+    }
+    const totalRate = this.cfg.clients.count * this.cfg.clients.requestRatePerSec;
+    const perDs = Math.min(
+      this.cfg.downstreamPool.poolSizePerDownstream,
+      Math.ceil((totalRate / Math.max(1, this.cfg.downstreams.count)) * 0.2) + 1,
+    );
+    for (const ds of this.downstreams) {
+      for (let i = 0; i < perDs; i++) {
+        const conn = new ConnSim(-1, ds.id);
+        conn.setState('idle', 0);
+        ds.conns.push(conn);
+      }
+    }
+  }
+
+  // -- Time ------------------------------------------------------------------
+
+  /** Advance the simulation by dt virtual milliseconds. */
+  step(dtMs: number): void {
+    let remaining = dtMs;
+    while (remaining > 0) {
+      const slice = Math.min(SLICE_MS, remaining);
+      this.cpu.advance(slice);
+      this.now += slice;
+      remaining -= slice;
+      let ev: ScheduledEvent | null;
+      while ((ev = this.queue.popDue(this.now)) !== null) ev.fire();
+    }
+    if (this.pulseFactor !== 1 && this.now >= this.pulseUntil) {
+      this.pulseFactor = 1;
+      this.metrics.log(this.now, 'info', 'Traffic pulse ended');
+      this.rescheduleArrivals();
+    }
+    this.metrics.advance(this.now, {
+      connections: this.fabricConnCount,
+      queueDepth: this.totalDsQueueDepth(),
+      cpu: this.cpu.utilization(),
+      handshakesActive: this.handshakesActive,
+    });
+    this.detectConditions();
+  }
+
+  /** Multiply client arrival rates by `factor` for `durationMs` of sim time. */
+  triggerPulse(factor: number, durationMs: number): void {
+    this.pulseFactor = factor;
+    this.pulseUntil = this.now + durationMs;
+    this.metrics.log(this.now, 'warn', `Traffic pulse: ${factor}x for ${(durationMs / 1000).toFixed(1)}s`);
+    this.rescheduleArrivals();
+  }
+
+  /** Re-sample every client's next arrival (call after rate changes). */
+  rescheduleArrivals(): void {
+    for (const client of this.clients) {
+      if (client.arrivalEvent) client.arrivalEvent.active = false;
+      this.scheduleArrival(client);
+    }
+  }
+
+  /** Apply live structural config changes (entity counts, CPU capacity). */
+  applyStructure(): void {
+    this.cpu.setCapacity(this.cfg.fabric.cpuCapacity);
+    while (this.clients.length < this.cfg.clients.count) this.addClient();
+    while (this.clients.length > this.cfg.clients.count) this.removeClient();
+    while (this.downstreams.length < this.cfg.downstreams.count) {
+      this.downstreams.push(new DownstreamSim(this.downstreams.length));
+    }
+    while (this.downstreams.length > this.cfg.downstreams.count) this.removeDownstream();
+  }
+
+  // -- Clients -----------------------------------------------------------------
+
+  private addClient(): void {
+    const client = new ClientSim(this.clients.length);
+    this.clients.push(client);
+    this.scheduleArrival(client);
+  }
+
+  private removeClient(): void {
+    const client = this.clients.pop();
+    if (!client) return;
+    if (client.arrivalEvent) client.arrivalEvent.active = false;
+    for (const req of this.requests) {
+      if (req.clientId === client.id && !req.fate) {
+        if (req.isProbe) {
+          const ds = this.downstreams[req.downstreamId];
+          if (ds) ds.probeInFlight = false;
+          req.isProbe = false;
+        }
+        req.attempt += 1000; // invalidate all in-flight continuations
+        this.requests.delete(req);
+      }
+    }
+    for (const conn of [...client.conns]) this.teardownClientConn(client, conn);
+  }
+
+  private removeDownstream(): void {
+    const ds = this.downstreams.pop();
+    if (!ds) return;
+    // Every queued entry holds exactly one outstanding fabricInFlight count,
+    // dead or alive — drop them all; only live ones get an answer.
+    for (const entry of ds.queue) {
+      this.fabricInFlight--;
+      if (entry.expiry) entry.expiry.active = false;
+      this.releaseProbe(entry.req, ds);
+      if (entry.req.attempt === entry.attempt && !entry.req.fate) {
+        this.respondError(entry.req, 'error');
+      }
+    }
+    ds.queue = [];
+  }
+
+  private scheduleArrival(client: ClientSim): void {
+    const rate = this.cfg.clients.requestRatePerSec * this.pulseFactor;
+    if (rate <= 0) return;
+    const wait = this.rng.exponential(1000 / rate);
+    client.arrivalEvent = this.queue.schedule(this.now + wait, () => {
+      this.scheduleArrival(client);
+      this.onArrival(client);
+    });
+  }
+
+  private onArrival(client: ClientSim): void {
+    this.metrics.countArrival();
+    const req = new RequestSim(client.id);
+    this.requests.add(req);
+    this.startAttempt(client, req);
+  }
+
+  /** Begin an attempt (first try or retry): find a connection, arm timers. */
+  private startAttempt(client: ClientSim, req: RequestSim): void {
+    const a = req.attempt;
+    req.setPhase('waitingForConnection', this.now, this.now + this.cfg.clients.poolAcquireTimeoutMs);
+    req.acquireEvent = this.queue.schedule(this.now + this.cfg.clients.poolAcquireTimeoutMs, () => {
+      if (req.attempt !== a || req.fate || req.conn) return;
+      client.waiting = client.waiting.filter((r) => r !== req);
+      this.metrics.countRejected();
+      this.resolve(req, 'rejected');
+    });
+    this.dispatch(client, req);
+  }
+
+  /** Try to put a request on a connection; otherwise leave it waiting. */
+  private dispatch(client: ClientSim, req: RequestSim): void {
+    const idle = client.idleConn();
+    if (idle) {
+      this.sendOnConnection(client, req, idle);
+      return;
+    }
+    if (!client.waiting.includes(req)) client.waiting.push(req);
+    this.maybeOpenConnection(client);
+  }
+
+  private maybeOpenConnection(client: ClientSim): void {
+    if (this.now < client.backoffUntil) return;
+    if (client.liveConnCount() >= this.cfg.clients.poolSize) return;
+    if (client.connectingCount() >= client.waiting.length) return;
+    const conn = new ConnSim(client.id, -1);
+    conn.setState('connecting', this.now);
+    client.conns.push(conn);
+    // The client abandons the attempt if it takes longer than a request timeout.
+    this.queue.schedule(this.now + this.cfg.clients.requestTimeoutMs, () =>
+      this.onConnectTimeout(client, conn),
+    );
+    // The SYN reaches the fabric after one network hop.
+    this.queue.schedule(this.now + NET_CLIENT_FABRIC_MS, () => this.fabricAccept(client, conn));
+  }
+
+  private onConnectTimeout(client: ClientSim, conn: ConnSim): void {
+    if (conn.state !== 'connecting' && conn.state !== 'handshaking') return;
+    if (!client.conns.includes(conn)) return;
+    // The client walks away; the fabric will discover this only after doing
+    // (wasted) handshake work. Client-side, the pool slot frees immediately.
+    conn.abandoned = true;
+    client.conns = client.conns.filter((c) => c !== conn);
+    client.backoffUntil = Math.max(client.backoffUntil, this.now + CONNECT_BACKOFF_MS);
+  }
+
+  private sendOnConnection(client: ClientSim, req: RequestSim, conn: ConnSim): void {
+    const a = req.attempt;
+    conn.setState('busy', this.now);
+    req.conn = conn;
+    req.sentAt = this.now;
+    if (req.acquireEvent) {
+      req.acquireEvent.active = false;
+      req.acquireEvent = null;
+    }
+    client.waiting = client.waiting.filter((r) => r !== req);
+    req.setPhase('travelingToFabric', this.now, this.now + NET_CLIENT_FABRIC_MS);
+    req.timeoutEvent = this.queue.schedule(this.now + this.cfg.clients.requestTimeoutMs, () => {
+      if (req.attempt !== a || req.fate) return;
+      this.onClientTimeout(client, req);
+    });
+    this.queue.schedule(this.now + NET_CLIENT_FABRIC_MS, () => {
+      if (req.attempt !== a || req.fate) return;
+      this.fabricReceive(req);
+    });
+  }
+
+  /** The defining storm event: a timeout poisons the connection. */
+  private onClientTimeout(client: ClientSim, req: RequestSim): void {
+    this.metrics.countTimeout();
+    if (req.conn) this.teardownClientConn(client, req.conn);
+    req.conn = null;
+    this.resolve(req, 'timeout');
+  }
+
+  private teardownClientConn(client: ClientSim, conn: ConnSim): void {
+    if (conn.state === 'closing') return;
+    const wasCounted = conn.state === 'idle' || conn.state === 'busy' || conn.state === 'handshaking';
+    conn.setState('closing', this.now);
+    if (wasCounted) this.fabricConnCount--;
+    this.queue.schedule(this.now + CLOSE_LINGER_MS, () => {
+      client.conns = client.conns.filter((c) => c !== conn);
+    });
+  }
+
+  /** Response (any kind) reaches the client. */
+  private clientReceive(req: RequestSim, kind: 'success' | 'error' | 'shed'): void {
+    const client = this.clients[req.clientId];
+    if (!client) return;
+    if (req.timeoutEvent) {
+      req.timeoutEvent.active = false;
+      req.timeoutEvent = null;
+    }
+    // A clean response — even an error — keeps the connection alive. This is
+    // why shedding beats collapsing: rejected clients keep their warm conns.
+    if (req.conn && req.conn.state === 'busy') {
+      req.conn.setState('idle', this.now);
+      this.serveWaiting(client);
+    }
+    req.conn = null;
+    if (kind === 'success') {
+      this.metrics.countSuccess(this.now - req.sentAt);
+      this.resolve(req, 'success');
+    } else {
+      if (kind === 'shed') this.metrics.countShed();
+      else this.metrics.countError();
+      this.resolve(req, kind === 'shed' ? 'shed' : 'error');
+    }
+  }
+
+  private serveWaiting(client: ClientSim): void {
+    const idle = client.idleConn();
+    if (!idle) return;
+    const req = client.waiting.shift();
+    if (req) this.sendOnConnection(client, req, idle);
+  }
+
+  /** Record a request's outcome; schedule a retry or removal. */
+  private resolve(req: RequestSim, fate: RequestFate): void {
+    req.fate = fate;
+    req.fateTime = this.now;
+    if (req.acquireEvent) {
+      req.acquireEvent.active = false;
+      req.acquireEvent = null;
+    }
+    if (req.timeoutEvent) {
+      req.timeoutEvent.active = false;
+      req.timeoutEvent = null;
+    }
+    const c = this.cfg.clients;
+    if (fate !== 'success' && req.attempt < c.maxRetries) {
+      const client = this.clients[req.clientId];
+      if (!client) return;
+      const a = req.attempt;
+      // Exponential backoff; with jitter this is AWS "full jitter":
+      // sleep = rand(0, min(cap, base * 2^attempt)).
+      let backoff = Math.min(RETRY_BACKOFF_CAP_MS, c.retryBackoffBaseMs * Math.pow(2, req.attempt));
+      if (c.retryJitter) backoff *= this.rng.next();
+      client.pendingRetries++;
+      this.queue.schedule(this.now + Math.max(1, backoff), () => {
+        client.pendingRetries--;
+        if (req.attempt !== a || !this.clients.includes(client)) {
+          this.requests.delete(req);
+          return;
+        }
+        this.metrics.countRetry();
+        this.beginRetry(client, req);
+      });
+    } else {
+      this.queue.schedule(this.now + FATE_LINGER_MS, () => this.requests.delete(req));
+    }
+  }
+
+  private beginRetry(client: ClientSim, req: RequestSim): void {
+    // If this request owned the half-open breaker probe, hand the slot back —
+    // otherwise the downstream is wedged out of rotation forever.
+    if (req.isProbe) {
+      const ds = this.downstreams[req.downstreamId];
+      if (ds) ds.probeInFlight = false;
+      req.isProbe = false;
+    }
+    req.attempt++;
+    req.fate = null;
+    req.conn = null;
+    req.dsConn = null;
+    req.downstreamId = -1;
+    this.startAttempt(client, req);
+  }
+
+  // -- Fabric: inbound connections & TLS ---------------------------------------
+
+  private fabricAccept(client: ClientSim, conn: ConnSim): void {
+    if (conn.abandoned || conn.state === 'closing') return;
+    const f = this.cfg.fabric;
+    if (this.fabricConnCount >= f.maxConnections) {
+      this.refuseConnection(client, conn, 'connection limit');
+      return;
+    }
+    if (this.handshakesActive < f.tlsHandshakeConcurrency) {
+      this.fabricConnCount++;
+      this.startHandshake(client, conn);
+    } else if (this.acceptQueue.length < f.tlsAcceptQueueLimit) {
+      this.acceptQueue.push(conn);
+    } else {
+      this.refuseConnection(client, conn, 'TLS accept queue full');
+    }
+  }
+
+  private refuseConnection(client: ClientSim, conn: ConnSim, reason: string): void {
+    this.throttledLog('refuse', 2000, 'warn', `Fabric refusing connections (${reason})`);
+    this.queue.schedule(this.now + NET_CLIENT_FABRIC_MS, () => {
+      conn.setState('closing', this.now);
+      client.conns = client.conns.filter((c) => c !== conn);
+      client.backoffUntil = Math.max(client.backoffUntil, this.now + CONNECT_BACKOFF_MS);
+    });
+  }
+
+  private startHandshake(client: ClientSim, conn: ConnSim): void {
+    const f = this.cfg.fabric;
+    this.handshakesActive++;
+    this.metrics.countHandshakeStarted();
+    const startedAbandoned = conn.abandoned;
+    if (!startedAbandoned) conn.setState('handshaking', this.now);
+    const fraction = startedAbandoned ? ABANDONED_HANDSHAKE_WORK : 1;
+    this.cpu.add(f.tlsHandshakeMs * fraction, f.tlsCpuCost * fraction, () => {
+      this.handshakesActive--;
+      if (conn.state === 'closing') {
+        // Torn down mid-handshake (client removed); count already adjusted.
+        this.metrics.countHandshakeCompleted(true);
+      } else if (startedAbandoned || conn.abandoned) {
+        // Client is long gone; all that asymmetric crypto was for nothing.
+        this.metrics.countHandshakeCompleted(true);
+        this.fabricConnCount--;
+      } else {
+        this.metrics.countHandshakeCompleted(false);
+        conn.setState('idle', this.now);
+        this.serveWaiting(client);
+      }
+      this.drainAcceptQueue();
+    });
+  }
+
+  private drainAcceptQueue(): void {
+    const f = this.cfg.fabric;
+    while (this.handshakesActive < f.tlsHandshakeConcurrency && this.acceptQueue.length > 0) {
+      const conn = this.acceptQueue.shift()!;
+      if (conn.state === 'closing') continue;
+      const client = this.clients[conn.clientId];
+      if (!client) continue;
+      if (this.fabricConnCount >= f.maxConnections && !conn.abandoned) {
+        this.refuseConnection(client, conn, 'connection limit');
+        continue;
+      }
+      this.fabricConnCount++;
+      this.startHandshake(client, conn);
+    }
+  }
+
+  // -- Fabric: request path -----------------------------------------------------
+
+  private fabricReceive(req: RequestSim): void {
+    const a = req.attempt;
+    const f = this.cfg.fabric;
+    // fabricInFlight already includes queued requests by definition.
+    const load = this.fabricInFlight;
+    if (f.sheddingEnabled && load >= f.shedThreshold) {
+      // The whole point of shedding: a cheap, immediate "no" — no CPU spent,
+      // no connection lost. Compare with what a timeout costs.
+      this.respondError(req, 'shed');
+      return;
+    }
+    this.fabricInFlight++;
+    req.setPhase('processingAtFabric', this.now, this.now + f.processingMs * this.cpu.slowdownFactor());
+    this.cpu.add(f.processingMs, f.processingMs, () => {
+      if (req.attempt !== a || req.fate) {
+        this.fabricInFlight--; // processed a request whose client already left
+        return;
+      }
+      this.routeToDownstream(req);
+    });
+  }
+
+  private routeToDownstream(req: RequestSim): void {
+    const p = this.cfg.downstreamPool;
+    const healthy = this.downstreams.filter((ds) => {
+      if (!p.circuitBreakerEnabled) return true;
+      if (ds.breaker === 'closed') return true;
+      if (ds.breaker === 'halfOpen' && !ds.probeInFlight) return true;
+      return false;
+    });
+    if (healthy.length === 0) {
+      this.fabricInFlight--;
+      this.throttledLog('nods', 2000, 'critical', 'All downstreams circuit-broken — failing fast');
+      this.respondError(req, 'error');
+      return;
+    }
+    const ds = healthy[Math.floor(this.rng.next() * healthy.length)];
+    req.downstreamId = ds.id;
+    if (this.cfg.downstreamPool.circuitBreakerEnabled && ds.breaker === 'halfOpen') {
+      ds.probeInFlight = true;
+      req.isProbe = true;
+    }
+    const deadline = this.now + p.requestTimeoutMs;
+    const idle = ds.conns.find((c) => c.state === 'idle');
+    if (idle) {
+      this.forwardToDownstream(req, ds, idle, deadline);
+      return;
+    }
+    if (ds.conns.filter((c) => c.state !== 'closing').length < p.poolSizePerDownstream) {
+      this.openDownstreamConn(ds);
+    }
+    const f = this.cfg.fabric;
+    if (f.queueLimitEnabled && this.totalDsQueueDepth() >= f.queueLimit) {
+      this.fabricInFlight--;
+      this.releaseProbe(req, ds);
+      this.respondError(req, 'shed');
+      return;
+    }
+    // The downstream deadline covers queue wait + wire time: a request that
+    // sat in the queue forwards with only its remaining budget.
+    req.setPhase('queuedAtFabric', this.now, deadline);
+    const entry: DsQueueEntry = { req, attempt: req.attempt, deadline, expiry: null };
+    entry.expiry = this.queue.schedule(deadline, () => this.onQueueExpiry(ds, entry));
+    ds.queue.push(entry);
+  }
+
+  /** The fabric abandons a downstream call that never left the queue. */
+  private onQueueExpiry(ds: DownstreamSim, entry: DsQueueEntry): void {
+    const idx = ds.queue.indexOf(entry);
+    if (idx < 0) return;
+    ds.queue.splice(idx, 1);
+    this.fabricInFlight--;
+    this.releaseProbe(entry.req, ds);
+    if (entry.req.attempt !== entry.attempt || entry.req.fate) return;
+    this.respondError(entry.req, 'error');
+  }
+
+  private openDownstreamConn(ds: DownstreamSim): void {
+    const p = this.cfg.downstreamPool;
+    const conn = new ConnSim(-1, ds.id);
+    conn.setState('handshaking', this.now);
+    ds.conns.push(conn);
+    this.cpu.add(p.connectMs, this.cfg.fabric.tlsCpuCost * OUTBOUND_TLS_CPU_FACTOR, () => {
+      if (conn.state !== 'handshaking') return;
+      conn.setState('idle', this.now);
+      this.serveDsQueue(ds);
+    });
+  }
+
+  private serveDsQueue(ds: DownstreamSim): void {
+    for (;;) {
+      const idle = ds.conns.find((c) => c.state === 'idle');
+      if (!idle) return;
+      const entry = ds.queue.shift();
+      if (!entry) return;
+      const { req, attempt, deadline } = entry;
+      if (entry.expiry) entry.expiry.active = false;
+      if (req.attempt !== attempt || req.fate) {
+        // Dead on dequeue: the client gave up while this sat in the queue.
+        // The queue did nothing but delay the discovery — the AWS lesson on
+        // why queues must be bounded by time.
+        this.fabricInFlight--;
+        this.releaseProbe(req, ds);
+        continue;
+      }
+      this.forwardToDownstream(req, ds, idle, deadline);
+    }
+  }
+
+  private forwardToDownstream(req: RequestSim, ds: DownstreamSim, conn: ConnSim, deadline: number): void {
+    const a = req.attempt;
+    conn.setState('busy', this.now);
+    req.dsConn = conn;
+    req.setPhase('travelingToDownstream', this.now, this.now + NET_FABRIC_DS_MS);
+    req.dsTimeoutEvent = this.queue.schedule(Math.max(this.now + 1, deadline), () => {
+      if (req.dsConn !== conn || req.attempt !== a) return;
+      this.onDownstreamTimeout(req, ds, conn);
+    });
+    this.queue.schedule(this.now + NET_FABRIC_DS_MS, () => this.downstreamReceive(req, a, ds, conn));
+  }
+
+  private downstreamReceive(req: RequestSim, attempt: number, ds: DownstreamSim, conn: ConnSim): void {
+    const d = this.cfg.downstreams;
+    ds.inFlight++;
+    const isError = this.rng.chance(d.errorRate);
+    const sample = Math.min(
+      d.responseTimeMedianMs * LATENCY_CLAMP_FACTOR,
+      this.rng.logNormal(d.responseTimeMedianMs, d.responseTimeSigma),
+    );
+    let duration = sample * ds.loadFactor(d.concurrencyCapacity);
+    if (isError) duration *= ERROR_TIME_FACTOR;
+    if (req.attempt === attempt && !req.fate) {
+      req.setPhase('atDownstream', this.now, this.now + duration);
+    }
+    this.queue.schedule(this.now + duration, () => {
+      ds.inFlight--;
+      this.downstreamComplete(req, attempt, ds, conn, isError);
+    });
+  }
+
+  private downstreamComplete(
+    req: RequestSim,
+    attempt: number,
+    ds: DownstreamSim,
+    conn: ConnSim,
+    isError: boolean,
+  ): void {
+    if (conn.state === 'closing') {
+      // The fabric already timed this call out and poisoned the connection;
+      // the downstream's work was wasted and everything is accounted for.
+      return;
+    }
+    conn.setState('idle', this.now);
+    this.serveDsQueue(ds);
+    if (req.attempt !== attempt) {
+      // The connection is fine, but this response belongs to a dead attempt.
+      this.fabricInFlight--;
+      this.releaseProbe(req, ds);
+      return;
+    }
+    if (req.dsTimeoutEvent) {
+      req.dsTimeoutEvent.active = false;
+      req.dsTimeoutEvent = null;
+    }
+    req.dsConn = null;
+    this.recordBreakerResult(ds, req, !isError);
+    this.fabricInFlight--;
+    if (req.fate) return; // client timed out; the response has nowhere to go
+    if (isError) {
+      this.respondError(req, 'error');
+    } else {
+      req.setPhase('returning', this.now, this.now + NET_FABRIC_DS_MS + NET_CLIENT_FABRIC_MS);
+      const a = req.attempt;
+      this.queue.schedule(this.now + NET_FABRIC_DS_MS + NET_CLIENT_FABRIC_MS, () => {
+        if (req.attempt !== a || req.fate) return;
+        this.clientReceive(req, 'success');
+      });
+    }
+  }
+
+  /** Fabric-side timeout on the downstream call: poison the outbound conn. */
+  private onDownstreamTimeout(req: RequestSim, ds: DownstreamSim, conn: ConnSim): void {
+    req.dsConn = null;
+    req.dsTimeoutEvent = null;
+    if (conn.state === 'busy') {
+      conn.setState('closing', this.now);
+      this.queue.schedule(this.now + CLOSE_LINGER_MS, () => {
+        ds.conns = ds.conns.filter((c) => c !== conn);
+      });
+    }
+    this.recordBreakerResult(ds, req, false);
+    this.fabricInFlight--;
+    if (req.fate) return;
+    this.respondError(req, 'error');
+  }
+
+  private recordBreakerResult(ds: DownstreamSim, req: RequestSim, ok: boolean): void {
+    const p = this.cfg.downstreamPool;
+    if (req.isProbe) {
+      req.isProbe = false;
+      ds.probeInFlight = false;
+      if (ok) {
+        ds.breaker = 'closed';
+        ds.breakerSince = this.now;
+        ds.window.reset();
+        this.metrics.log(this.now, 'info', `Downstream ${ds.id + 1} breaker closed (probe succeeded)`);
+      } else {
+        ds.breaker = 'open';
+        ds.breakerSince = this.now;
+        this.scheduleBreakerProbe(ds);
+      }
+      return;
+    }
+    ds.window.record(this.now, ok);
+    if (!p.circuitBreakerEnabled || ds.breaker !== 'closed') return;
+    const { failures, total } = ds.window.ratio(this.now);
+    if (total >= p.breakerMinSamples && failures / total >= p.breakerFailureRatio) {
+      ds.breaker = 'open';
+      ds.breakerSince = this.now;
+      this.metrics.log(this.now, 'warn', `Downstream ${ds.id + 1} circuit breaker OPEN`);
+      this.scheduleBreakerProbe(ds);
+    }
+  }
+
+  private scheduleBreakerProbe(ds: DownstreamSim): void {
+    this.queue.schedule(this.now + this.cfg.downstreamPool.breakerCooldownMs, () => {
+      if (ds.breaker === 'open') {
+        ds.breakerSince = this.now;
+        ds.breaker = 'halfOpen';
+      }
+    });
+  }
+
+  private releaseProbe(req: RequestSim, ds: DownstreamSim): void {
+    if (req.isProbe) {
+      req.isProbe = false;
+      ds.probeInFlight = false;
+    }
+  }
+
+  /** Send an error-ish response to the client, paced if pacing is enabled. */
+  private respondError(req: RequestSim, kind: 'shed' | 'error'): void {
+    const f = this.cfg.fabric;
+    const a = req.attempt;
+    const send = () => {
+      if (req.attempt !== a || req.fate) return;
+      req.setPhase('returning', this.now, this.now + NET_CLIENT_FABRIC_MS);
+      this.queue.schedule(this.now + NET_CLIENT_FABRIC_MS, () => {
+        if (req.attempt !== a || req.fate) return;
+        this.clientReceive(req, kind);
+      });
+    };
+    if (f.errorPacingEnabled && f.errorPacingDelayMs > 0) {
+      // Holding the error breaks the tight client retry loop: a client slot
+      // can only generate one attempt per (pacing delay + backoff). The cost:
+      // the connection stays occupied for the delay — pacing converts
+      // retry-rate pressure into connection-slot pressure.
+      req.setPhase('pacedError', this.now, this.now + f.errorPacingDelayMs);
+      this.queue.schedule(this.now + f.errorPacingDelayMs, send);
+    } else {
+      send();
+    }
+  }
+
+  // -- Views & condition detection ----------------------------------------------
+
+  totalDsQueueDepth(): number {
+    let n = 0;
+    for (const ds of this.downstreams) n += ds.queue.length;
+    return n;
+  }
+
+  fabricView(): FabricView {
+    return {
+      connectionCount: this.fabricConnCount,
+      maxConnections: this.cfg.fabric.maxConnections,
+      handshakesActive: this.handshakesActive,
+      handshakesQueued: this.acceptQueue.length,
+      inFlight: this.fabricInFlight,
+      cpuUtilization: this.cpu.utilization(),
+      slowdownFactor: this.cpu.slowdownFactor(),
+    };
+  }
+
+  private detectConditions(): void {
+    const b = this.metrics.lastClosedBucket();
+    if (!b) return;
+    const shedActive = b.sheds > 0;
+    if (shedActive && !this.shedWasActive) {
+      this.metrics.log(this.now, 'warn', 'Load shedding engaged');
+    }
+    this.shedWasActive = shedActive;
+
+    // Single handshakes legitimately spike instantaneous demand past 100%;
+    // only sustained saturation is an incident worth logging.
+    if (this.cpu.utilization() >= 1) {
+      if (this.cpuSaturatedSince === null) this.cpuSaturatedSince = this.now;
+      if (this.now - this.cpuSaturatedSince >= 500) {
+        this.throttledLog(
+          'cpu',
+          5000,
+          'critical',
+          `Fabric CPU saturated (${Math.round(this.cpu.utilization() * 100)}% demanded)`,
+        );
+      }
+    } else {
+      this.cpuSaturatedSince = null;
+    }
+    // A storm = clients failing fast (timeouts/rejections) while TLS pressure
+    // is high. Late in a storm handshakes barely *start* (everything is
+    // queued or refused), so gauge pressure counts too.
+    const failing = b.timeouts + b.rejected >= 3;
+    const tlsPressure =
+      b.tlsHandshakesStarted >= 8 || this.handshakesActive >= 8 || this.acceptQueue.length >= 8;
+    const stormActive = failing && tlsPressure;
+    if (stormActive && !this.stormWasActive) {
+      this.throttledLog(
+        'storm',
+        5000,
+        'critical',
+        'CONNECTION STORM: timeouts are tearing down connections faster than TLS can rebuild them',
+      );
+    }
+    this.stormWasActive = stormActive;
+  }
+
+  /** True when the last closed bucket looks like an active storm (for UI banner). */
+  stormActive(): boolean {
+    return this.stormWasActive;
+  }
+
+  private throttledLog(
+    key: string,
+    intervalMs: number,
+    severity: 'info' | 'warn' | 'critical',
+    message: string,
+  ): void {
+    const last = this.lastLogAt[key] ?? -Infinity;
+    if (this.now - last < intervalMs) return;
+    this.lastLogAt[key] = this.now;
+    this.metrics.log(this.now, severity, message);
+  }
+}

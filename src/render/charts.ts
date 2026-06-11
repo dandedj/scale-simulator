@@ -1,0 +1,203 @@
+/**
+ * The chart rail: six synchronized strip charts over the same rolling
+ * 60-second window of sim time. Together they tell the storm story:
+ * latency crosses the timeout line → goodput gap opens → failures spike →
+ * handshakes flood → connections churn → amplification goes super-unity.
+ */
+
+import { BUCKET_MS, HISTORY_MS, percentile } from '../engine/metrics';
+import type { Simulation } from '../engine/simulation';
+import type { MetricsBucket } from '../engine/types';
+import { SEMANTIC, SURFACE, withAlpha } from './colors';
+
+const PER_SEC = 1000 / BUCKET_MS;
+
+interface Series {
+  label: string;
+  color: string;
+  fill?: boolean;
+  value(b: MetricsBucket, sim: Simulation): number;
+}
+
+interface ChartDef {
+  title: string;
+  series: Series[];
+  /** Dashed reference line (e.g., a limit or timeout). */
+  threshold?(sim: Simulation): { value: number; label: string } | null;
+  yMax?(sim: Simulation, dataMax: number): number;
+}
+
+const CHARTS: ChartDef[] = [
+  {
+    title: 'LATENCY ms',
+    series: [
+      { label: 'p99', color: SEMANTIC.shed, value: (b) => percentile(b.latencies, 0.99) },
+      { label: 'p50', color: SEMANTIC.inFlight, value: (b) => percentile(b.latencies, 0.5) },
+    ],
+    threshold: (sim) => ({ value: sim.cfg.clients.requestTimeoutMs, label: 'client timeout' }),
+    yMax: (sim, dataMax) => Math.max(dataMax, sim.cfg.clients.requestTimeoutMs * 1.25),
+  },
+  {
+    title: 'THROUGHPUT req/s',
+    series: [
+      { label: 'offered', color: SEMANTIC.inFlight, fill: true, value: (b) => b.arrivals * PER_SEC },
+      { label: 'goodput', color: SEMANTIC.success, value: (b) => b.successes * PER_SEC },
+    ],
+  },
+  {
+    title: 'FAILURES /s',
+    series: [
+      { label: 'timeout', color: SEMANTIC.timeout, value: (b) => b.timeouts * PER_SEC },
+      { label: 'shed', color: SEMANTIC.shed, value: (b) => b.sheds * PER_SEC },
+      { label: 'error', color: SEMANTIC.error, value: (b) => b.errors * PER_SEC },
+    ],
+  },
+  {
+    title: 'TLS HANDSHAKES',
+    series: [
+      { label: 'started/s', color: SEMANTIC.tlsPulse, value: (b) => b.tlsHandshakesStarted * PER_SEC },
+      { label: 'active', color: SEMANTIC.retry, value: (b) => b.handshakesActive },
+    ],
+    threshold: (sim) => ({ value: sim.cfg.fabric.tlsHandshakeConcurrency, label: 'concurrency cap' }),
+  },
+  {
+    title: 'CONNECTIONS',
+    series: [
+      { label: 'fabric conns', color: SEMANTIC.connEstablished, value: (b) => b.fabricConnections },
+      { label: 'queue depth', color: SEMANTIC.shed, fill: true, value: (b) => b.fabricQueueDepth },
+    ],
+    threshold: (sim) => ({ value: sim.cfg.fabric.maxConnections, label: 'conn limit' }),
+    yMax: (sim, dataMax) => Math.max(dataMax, sim.cfg.fabric.maxConnections * 1.15),
+  },
+  {
+    title: 'AMPLIFICATION R',
+    series: [
+      {
+        label: 'sent ÷ ok',
+        color: SEMANTIC.retry,
+        value: (b) => {
+          const sent = b.arrivals + b.retries;
+          return Math.min(8, sent / Math.max(1, b.successes));
+        },
+      },
+    ],
+    threshold: () => ({ value: 1.5, label: 'storm line' }),
+    yMax: () => 8,
+  },
+];
+
+export class ChartRail {
+  private charts: Array<{
+    def: ChartDef;
+    canvas: HTMLCanvasElement;
+    ctx: CanvasRenderingContext2D;
+    w: number;
+    h: number;
+  }> = [];
+
+  constructor(container: HTMLElement) {
+    for (const def of CHARTS) {
+      const cell = document.createElement('div');
+      cell.className = 'chart-cell';
+      const canvas = document.createElement('canvas');
+      cell.appendChild(canvas);
+      container.appendChild(cell);
+      this.charts.push({ def, canvas, ctx: canvas.getContext('2d')!, w: 0, h: 0 });
+    }
+  }
+
+  resize(): void {
+    const dpr = window.devicePixelRatio || 1;
+    for (const c of this.charts) {
+      const rect = c.canvas.getBoundingClientRect();
+      c.w = rect.width;
+      c.h = rect.height;
+      c.canvas.width = Math.round(rect.width * dpr);
+      c.canvas.height = Math.round(rect.height * dpr);
+      c.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+  }
+
+  draw(sim: Simulation): void {
+    const buckets = sim.metrics.buckets;
+    const windowStart = Math.max(0, sim.now - HISTORY_MS);
+    for (const { def, ctx, w, h } of this.charts) {
+      if (w === 0) continue;
+      ctx.clearRect(0, 0, w, h);
+
+      const plotX = 6;
+      const plotY = 16;
+      const plotW = w - 12;
+      const plotH = h - 24;
+
+      // Title + legend
+      ctx.font = '600 9px "IBM Plex Mono", monospace';
+      ctx.fillStyle = SURFACE.textDim;
+      ctx.fillText(def.title, plotX, 10);
+      let lx = plotX + ctx.measureText(def.title).width + 10;
+      for (const s of def.series) {
+        ctx.fillStyle = s.color;
+        ctx.fillText(s.label, lx, 10);
+        lx += ctx.measureText(s.label).width + 8;
+      }
+
+      // Determine y scale
+      let dataMax = 1e-6;
+      for (const b of buckets) {
+        if (b.time < windowStart) continue;
+        for (const s of def.series) dataMax = Math.max(dataMax, s.value(b, sim));
+      }
+      const yMax = def.yMax ? def.yMax(sim, dataMax) : dataMax * 1.15;
+
+      // Gridline + threshold
+      ctx.strokeStyle = SURFACE.grid;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(plotX, plotY + plotH);
+      ctx.lineTo(plotX + plotW, plotY + plotH);
+      ctx.stroke();
+      const thr = def.threshold?.(sim);
+      if (thr && thr.value <= yMax) {
+        const ty = plotY + plotH - (thr.value / yMax) * plotH;
+        ctx.strokeStyle = withAlpha(SEMANTIC.timeout, 0.55);
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(plotX, ty);
+        ctx.lineTo(plotX + plotW, ty);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // Series
+      const xFor = (time: number) => plotX + ((time - windowStart) / HISTORY_MS) * plotW;
+      const yFor = (v: number) => plotY + plotH - (Math.min(v, yMax) / yMax) * plotH;
+      for (const s of def.series) {
+        ctx.strokeStyle = s.color;
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        let started = false;
+        let lastX = plotX;
+        for (const b of buckets) {
+          if (b.time < windowStart) continue;
+          const x = xFor(b.time);
+          const y = yFor(s.value(b, sim));
+          if (!started) {
+            ctx.moveTo(x, y);
+            started = true;
+          } else {
+            ctx.lineTo(x, y);
+          }
+          lastX = x;
+        }
+        ctx.stroke();
+        if (s.fill && started) {
+          ctx.lineTo(lastX, plotY + plotH);
+          ctx.lineTo(plotX, plotY + plotH);
+          ctx.closePath();
+          ctx.fillStyle = withAlpha(s.color, 0.13);
+          ctx.fill();
+        }
+      }
+    }
+  }
+}
