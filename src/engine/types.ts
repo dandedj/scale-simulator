@@ -27,17 +27,35 @@ export interface ClientConfig {
   retryBackoffBaseMs: number;
   /** Add full jitter to backoff (the difference between a wave and a wall). */
   retryJitter: boolean;
+
+  /** Client-side circuit breaker toward the fabric. */
+  circuitBreakerEnabled: boolean;
+  /** Open when failure ratio over the rolling window exceeds this. */
+  breakerFailureRatio: number;
+  /** Minimum samples in the window before the breaker may trip. */
+  breakerMinSamples: number;
+  /** How long the breaker stays open before probing (ms). */
+  breakerCooldownMs: number;
 }
 
 export interface FabricConfig {
-  /** Hard cap on concurrent client-facing connections. */
+  /** Hard cap on concurrent client-facing connections; beyond it, connects are shed (RST). */
   maxConnections: number;
-  /** TLS handshakes processed concurrently; the rest wait in the accept queue. */
+  /** TLS handshake permits: handshakes processed concurrently. */
   tlsHandshakeConcurrency: number;
-  /** Pending handshakes allowed in the accept queue before refusing connects. */
-  tlsAcceptQueueLimit: number;
-  /** Nominal time to complete one TLS handshake at idle (ms). */
+  /**
+   * How long a connection may wait for a free TLS permit before the fabric
+   * sheds it with an RST (which invalidates the connection). 0 = shed
+   * immediately when no permit is free. There is no TLS queue — only this
+   * bounded wait.
+   */
+  tlsPermitWaitMs: number;
+  /** Nominal time to complete one full TLS handshake at idle (ms). */
   tlsHandshakeMs: number;
+  /** Fraction of handshakes that use TLS session resumption (0..1). */
+  tlsResumptionRate: number;
+  /** Resumed handshake cost as a fraction of a full handshake (time and CPU). */
+  tlsResumptionCostFactor: number;
   /** Nominal fabric processing time per request at idle (ms). */
   processingMs: number;
   /**
@@ -47,17 +65,8 @@ export interface FabricConfig {
    * the coupling that turns a handshake burst into a storm.
    */
   cpuCapacity: number;
-  /** CPU work-units consumed by one TLS handshake (vs ~processingMs for a request). */
+  /** CPU work-units consumed by one full TLS handshake (vs ~processingMs for a request). */
   tlsCpuCost: number;
-
-  /** Bounded request queue. When disabled the queue grows without limit. */
-  queueLimitEnabled: boolean;
-  queueLimit: number;
-
-  /** Load shedding: reject new work beyond the threshold with a cheap error. */
-  sheddingEnabled: boolean;
-  /** Shed when requests inside the fabric (processing + queued + at a downstream) exceed this. */
-  shedThreshold: number;
 
   /** Error pacing: delay error responses to damp client retry loops. */
   errorPacingEnabled: boolean;
@@ -135,7 +144,7 @@ export type RequestPhase =
   | 'returning'            // response traveling back to the client
   | 'pacedError';          // error response held by error pacing
 
-export type RequestFate = 'success' | 'timeout' | 'shed' | 'error' | 'rejected';
+export type RequestFate = 'success' | 'timeout' | 'error' | 'rejected';
 
 export type BreakerState = 'closed' | 'open' | 'halfOpen';
 
@@ -144,7 +153,8 @@ export interface FabricView {
   connectionCount: number;
   maxConnections: number;
   handshakesActive: number;
-  handshakesQueued: number;
+  /** Connections currently waiting (time-bounded) for a TLS permit. */
+  permitWaiting: number;
   /** Requests inside the fabric: processing + queued + at a downstream. */
   inFlight: number;
   /** Demanded work / capacity. >1 means everything is stretching. */
@@ -164,11 +174,16 @@ export interface MetricsBucket {
   arrivals: number;
   successes: number;
   timeouts: number;
-  sheds: number;
+  /** Connections shed because TLS permits stayed occupied past the wait (RST). */
+  shedTls: number;
+  /** Connections shed because the connection limit was exceeded (RST). */
+  shedConnLimit: number;
   errors: number;
   rejected: number;
   retries: number;
   tlsHandshakesStarted: number;
+  /** Of those started, how many used session resumption. */
+  tlsHandshakesResumed: number;
   tlsHandshakesCompleted: number;
   /** Latency samples (ms) of requests completed in this bucket. */
   latencies: number[];

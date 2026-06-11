@@ -48,23 +48,25 @@ const CHARTS: ChartDef[] = [
     title: 'FAILURES /s',
     series: [
       { label: 'timeout', color: SEMANTIC.timeout, value: (b) => b.timeouts * PER_SEC },
-      { label: 'shed', color: SEMANTIC.shed, value: (b) => b.sheds * PER_SEC },
       { label: 'error', color: SEMANTIC.error, value: (b) => b.errors * PER_SEC },
+      { label: 'rejected', color: SEMANTIC.shed, value: (b) => b.rejected * PER_SEC },
     ],
   },
   {
-    title: 'TLS HANDSHAKES',
+    title: 'TLS PERMITS',
     series: [
       { label: 'started/s', color: SEMANTIC.tlsPulse, value: (b) => b.tlsHandshakesStarted * PER_SEC },
       { label: 'active', color: SEMANTIC.retry, value: (b) => b.handshakesActive },
+      { label: 'shed/s', color: SEMANTIC.shed, value: (b) => b.shedTls * PER_SEC },
     ],
-    threshold: (sim) => ({ value: sim.cfg.fabric.tlsHandshakeConcurrency, label: 'concurrency cap' }),
+    threshold: (sim) => ({ value: sim.cfg.fabric.tlsHandshakeConcurrency, label: 'permits' }),
   },
   {
     title: 'CONNECTIONS',
     series: [
       { label: 'fabric conns', color: SEMANTIC.connEstablished, value: (b) => b.fabricConnections },
-      { label: 'queue depth', color: SEMANTIC.shed, fill: true, value: (b) => b.fabricQueueDepth },
+      { label: 'shed/s', color: SEMANTIC.shed, value: (b) => b.shedConnLimit * PER_SEC },
+      { label: 'ds queue', color: SEMANTIC.error, fill: true, value: (b) => b.fabricQueueDepth },
     ],
     threshold: (sim) => ({ value: sim.cfg.fabric.maxConnections, label: 'conn limit' }),
     yMax: (sim, dataMax) => Math.max(dataMax, sim.cfg.fabric.maxConnections * 1.15),

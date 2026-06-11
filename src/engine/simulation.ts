@@ -144,6 +144,10 @@ export class ConnSim {
   stateSince = 0;
   /** Client gave up on this connection attempt; finishing work is wasted. */
   abandoned = false;
+  /** This handshake uses TLS session resumption (cheaper). */
+  resumed = false;
+  /** Currently held against the fabric's connection limit. */
+  counted = false;
   clientId: number;
   downstreamId: number;
 
@@ -176,8 +180,10 @@ export class RequestSim {
   timeoutEvent: ScheduledEvent | null = null;
   acquireEvent: ScheduledEvent | null = null;
   dsTimeoutEvent: ScheduledEvent | null = null;
-  /** True while this request is the single half-open breaker probe. */
+  /** True while this request is a downstream breaker's single half-open probe. */
   isProbe = false;
+  /** True while this request is its client breaker's single half-open probe. */
+  isClientProbe = false;
   clientId: number;
 
   constructor(clientId: number) {
@@ -238,6 +244,12 @@ interface DsQueueEntry {
   expiry: ScheduledEvent | null;
 }
 
+/** A connection waiting (time-bounded) for a TLS handshake permit. */
+interface PermitWaiter {
+  conn: ConnSim;
+  expiry: ScheduledEvent;
+}
+
 export class DownstreamSim {
   inFlight = 0;
   breaker: BreakerState = 'closed';
@@ -266,6 +278,11 @@ export class ClientSim {
   /** No new connection attempts until this time (post-refusal backoff). */
   backoffUntil = 0;
   arrivalEvent: ScheduledEvent | null = null;
+  /** Client-side circuit breaker toward the fabric. */
+  breaker: BreakerState = 'closed';
+  breakerSince = 0;
+  probeInFlight = false;
+  window = new BreakerWindow();
   id: number;
 
   constructor(id: number) {
@@ -302,10 +319,11 @@ export class Simulation {
   requests = new Set<RequestSim>();
 
   // Fabric state
-  /** Inbound connections established or handshaking (counts toward the cap). */
+  /** Inbound connections currently held against the connection limit. */
   fabricConnCount = 0;
   handshakesActive = 0;
-  acceptQueue: ConnSim[] = [];
+  /** Connections waiting (time-bounded) for a TLS permit. There is no queue. */
+  permitWaiters: PermitWaiter[] = [];
   /** Requests inside the fabric (processing, queued, or at a downstream). */
   fabricInFlight = 0;
 
@@ -345,6 +363,7 @@ export class Simulation {
         if (this.fabricConnCount >= this.cfg.fabric.maxConnections) break;
         const conn = new ConnSim(client.id, -1);
         conn.setState('idle', 0);
+        conn.counted = true;
         client.conns.push(conn);
         this.fabricConnCount++;
       }
@@ -453,7 +472,7 @@ export class Simulation {
       if (entry.expiry) entry.expiry.active = false;
       this.releaseProbe(entry.req, ds);
       if (entry.req.attempt === entry.attempt && !entry.req.fate) {
-        this.respondError(entry.req, 'error');
+        this.respondError(entry.req);
       }
     }
     ds.queue = [];
@@ -478,15 +497,74 @@ export class Simulation {
 
   /** Begin an attempt (first try or retry): find a connection, arm timers. */
   private startAttempt(client: ClientSim, req: RequestSim): void {
+    if (!this.clientBreakerAllows(client, req)) {
+      // Fail fast locally: the client's own breaker is open.
+      this.metrics.countRejected();
+      this.resolve(req, 'rejected');
+      return;
+    }
     const a = req.attempt;
     req.setPhase('waitingForConnection', this.now, this.now + this.cfg.clients.poolAcquireTimeoutMs);
     req.acquireEvent = this.queue.schedule(this.now + this.cfg.clients.poolAcquireTimeoutMs, () => {
       if (req.attempt !== a || req.fate || req.conn) return;
       client.waiting = client.waiting.filter((r) => r !== req);
       this.metrics.countRejected();
+      this.recordClientOutcome(client, req, false);
       this.resolve(req, 'rejected');
     });
     this.dispatch(client, req);
+  }
+
+  // -- Client circuit breaker ----------------------------------------------------
+
+  /** Gate an attempt on the client's breaker; claims the half-open probe slot. */
+  private clientBreakerAllows(client: ClientSim, req: RequestSim): boolean {
+    if (!this.cfg.clients.circuitBreakerEnabled) return true;
+    if (client.breaker === 'closed') return true;
+    if (client.breaker === 'halfOpen' && !client.probeInFlight) {
+      client.probeInFlight = true;
+      req.isClientProbe = true;
+      return true;
+    }
+    return false;
+  }
+
+  /** Feed an attempt outcome to the client breaker (never breaker fast-fails). */
+  private recordClientOutcome(client: ClientSim, req: RequestSim, ok: boolean): void {
+    const c = this.cfg.clients;
+    if (req.isClientProbe) {
+      req.isClientProbe = false;
+      client.probeInFlight = false;
+      if (ok) {
+        client.breaker = 'closed';
+        client.breakerSince = this.now;
+        client.window.reset();
+        this.metrics.log(this.now, 'info', `Client ${client.id + 1} breaker closed (probe succeeded)`);
+      } else {
+        client.breaker = 'open';
+        client.breakerSince = this.now;
+        this.scheduleClientProbe(client);
+      }
+      return;
+    }
+    client.window.record(this.now, ok);
+    if (!c.circuitBreakerEnabled || client.breaker !== 'closed') return;
+    const { failures, total } = client.window.ratio(this.now);
+    if (total >= c.breakerMinSamples && failures / total >= c.breakerFailureRatio) {
+      client.breaker = 'open';
+      client.breakerSince = this.now;
+      this.metrics.log(this.now, 'warn', `Client ${client.id + 1} circuit breaker OPEN`);
+      this.scheduleClientProbe(client);
+    }
+  }
+
+  private scheduleClientProbe(client: ClientSim): void {
+    this.queue.schedule(this.now + this.cfg.clients.breakerCooldownMs, () => {
+      if (client.breaker === 'open') {
+        client.breakerSince = this.now;
+        client.breaker = 'halfOpen';
+      }
+    });
   }
 
   /** Try to put a request on a connection; otherwise leave it waiting. */
@@ -549,6 +627,7 @@ export class Simulation {
   /** The defining storm event: a timeout poisons the connection. */
   private onClientTimeout(client: ClientSim, req: RequestSim): void {
     this.metrics.countTimeout();
+    this.recordClientOutcome(client, req, false);
     if (req.conn) this.teardownClientConn(client, req.conn);
     req.conn = null;
     this.resolve(req, 'timeout');
@@ -556,24 +635,23 @@ export class Simulation {
 
   private teardownClientConn(client: ClientSim, conn: ConnSim): void {
     if (conn.state === 'closing') return;
-    const wasCounted = conn.state === 'idle' || conn.state === 'busy' || conn.state === 'handshaking';
     conn.setState('closing', this.now);
-    if (wasCounted) this.fabricConnCount--;
+    this.releaseCount(conn);
     this.queue.schedule(this.now + CLOSE_LINGER_MS, () => {
       client.conns = client.conns.filter((c) => c !== conn);
     });
   }
 
   /** Response (any kind) reaches the client. */
-  private clientReceive(req: RequestSim, kind: 'success' | 'error' | 'shed'): void {
+  private clientReceive(req: RequestSim, kind: 'success' | 'error'): void {
     const client = this.clients[req.clientId];
     if (!client) return;
     if (req.timeoutEvent) {
       req.timeoutEvent.active = false;
       req.timeoutEvent = null;
     }
-    // A clean response — even an error — keeps the connection alive. This is
-    // why shedding beats collapsing: rejected clients keep their warm conns.
+    // A clean response — even an error — keeps the connection alive,
+    // unlike a timeout, which poisons it.
     if (req.conn && req.conn.state === 'busy') {
       req.conn.setState('idle', this.now);
       this.serveWaiting(client);
@@ -581,11 +659,12 @@ export class Simulation {
     req.conn = null;
     if (kind === 'success') {
       this.metrics.countSuccess(this.now - req.sentAt);
+      this.recordClientOutcome(client, req, true);
       this.resolve(req, 'success');
     } else {
-      if (kind === 'shed') this.metrics.countShed();
-      else this.metrics.countError();
-      this.resolve(req, kind === 'shed' ? 'shed' : 'error');
+      this.metrics.countError();
+      this.recordClientOutcome(client, req, false);
+      this.resolve(req, 'error');
     }
   }
 
@@ -633,12 +712,16 @@ export class Simulation {
   }
 
   private beginRetry(client: ClientSim, req: RequestSim): void {
-    // If this request owned the half-open breaker probe, hand the slot back —
-    // otherwise the downstream is wedged out of rotation forever.
+    // If this request owned a half-open breaker probe, hand the slot back —
+    // otherwise that breaker is wedged out of rotation forever.
     if (req.isProbe) {
       const ds = this.downstreams[req.downstreamId];
       if (ds) ds.probeInFlight = false;
       req.isProbe = false;
+    }
+    if (req.isClientProbe) {
+      client.probeInFlight = false;
+      req.isClientProbe = false;
     }
     req.attempt++;
     req.fate = null;
@@ -650,27 +733,64 @@ export class Simulation {
 
   // -- Fabric: inbound connections & TLS ---------------------------------------
 
+  private acceptCount(conn: ConnSim): void {
+    this.fabricConnCount++;
+    conn.counted = true;
+  }
+
+  private releaseCount(conn: ConnSim): void {
+    if (conn.counted) {
+      this.fabricConnCount--;
+      conn.counted = false;
+    }
+  }
+
   private fabricAccept(client: ClientSim, conn: ConnSim): void {
     if (conn.abandoned || conn.state === 'closing') return;
     const f = this.cfg.fabric;
     if (this.fabricConnCount >= f.maxConnections) {
-      this.refuseConnection(client, conn, 'connection limit');
+      this.metrics.countShedConnLimit();
+      this.shedConnection(client, conn, 'connection limit exceeded');
       return;
     }
+    this.acceptCount(conn);
+    conn.resumed = this.rng.chance(f.tlsResumptionRate);
     if (this.handshakesActive < f.tlsHandshakeConcurrency) {
-      this.fabricConnCount++;
       this.startHandshake(client, conn);
-    } else if (this.acceptQueue.length < f.tlsAcceptQueueLimit) {
-      this.acceptQueue.push(conn);
+    } else if (f.tlsPermitWaitMs > 0) {
+      // No TLS queue — the connection may wait a bounded time for a permit,
+      // after which it is shed with an RST.
+      const waiter: PermitWaiter = { conn, expiry: null as unknown as ScheduledEvent };
+      waiter.expiry = this.queue.schedule(this.now + f.tlsPermitWaitMs, () =>
+        this.onPermitExpiry(client, waiter),
+      );
+      this.permitWaiters.push(waiter);
     } else {
-      this.refuseConnection(client, conn, 'TLS accept queue full');
+      this.metrics.countShedTls();
+      this.shedConnection(client, conn, 'TLS permits exhausted');
     }
   }
 
-  private refuseConnection(client: ClientSim, conn: ConnSim, reason: string): void {
-    this.throttledLog('refuse', 2000, 'warn', `Fabric refusing connections (${reason})`);
+  /** The permit never came: shed the connection. */
+  private onPermitExpiry(client: ClientSim, waiter: PermitWaiter): void {
+    const idx = this.permitWaiters.indexOf(waiter);
+    if (idx < 0) return;
+    this.permitWaiters.splice(idx, 1);
+    const conn = waiter.conn;
+    if (conn.state === 'closing') {
+      this.releaseCount(conn);
+      return;
+    }
+    this.metrics.countShedTls();
+    this.shedConnection(client, conn, 'TLS permits exhausted');
+  }
+
+  /** RST: the connection is invalidated; the client learns one hop later. */
+  private shedConnection(client: ClientSim, conn: ConnSim, reason: string): void {
+    this.throttledLog('shed', 2000, 'warn', `Fabric shedding connections (${reason} — RST)`);
+    this.releaseCount(conn);
+    conn.setState('closing', this.now);
     this.queue.schedule(this.now + NET_CLIENT_FABRIC_MS, () => {
-      conn.setState('closing', this.now);
       client.conns = client.conns.filter((c) => c !== conn);
       client.backoffUntil = Math.max(client.backoffUntil, this.now + CONNECT_BACKOFF_MS);
     });
@@ -679,40 +799,48 @@ export class Simulation {
   private startHandshake(client: ClientSim, conn: ConnSim): void {
     const f = this.cfg.fabric;
     this.handshakesActive++;
-    this.metrics.countHandshakeStarted();
+    this.metrics.countHandshakeStarted(conn.resumed);
     const startedAbandoned = conn.abandoned;
     if (!startedAbandoned) conn.setState('handshaking', this.now);
-    const fraction = startedAbandoned ? ABANDONED_HANDSHAKE_WORK : 1;
+    // Session resumption skips the expensive asymmetric crypto.
+    const resumeFactor = conn.resumed ? f.tlsResumptionCostFactor : 1;
+    const fraction = (startedAbandoned ? ABANDONED_HANDSHAKE_WORK : 1) * resumeFactor;
     this.cpu.add(f.tlsHandshakeMs * fraction, f.tlsCpuCost * fraction, () => {
       this.handshakesActive--;
       if (conn.state === 'closing') {
-        // Torn down mid-handshake (client removed); count already adjusted.
+        // Torn down mid-handshake; the teardown already released the count.
         this.metrics.countHandshakeCompleted(true);
       } else if (startedAbandoned || conn.abandoned) {
-        // Client is long gone; all that asymmetric crypto was for nothing.
+        // Client is long gone; all that crypto was for nothing.
         this.metrics.countHandshakeCompleted(true);
-        this.fabricConnCount--;
+        this.releaseCount(conn);
       } else {
         this.metrics.countHandshakeCompleted(false);
         conn.setState('idle', this.now);
         this.serveWaiting(client);
       }
-      this.drainAcceptQueue();
+      this.grantPermits();
     });
   }
 
-  private drainAcceptQueue(): void {
+  /** A permit freed up: grant it to the longest-waiting viable connection. */
+  private grantPermits(): void {
     const f = this.cfg.fabric;
-    while (this.handshakesActive < f.tlsHandshakeConcurrency && this.acceptQueue.length > 0) {
-      const conn = this.acceptQueue.shift()!;
-      if (conn.state === 'closing') continue;
-      const client = this.clients[conn.clientId];
-      if (!client) continue;
-      if (this.fabricConnCount >= f.maxConnections && !conn.abandoned) {
-        this.refuseConnection(client, conn, 'connection limit');
+    while (this.handshakesActive < f.tlsHandshakeConcurrency && this.permitWaiters.length > 0) {
+      const waiter = this.permitWaiters.shift()!;
+      waiter.expiry.active = false;
+      const conn = waiter.conn;
+      if (conn.state === 'closing') {
+        this.releaseCount(conn);
         continue;
       }
-      this.fabricConnCount++;
+      const client = this.clients[conn.clientId];
+      if (!client) {
+        this.releaseCount(conn);
+        continue;
+      }
+      // Abandoned connections still get the permit and burn (wasted) crypto —
+      // the fabric can't know the client hung up until it tries.
       this.startHandshake(client, conn);
     }
   }
@@ -722,14 +850,6 @@ export class Simulation {
   private fabricReceive(req: RequestSim): void {
     const a = req.attempt;
     const f = this.cfg.fabric;
-    // fabricInFlight already includes queued requests by definition.
-    const load = this.fabricInFlight;
-    if (f.sheddingEnabled && load >= f.shedThreshold) {
-      // The whole point of shedding: a cheap, immediate "no" — no CPU spent,
-      // no connection lost. Compare with what a timeout costs.
-      this.respondError(req, 'shed');
-      return;
-    }
     this.fabricInFlight++;
     req.setPhase('processingAtFabric', this.now, this.now + f.processingMs * this.cpu.slowdownFactor());
     this.cpu.add(f.processingMs, f.processingMs, () => {
@@ -752,7 +872,7 @@ export class Simulation {
     if (healthy.length === 0) {
       this.fabricInFlight--;
       this.throttledLog('nods', 2000, 'critical', 'All downstreams circuit-broken — failing fast');
-      this.respondError(req, 'error');
+      this.respondError(req);
       return;
     }
     const ds = healthy[Math.floor(this.rng.next() * healthy.length)];
@@ -770,13 +890,6 @@ export class Simulation {
     if (ds.conns.filter((c) => c.state !== 'closing').length < p.poolSizePerDownstream) {
       this.openDownstreamConn(ds);
     }
-    const f = this.cfg.fabric;
-    if (f.queueLimitEnabled && this.totalDsQueueDepth() >= f.queueLimit) {
-      this.fabricInFlight--;
-      this.releaseProbe(req, ds);
-      this.respondError(req, 'shed');
-      return;
-    }
     // The downstream deadline covers queue wait + wire time: a request that
     // sat in the queue forwards with only its remaining budget.
     req.setPhase('queuedAtFabric', this.now, deadline);
@@ -793,7 +906,7 @@ export class Simulation {
     this.fabricInFlight--;
     this.releaseProbe(entry.req, ds);
     if (entry.req.attempt !== entry.attempt || entry.req.fate) return;
-    this.respondError(entry.req, 'error');
+    this.respondError(entry.req);
   }
 
   private openDownstreamConn(ds: DownstreamSim): void {
@@ -888,7 +1001,7 @@ export class Simulation {
     this.fabricInFlight--;
     if (req.fate) return; // client timed out; the response has nowhere to go
     if (isError) {
-      this.respondError(req, 'error');
+      this.respondError(req);
     } else {
       req.setPhase('returning', this.now, this.now + NET_FABRIC_DS_MS + NET_CLIENT_FABRIC_MS);
       const a = req.attempt;
@@ -912,7 +1025,7 @@ export class Simulation {
     this.recordBreakerResult(ds, req, false);
     this.fabricInFlight--;
     if (req.fate) return;
-    this.respondError(req, 'error');
+    this.respondError(req);
   }
 
   private recordBreakerResult(ds: DownstreamSim, req: RequestSim, ok: boolean): void {
@@ -959,8 +1072,8 @@ export class Simulation {
     }
   }
 
-  /** Send an error-ish response to the client, paced if pacing is enabled. */
-  private respondError(req: RequestSim, kind: 'shed' | 'error'): void {
+  /** Send an error response to the client, paced if pacing is enabled. */
+  private respondError(req: RequestSim): void {
     const f = this.cfg.fabric;
     const a = req.attempt;
     const send = () => {
@@ -968,7 +1081,7 @@ export class Simulation {
       req.setPhase('returning', this.now, this.now + NET_CLIENT_FABRIC_MS);
       this.queue.schedule(this.now + NET_CLIENT_FABRIC_MS, () => {
         if (req.attempt !== a || req.fate) return;
-        this.clientReceive(req, kind);
+        this.clientReceive(req, 'error');
       });
     };
     if (f.errorPacingEnabled && f.errorPacingDelayMs > 0) {
@@ -996,7 +1109,7 @@ export class Simulation {
       connectionCount: this.fabricConnCount,
       maxConnections: this.cfg.fabric.maxConnections,
       handshakesActive: this.handshakesActive,
-      handshakesQueued: this.acceptQueue.length,
+      permitWaiting: this.permitWaiters.length,
       inFlight: this.fabricInFlight,
       cpuUtilization: this.cpu.utilization(),
       slowdownFactor: this.cpu.slowdownFactor(),
@@ -1006,9 +1119,9 @@ export class Simulation {
   private detectConditions(): void {
     const b = this.metrics.lastClosedBucket();
     if (!b) return;
-    const shedActive = b.sheds > 0;
+    const shedActive = b.shedTls + b.shedConnLimit > 0;
     if (shedActive && !this.shedWasActive) {
-      this.metrics.log(this.now, 'warn', 'Load shedding engaged');
+      this.metrics.log(this.now, 'warn', 'Shedding connections (TLS permits / connection limit)');
     }
     this.shedWasActive = shedActive;
 
@@ -1032,7 +1145,7 @@ export class Simulation {
     // queued or refused), so gauge pressure counts too.
     const failing = b.timeouts + b.rejected >= 3;
     const tlsPressure =
-      b.tlsHandshakesStarted >= 8 || this.handshakesActive >= 8 || this.acceptQueue.length >= 8;
+      b.tlsHandshakesStarted >= 8 || this.handshakesActive >= 8 || this.permitWaiters.length >= 8;
     const stormActive = failing && tlsPressure;
     if (stormActive && !this.stormWasActive) {
       this.throttledLog(

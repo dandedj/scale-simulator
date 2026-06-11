@@ -20,7 +20,8 @@ interface WindowStats {
   arrivals: number;
   successes: number;
   timeouts: number;
-  sheds: number;
+  shedTls: number;
+  shedConnLimit: number;
   errors: number;
   rejected: number;
   retries: number;
@@ -34,7 +35,8 @@ function statsBetween(sim: Simulation, fromMs: number, toMs: number): WindowStat
     arrivals: 0,
     successes: 0,
     timeouts: 0,
-    sheds: 0,
+    shedTls: 0,
+    shedConnLimit: 0,
     errors: 0,
     rejected: 0,
     retries: 0,
@@ -46,7 +48,8 @@ function statsBetween(sim: Simulation, fromMs: number, toMs: number): WindowStat
     s.arrivals += b.arrivals;
     s.successes += b.successes;
     s.timeouts += b.timeouts;
-    s.sheds += b.sheds;
+    s.shedTls += b.shedTls;
+    s.shedConnLimit += b.shedConnLimit;
     s.errors += b.errors;
     s.rejected += b.rejected;
     s.retries += b.retries;
@@ -69,7 +72,7 @@ describe('healthy preset', () => {
     const s = statsBetween(sim, 5_000, 60_000);
     expect(s.successRate).toBeGreaterThan(0.95);
     expect(s.timeouts / s.arrivals).toBeLessThan(0.02);
-    expect(s.sheds).toBe(0);
+    expect(s.shedTls + s.shedConnLimit).toBe(0);
     // Steady-state handshakes only replace the ~1% of conns lost to timeouts.
     expect(s.handshakesStarted / s.arrivals).toBeLessThan(0.05);
   });
@@ -116,9 +119,48 @@ describe('protected preset', () => {
     run(sim, 10_000); // recovery: 20s..30s
     const recovery = statsBetween(sim, 25_000, 30_000);
     expect(recovery.successRate).toBeGreaterThan(0.85);
-    // During the pulse it shed rather than collapsed.
+    // During the pulse the fabric shed connection attempts (RST) rather
+    // than letting handshake demand melt the CPU.
     const pulse = statsBetween(sim, 15_000, 20_000);
-    expect(pulse.sheds).toBeGreaterThan(0);
+    expect(pulse.shedTls + pulse.shedConnLimit).toBeGreaterThan(0);
+  });
+});
+
+describe('client circuit breaker', () => {
+  it('trips on a failing fabric path and recovers after it heals', () => {
+    const sim = newSim('healthy', (cfg) => {
+      cfg.clients.circuitBreakerEnabled = true;
+      cfg.downstreams.errorRate = 1.0; // every downstream answer is an error
+    });
+    run(sim, 10_000);
+    // All client breakers should have tripped; arrivals now fail fast locally.
+    const broken = statsBetween(sim, 6_000, 10_000);
+    expect(sim.clients.every((c) => c.breaker !== 'closed')).toBe(true);
+    expect(broken.rejected).toBeGreaterThan(broken.errors);
+    sim.cfg.downstreams.errorRate = 0.005; // downstream heals
+    run(sim, 20_000);
+    expect(sim.clients.every((c) => c.breaker === 'closed')).toBe(true);
+    const recovered = statsBetween(sim, 25_000, 30_000);
+    expect(recovered.successRate).toBeGreaterThan(0.9);
+  });
+});
+
+describe('TLS resumption', () => {
+  it('flags handshakes as resumed according to the configured rate', () => {
+    const all = newSim('healthy', (cfg) => {
+      cfg.fabric.tlsResumptionRate = 1;
+    });
+    const none = newSim('healthy', (cfg) => {
+      cfg.fabric.tlsResumptionRate = 0;
+    });
+    for (const sim of [all, none]) {
+      run(sim, 10_000);
+      sim.triggerPulse(3, 3_000); // force pool growth → handshakes
+      run(sim, 10_000);
+    }
+    expect(all.metrics.totals.resumedHandshakes).toBeGreaterThan(0);
+    expect(all.metrics.totals.tlsHandshakesCompleted).toBeGreaterThan(0);
+    expect(none.metrics.totals.resumedHandshakes).toBe(0);
   });
 });
 
@@ -161,6 +203,7 @@ describe('engine invariants', () => {
     run(sim, 20_000);
     expect(sim.fabricInFlight).toBe(0);
     expect(sim.handshakesActive).toBe(0);
+    expect(sim.permitWaiters.length).toBe(0);
     expect(sim.totalDsQueueDepth()).toBe(0);
     expect(sim.requests.size).toBe(0);
     for (const ds of sim.downstreams) {

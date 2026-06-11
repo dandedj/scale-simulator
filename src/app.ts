@@ -28,6 +28,7 @@ export class App {
 
   private hudClock: HTMLElement;
   private hudAmp: HTMLElement;
+  private hudSuccess: HTMLElement;
   private stormBadge: HTMLElement;
 
   constructor() {
@@ -38,6 +39,7 @@ export class App {
     this.charts = new ChartRail(document.getElementById('charts')!);
     this.hudClock = document.getElementById('hud-clock')!;
     this.hudAmp = document.getElementById('hud-amp')!;
+    this.hudSuccess = document.getElementById('hud-success')!;
     this.stormBadge = document.getElementById('storm-badge')!;
 
     this.controls = new ControlPanel(
@@ -115,18 +117,25 @@ export class App {
     const clock = `${(this.sim.now / 1000).toFixed(1)}s`;
     if (this.hudClock.textContent !== clock) this.hudClock.textContent = clock;
 
-    // Amplification R over the last second: attempts sent vs successes.
+    // Rolling window (last ~2s): amplification and overall success rate.
     const buckets = this.sim.metrics.buckets;
     let sent = 0;
     let ok = 0;
-    for (let i = Math.max(0, buckets.length - 4); i < buckets.length; i++) {
+    let arrivals = 0;
+    for (let i = Math.max(0, buckets.length - 8); i < buckets.length; i++) {
       sent += buckets[i].arrivals + buckets[i].retries;
+      arrivals += buckets[i].arrivals;
       ok += buckets[i].successes;
     }
     const r = sent === 0 ? 1 : sent / Math.max(1, ok);
     const rText = r >= 8 ? '∞' : `${r.toFixed(1)}`;
     if (this.hudAmp.textContent !== rText) this.hudAmp.textContent = rText;
     this.hudAmp.className = r <= 1.1 ? 'amp-ok' : r <= 1.5 ? 'amp-warn' : 'amp-bad';
+
+    const rate = arrivals === 0 ? 1 : Math.min(1, ok / arrivals);
+    const rateText = `${(rate * 100).toFixed(0)}%`;
+    if (this.hudSuccess.textContent !== rateText) this.hudSuccess.textContent = rateText;
+    this.hudSuccess.className = rate >= 0.95 ? 'amp-ok' : rate >= 0.8 ? 'amp-warn' : 'amp-bad';
 
     this.stormBadge.classList.toggle('visible', this.sim.stormActive());
   }

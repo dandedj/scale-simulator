@@ -567,3 +567,91 @@ input[type='range']::-moz-range-thumb {
   color: var(--bad);
   font-weight: 600;
 }
+
+/* ---------- Legend dialog ---------- */
+
+#legend-dialog {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0;
+  max-width: 1060px;
+  width: calc(100vw - 80px);
+  max-height: calc(100vh - 80px);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
+}
+
+#legend-dialog::backdrop {
+  background: rgba(6, 7, 9, 0.7);
+  backdrop-filter: blur(2px);
+}
+
+.legend-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.legend-header h2 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+}
+
+.legend-close {
+  padding: 4px 10px;
+}
+
+.legend-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 4px 22px;
+  padding: 14px 18px 18px;
+  overflow-y: auto;
+  max-height: calc(100vh - 170px);
+}
+
+.legend-section h3 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--info);
+  margin: 10px 0 6px;
+}
+
+.legend-row {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 3.5px 0;
+}
+
+.legend-swatch {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.legend-text {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.legend-text b {
+  color: var(--text);
+  font-weight: 600;
+}

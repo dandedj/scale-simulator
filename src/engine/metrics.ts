@@ -19,11 +19,13 @@ export class MetricsCollector {
     arrivals: 0,
     successes: 0,
     timeouts: 0,
-    sheds: 0,
+    shedTls: 0,
+    shedConnLimit: 0,
     errors: 0,
     rejected: 0,
     retries: 0,
     tlsHandshakesCompleted: 0,
+    resumedHandshakes: 0,
     wastedHandshakes: 0,
   };
   events: SimEventLog[] = [];
@@ -70,9 +72,13 @@ export class MetricsCollector {
     this.current.timeouts++;
     this.totals.timeouts++;
   }
-  countShed(): void {
-    this.current.sheds++;
-    this.totals.sheds++;
+  countShedTls(): void {
+    this.current.shedTls++;
+    this.totals.shedTls++;
+  }
+  countShedConnLimit(): void {
+    this.current.shedConnLimit++;
+    this.totals.shedConnLimit++;
   }
   countError(): void {
     this.current.errors++;
@@ -86,8 +92,12 @@ export class MetricsCollector {
     this.current.retries++;
     this.totals.retries++;
   }
-  countHandshakeStarted(): void {
+  countHandshakeStarted(resumed: boolean): void {
     this.current.tlsHandshakesStarted++;
+    if (resumed) {
+      this.current.tlsHandshakesResumed++;
+      this.totals.resumedHandshakes++;
+    }
   }
   countHandshakeCompleted(wasted: boolean): void {
     this.current.tlsHandshakesCompleted++;
@@ -123,11 +133,13 @@ export class MetricsCollector {
       arrivals: 0,
       successes: 0,
       timeouts: 0,
-      sheds: 0,
+      shedTls: 0,
+      shedConnLimit: 0,
       errors: 0,
       rejected: 0,
       retries: 0,
       tlsHandshakesStarted: 0,
+      tlsHandshakesResumed: 0,
       tlsHandshakesCompleted: 0,
       latencies: [],
       fabricConnections: 0,

@@ -231,6 +231,30 @@ export class Renderer {
       // Waiting + retry badges
       ctx.font = '600 10px "IBM Plex Mono", monospace';
       let bx = b.x + b.w - 8;
+      if (sim.cfg.clients.circuitBreakerEnabled) {
+        const cbx = bx - 4;
+        const cby = b.y + 13;
+        if (client.breaker === 'closed') {
+          ctx.fillStyle = SEMANTIC.success;
+          ctx.beginPath();
+          ctx.arc(cbx, cby, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (client.breaker === 'open') {
+          const frac = clamp01((sim.now - client.breakerSince) / sim.cfg.clients.breakerCooldownMs);
+          ctx.strokeStyle = SEMANTIC.shed;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(cbx, cby, 4.5, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+          ctx.stroke();
+        } else {
+          ctx.strokeStyle = SEMANTIC.shed;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(cbx, cby, 4.5, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        bx -= 14;
+      }
       if (client.pendingRetries > 0) {
         const label = `↻${client.pendingRetries}`;
         ctx.fillStyle = SEMANTIC.retry;
@@ -269,10 +293,10 @@ export class Renderer {
     ctx.font = '500 10px "IBM Plex Mono", monospace';
     ctx.fillStyle = SURFACE.textDim;
     ctx.fillText(`conns ${view.connectionCount}/${view.maxConnections}`, gx, f.y + 50);
-    if (view.handshakesQueued > 0) {
+    if (view.permitWaiting > 0) {
       ctx.fillStyle = SEMANTIC.shed;
       ctx.textAlign = 'right';
-      ctx.fillText(`+${view.handshakesQueued} awaiting TLS`, gx + gw, f.y + 50);
+      ctx.fillText(`+${view.permitWaiting} permit wait`, gx + gw, f.y + 50);
       ctx.textAlign = 'left';
     }
 
@@ -337,23 +361,19 @@ export class Renderer {
     }
     ctx.textAlign = 'left';
 
-    // Footer: in-flight + shed/pacing status chips.
+    // Footer: in-flight, lifetime shed counters, pacing chip.
     ctx.font = '500 10px "IBM Plex Mono", monospace';
     ctx.fillStyle = SURFACE.textDim;
     ctx.fillText(`in-flight ${view.inFlight}`, f.x + 12, f.y + f.h - 12);
-    const cfg = sim.cfg.fabric;
-    const chips: Array<[string, boolean]> = [
-      ['SHED', cfg.sheddingEnabled],
-      ['PACE', cfg.errorPacingEnabled],
-      ['QCAP', cfg.queueLimitEnabled],
-    ];
-    let cx = f.x + f.w - 12;
-    ctx.textAlign = 'right';
-    for (const [label, on] of chips.reverse()) {
-      ctx.fillStyle = on ? SEMANTIC.success : withAlpha(SURFACE.textFaint, 0.8);
-      ctx.fillText(on ? `●${label}` : `○${label}`, cx, f.y + f.h - 12);
-      cx -= ctx.measureText(`●${label}`).width + 10;
+    const t = sim.metrics.totals;
+    if (t.shedTls + t.shedConnLimit > 0) {
+      ctx.fillStyle = SEMANTIC.shed;
+      ctx.fillText(`shed tls ${t.shedTls} · conn ${t.shedConnLimit}`, f.x + 12, f.y + f.h - 25);
     }
+    const pacingOn = sim.cfg.fabric.errorPacingEnabled;
+    ctx.textAlign = 'right';
+    ctx.fillStyle = pacingOn ? SEMANTIC.success : withAlpha(SURFACE.textFaint, 0.8);
+    ctx.fillText(pacingOn ? '●PACE' : '○PACE', f.x + f.w - 12, f.y + f.h - 12);
     ctx.textAlign = 'left';
   }
 
@@ -637,23 +657,13 @@ export class Renderer {
       case 'timeout':
         this.spikedStar(pos.x, pos.y, r, withAlpha(SEMANTIC.timeout, alpha));
         break;
-      case 'shed':
-        ctx.strokeStyle = withAlpha(SEMANTIC.shed, alpha);
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y, r * 0.8, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y, r * 0.35, 0, Math.PI * 2);
-        ctx.stroke();
-        break;
       case 'error':
         ctx.strokeStyle = withAlpha(SEMANTIC.error, alpha);
         ctx.lineWidth = 2;
         ctx.strokeRect(pos.x - r * 0.7, pos.y - r * 0.7, r * 1.4, r * 1.4);
         break;
       case 'rejected':
-        ctx.strokeStyle = withAlpha(SEMANTIC.timeout, alpha);
+        ctx.strokeStyle = withAlpha(SEMANTIC.shed, alpha);
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.moveTo(pos.x - r * 0.6, pos.y - r * 0.6);
@@ -702,11 +712,7 @@ export class Renderer {
       const y = age < FALL_MS ? lerp(m.y0, m.y1, clamp01(age / FALL_MS)) : m.y1;
       const alpha = age < FALL_MS ? 0.9 : 0.9 * (1 - (age - FALL_MS) / FADE_MS);
       const color =
-        m.fate === 'timeout' || m.fate === 'rejected'
-          ? SEMANTIC.timeout
-          : m.fate === 'shed'
-            ? SEMANTIC.shed
-            : SEMANTIC.error;
+        m.fate === 'timeout' ? SEMANTIC.timeout : m.fate === 'rejected' ? SEMANTIC.shed : SEMANTIC.error;
       ctx.fillStyle = withAlpha(color, alpha);
       const x = y === m.y1 ? m.x : m.x + Math.sin((now - m.bornAt) / 60) * 2;
       ctx.fillRect(x, y, 3, 3);

@@ -5,10 +5,13 @@
  * but preserves the ratios that drive the dynamics, all from measured data:
  *   - TLS full handshake = 25x the CPU of proxying one request over a warm
  *     connection (measured range 15–70x; Tempesta kernel-TLS study).
+ *   - Resumed handshakes cost a configurable fraction of a full handshake
+ *     (default 40%).
  *   - Client timeout ≈ p99 of end-to-end latency (~1% baseline timeouts —
  *     "p99 brushing the deadline" is normal in RTB).
  *   - Pool size ≈ 2x Little's law (rate x latency).
- *   - Handshake concurrency ≈ what the CPU can finish before clients hang up.
+ *   - TLS permits ≈ what the CPU can finish before clients hang up; waiters
+ *     are shed with an RST after the permit wait.
  */
 
 import type { Preset, SimulationConfig } from './types';
@@ -25,19 +28,21 @@ function base(): SimulationConfig {
       maxRetries: 1,
       retryBackoffBaseMs: 25,
       retryJitter: true,
+      circuitBreakerEnabled: false,
+      breakerFailureRatio: 0.5,
+      breakerMinSamples: 10,
+      breakerCooldownMs: 3000,
     },
     fabric: {
       maxConnections: 96,
       tlsHandshakeConcurrency: 4,
-      tlsAcceptQueueLimit: 16,
+      tlsPermitWaitMs: 50,
       tlsHandshakeMs: 30,
+      tlsResumptionRate: 0.7,
+      tlsResumptionCostFactor: 0.4,
       processingMs: 2,
       cpuCapacity: 3000,
       tlsCpuCost: 50,
-      queueLimitEnabled: true,
-      queueLimit: 20,
-      sheddingEnabled: true,
-      shedThreshold: 40,
       errorPacingEnabled: true,
       errorPacingDelayMs: 150,
     },
@@ -65,14 +70,14 @@ export const PRESETS: Preset[] = [
     id: 'healthy',
     name: 'Healthy',
     description:
-      'Conservative limits, all protections on. Connections stay warm, handshakes are rare. Try a pulse — it sheds briefly and recovers.',
+      'Conservative limits, protections on. Connections stay warm, handshakes are rare and mostly resumed. Try a pulse and watch the response.',
     config: base(),
   },
   {
     id: 'storm-prone',
     name: 'Storm-prone',
     description:
-      'Raised limits, protections disabled: 16x the handshake concurrency, shedding off, 3 un-jittered retries. Stable at baseline — try a traffic pulse and watch what happens after it ends.',
+      'Raised limits: 16x the TLS permits, a 1s permit wait, 3 un-jittered retries, pacing and breakers off. Stable at baseline — try a traffic pulse and watch what happens after it ends.',
     config: (() => {
       const c = base();
       c.clients.requestTimeoutMs = 250;
@@ -82,9 +87,7 @@ export const PRESETS: Preset[] = [
       c.clients.retryJitter = false;
       c.fabric.maxConnections = 300;
       c.fabric.tlsHandshakeConcurrency = 64;
-      c.fabric.tlsAcceptQueueLimit = 200;
-      c.fabric.sheddingEnabled = false;
-      c.fabric.queueLimitEnabled = false;
+      c.fabric.tlsPermitWaitMs = 1000;
       c.fabric.errorPacingEnabled = false;
       c.downstreamPool.circuitBreakerEnabled = false;
       return c;
@@ -109,7 +112,7 @@ export const PRESETS: Preset[] = [
     id: 'overwhelmed',
     name: 'Overwhelmed',
     description:
-      'Offered load beyond capacity, slow erroring downstreams, timeouts tighter than typical latency, no protections. Goodput collapses to ~zero and stays there.',
+      'Offered load beyond capacity, slow erroring downstreams, timeouts tighter than typical latency, no protections. Observe goodput once the system saturates.',
     config: (() => {
       const c = base();
       c.clients.count = 8;
@@ -122,9 +125,7 @@ export const PRESETS: Preset[] = [
       c.clients.retryJitter = false;
       c.fabric.maxConnections = 500;
       c.fabric.tlsHandshakeConcurrency = 128;
-      c.fabric.tlsAcceptQueueLimit = 400;
-      c.fabric.sheddingEnabled = false;
-      c.fabric.queueLimitEnabled = false;
+      c.fabric.tlsPermitWaitMs = 2000;
       c.fabric.errorPacingEnabled = false;
       c.downstreamPool.poolSizePerDownstream = 12;
       c.downstreamPool.requestTimeoutMs = 180;

@@ -8,6 +8,7 @@
 import { PRESETS } from '../engine/presets';
 import type { Simulation } from '../engine/simulation';
 import type { SimulationConfig } from '../engine/types';
+import { Legend } from './legend';
 
 export interface ControlHooks {
   getSim(): Simulation;
@@ -53,28 +54,29 @@ const GROUPS: Array<{ name: string; knobs: KnobDef[]; toggles: ToggleDef[] }> = 
       { label: 'Pool wait limit', min: 50, max: 1000, step: 10, get: (c) => c.clients.poolAcquireTimeoutMs, set: (c, v) => (c.clients.poolAcquireTimeoutMs = v), format: ms },
       { label: 'Max retries', min: 0, max: 5, step: 1, get: (c) => c.clients.maxRetries, set: (c, v) => (c.clients.maxRetries = v) },
       { label: 'Backoff base', min: 5, max: 250, step: 5, get: (c) => c.clients.retryBackoffBaseMs, set: (c, v) => (c.clients.retryBackoffBaseMs = v), format: ms },
+      { label: 'Breaker trip ratio', min: 0.1, max: 0.9, step: 0.05, get: (c) => c.clients.breakerFailureRatio, set: (c, v) => (c.clients.breakerFailureRatio = v), format: (v) => `${Math.round(v * 100)}%` },
+      { label: 'Breaker cooldown', min: 500, max: 10000, step: 250, get: (c) => c.clients.breakerCooldownMs, set: (c, v) => (c.clients.breakerCooldownMs = v), format: (v) => `${(v / 1000).toFixed(1)}s` },
     ],
     toggles: [
       { label: 'Retry jitter', get: (c) => c.clients.retryJitter, set: (c, v) => (c.clients.retryJitter = v) },
+      { label: 'Circuit breaker', get: (c) => c.clients.circuitBreakerEnabled, set: (c, v) => (c.clients.circuitBreakerEnabled = v) },
     ],
   },
   {
     name: 'RTB Fabric',
     knobs: [
       { label: 'Connection limit', min: 8, max: 500, step: 4, get: (c) => c.fabric.maxConnections, set: (c, v) => (c.fabric.maxConnections = v) },
-      { label: 'TLS concurrency', min: 1, max: 128, step: 1, get: (c) => c.fabric.tlsHandshakeConcurrency, set: (c, v) => (c.fabric.tlsHandshakeConcurrency = v) },
-      { label: 'TLS accept queue', min: 0, max: 400, step: 4, get: (c) => c.fabric.tlsAcceptQueueLimit, set: (c, v) => (c.fabric.tlsAcceptQueueLimit = v) },
+      { label: 'TLS permits', min: 1, max: 128, step: 1, get: (c) => c.fabric.tlsHandshakeConcurrency, set: (c, v) => (c.fabric.tlsHandshakeConcurrency = v) },
+      { label: 'TLS permit wait', min: 0, max: 2000, step: 10, get: (c) => c.fabric.tlsPermitWaitMs, set: (c, v) => (c.fabric.tlsPermitWaitMs = v), format: ms },
+      { label: 'TLS resumption', min: 0, max: 1, step: 0.05, get: (c) => c.fabric.tlsResumptionRate, set: (c, v) => (c.fabric.tlsResumptionRate = v), format: (v) => `${Math.round(v * 100)}%` },
+      { label: 'Resumed cost (vs full)', min: 0.1, max: 1, step: 0.05, get: (c) => c.fabric.tlsResumptionCostFactor, set: (c, v) => (c.fabric.tlsResumptionCostFactor = v), format: (v) => `${Math.round(v * 100)}%` },
       { label: 'TLS handshake time', min: 5, max: 100, step: 5, get: (c) => c.fabric.tlsHandshakeMs, set: (c, v) => (c.fabric.tlsHandshakeMs = v), format: ms },
       { label: 'TLS CPU cost', min: 5, max: 200, step: 5, get: (c) => c.fabric.tlsCpuCost, set: (c, v) => (c.fabric.tlsCpuCost = v), format: (v) => `${v}u` },
       { label: 'Processing time', min: 1, max: 10, step: 0.5, get: (c) => c.fabric.processingMs, set: (c, v) => (c.fabric.processingMs = v), format: ms },
       { label: 'CPU capacity', min: 500, max: 12000, step: 250, kind: 'structure', get: (c) => c.fabric.cpuCapacity, set: (c, v) => (c.fabric.cpuCapacity = v), format: (v) => `${(v / 1000).toFixed(1)}ku/s` },
-      { label: 'Shed threshold', min: 5, max: 400, step: 5, get: (c) => c.fabric.shedThreshold, set: (c, v) => (c.fabric.shedThreshold = v), format: (v) => `${v} in-flight` },
-      { label: 'Queue limit', min: 5, max: 400, step: 5, get: (c) => c.fabric.queueLimit, set: (c, v) => (c.fabric.queueLimit = v) },
       { label: 'Error pacing delay', min: 10, max: 1000, step: 10, get: (c) => c.fabric.errorPacingDelayMs, set: (c, v) => (c.fabric.errorPacingDelayMs = v), format: ms },
     ],
     toggles: [
-      { label: 'Load shedding', get: (c) => c.fabric.sheddingEnabled, set: (c, v) => (c.fabric.sheddingEnabled = v) },
-      { label: 'Bounded queue', get: (c) => c.fabric.queueLimitEnabled, set: (c, v) => (c.fabric.queueLimitEnabled = v) },
       { label: 'Error pacing', get: (c) => c.fabric.errorPacingEnabled, set: (c, v) => (c.fabric.errorPacingEnabled = v) },
     ],
   },
@@ -199,6 +201,8 @@ export class ControlPanel {
     resetBtn.title = 'Restart the simulation with the current settings';
     resetBtn.addEventListener('click', () => this.hooks.reset());
     wrap.appendChild(resetBtn);
+
+    new Legend(wrap);
 
     this.header.appendChild(wrap);
   }
@@ -340,16 +344,23 @@ export class ControlPanel {
   update(): void {
     const sim = this.hooks.getSim();
     const t = sim.metrics.totals;
-    const entries: Array<[string, number, string]> = [
+    const successRate = t.arrivals > 0 ? (t.successes / t.arrivals) * 100 : 100;
+    const entries: Array<[string, number | string, string]> = [
+      ['success', `${successRate.toFixed(1)}%`, 'var(--ok)'],
       ['ok', t.successes, 'var(--ok)'],
       ['timeout', t.timeouts, 'var(--bad)'],
-      ['shed', t.sheds, 'var(--warn)'],
       ['error', t.errors, 'var(--err)'],
+      ['shed·tls', t.shedTls, 'var(--warn)'],
+      ['shed·conn', t.shedConnLimit, 'var(--warn)'],
       ['retries', t.retries, 'var(--retry)'],
+      ['resumed TLS', t.resumedHandshakes, 'var(--tls)'],
       ['wasted TLS', t.wastedHandshakes, 'var(--bad)'],
     ];
     const html = entries
-      .map(([k, v, c]) => `<div class="total"><span style="color:${c}">${fmtCount(v)}</span><label>${k}</label></div>`)
+      .map(
+        ([k, v, c]) =>
+          `<div class="total"><span style="color:${c}">${typeof v === 'number' ? fmtCount(v) : v}</span><label>${k}</label></div>`,
+      )
       .join('');
     if (this.lastTotalsHtml !== html) {
       this.lastTotalsHtml = html;

@@ -4,9 +4,10 @@ An animated, browser-based discrete-event simulation of **TLS connection
 retry storms** in a high-throughput RTB proxy fabric. It models the full
 feedback loop — timeouts, connection teardown, TLS handshake cost, shared
 CPU — and lets you experiment live with limit settings and protection
-mechanisms (load shedding, error pacing, TLS handshake concurrency limits,
-bounded queues, circuit breakers) to see how each changes the system's
-response to load surges.
+mechanisms (TLS handshake permits with a bounded wait, error pacing,
+session resumption, and circuit breakers on both the clients and the
+fabric→downstream pools) to see how each changes the system's response to
+load surges.
 
 ## Run it
 
@@ -31,35 +32,42 @@ The storm is **not scripted**. It emerges from three coupled rules:
 1. **A request timeout poisons its connection** (HTTP/1.1 semantics). The
    client tears it down and must eventually re-handshake.
 2. **A full TLS handshake costs ~25× the CPU** of proxying a request over a
-   warm connection (measured range 15–70×; see sources).
+   warm connection (measured range 15–70×; see sources). Resumed handshakes
+   cost a configurable fraction of that (default 40%); the resumption rate
+   is a knob.
 3. **Fabric CPU is shared** (processor sharing): when demanded work exceeds
    capacity, *every* in-flight operation stretches proportionally.
 
 So: latency rises → timeouts fire → connections die → handshakes flood →
-CPU contention stretches everything → more timeouts. Each protection breaks
-one link of that loop:
+CPU contention stretches everything → more timeouts. The control mechanisms:
 
-| Protection | Link it breaks |
+| Mechanism | What it does |
 |---|---|
-| Load shedding | A cheap, instant "no" instead of an expensive timeout — and the client's connection *survives* a shed response |
-| Error pacing | A client slot can only retry once per (pacing delay + backoff) — the tight retry loop is rate-limited by error latency |
-| TLS handshake concurrency cap | Bounds handshake CPU demand; excess connects wait in a cheap accept queue instead of melting the CPU |
-| Bounded queues | Prevents the latency death spiral where every dequeued request is already dead (client gave up while it queued) |
-| Circuit breaker | One slow downstream can't absorb the fabric's entire connection/queue budget |
+| TLS permits + permit wait | At most N handshakes run concurrently. A connection without a permit waits up to the permit wait time, then is **shed with an RST** (the connection is invalidated). There is no TLS queue — only this bounded wait. |
+| Connection limit | Beyond the cap, new connections are **shed with an RST** before any TLS work happens. |
+| Error pacing | Error responses are held for a pacing delay — a client slot can only retry once per (pacing delay + backoff), rate-limiting tight retry loops. |
+| TLS session resumption | A configurable share of handshakes resume a prior session, skipping most of the asymmetric crypto. |
+| Downstream circuit breaker | One slow downstream can't absorb the fabric's entire connection budget; the fabric fails fast and probes for recovery. |
+| Client circuit breaker | A client that sees sustained failures stops sending entirely, removing its load until a probe succeeds. |
+
+**"Shed" here means connection-level rejection**, and the simulator counts
+the two causes separately: `shed·tls` (TLS permits stayed occupied past the
+wait) and `shed·conn` (connection limit exceeded).
 
 Faithfully modeled wasted work: the fabric completes handshakes for clients
 that already gave up, downstreams finish responses the fabric already timed
-out, and queued requests are discovered dead only at dequeue.
+out, and requests waiting for a downstream connection are discovered dead
+only at dequeue.
 
 ## Scenarios
 
-- **Healthy** — conservative limits, all protections on. Pulse it: brief
-  shedding, fast recovery.
-- **Storm-prone** — raised limits with protections disabled: 16× the
-  handshake concurrency, shedding off, 3 un-jittered retries. Stable at
-  baseline; after a 3× pulse the storm **persists once the pulse ends** (a
-  metastable failure — the trigger is gone, the retry/handshake feedback loop
-  sustains the overload).
+- **Healthy** — conservative limits, protections on, mostly-resumed
+  handshakes. Pulse it and watch the response.
+- **Storm-prone** — raised limits: 16× the TLS permits, a 1-second permit
+  wait, 3 un-jittered retries, pacing and breakers off. Stable at baseline;
+  after a 3× pulse the storm **persists once the pulse ends** (a metastable
+  failure — the trigger is gone, the retry/handshake feedback loop sustains
+  the overload).
 - **Protected** — the counterpart to Storm-prone: identical client settings,
   with the fabric's limits and protections enabled, so the two configurations
   can be compared under the same pulse.
@@ -71,23 +79,26 @@ Every run is deterministic for a given seed: a demo replays identically.
 ## Reading the screen
 
 - **Particles**: blue = in flight, purple halo = retry attempt. On resolution:
-  green ring = success, red spiked star = timeout, orange hollow ring = shed,
-  yellow square = downstream error (color is always paired with shape).
+  green ring = success, red spiked star = timeout, yellow square = error,
+  orange X = rejected client-side — no connection in time, or the client's own
+  breaker was open (color is always paired with shape).
 - **Lanes** (connections): dim = idle, blue = busy, dashed cyan + pulsing
   rings = TLS handshaking, red fade = torn down.
-- **Fabric internals**: connection gauge vs limit, TLS "airlock" slots with
-  the accept-queue count, the CPU column (overflow hatching + slowdown factor
-  when demand exceeds capacity), per-downstream queues, the error-pacing tray,
-  and the protection chips (SHED / PACE / QCAP).
-- **The graveyard**: failed requests pile up under the fabric. Orange motes
-  are shed requests (rejected cheaply, connections kept alive); red motes are
-  timeouts (connections torn down, retries and re-handshakes follow).
-- **Amplification (HUD)**: attempts sent ÷ successes over the last second.
-  Green ≤1.1; red >1.5 means the retry feedback loop is winning.
+- **Fabric internals**: connection gauge vs limit, TLS permit slots with the
+  count of connections in the permit wait, the CPU column (overflow hatching +
+  slowdown factor when demand exceeds capacity), per-downstream queues, the
+  error-pacing tray, lifetime shed counters split by cause, and the PACE chip.
+- **Breaker dots**: each downstream and (when enabled) each client shows its
+  breaker state — green dot closed, orange arc = open with cooldown progress,
+  orange ring = half-open probing.
+- **The graveyard**: failed requests pile up under the fabric — red motes are
+  timeouts, orange are rejections, yellow are errors.
+- **Success rate + amplification (HUD)**: rolling success rate (successes ÷
+  arrivals) and attempts sent ÷ successes over the last couple of seconds.
 - **Charts** (60s rolling): latency p50/p99 vs the client-timeout line,
-  offered vs goodput (the gap *is* the storm), failure rates, TLS handshake
-  pressure vs the concurrency cap, connections vs limit + queue depth, and
-  amplification.
+  offered vs goodput, failure rates, TLS permit pressure (starts, active,
+  shed·tls) vs the permit count, connections vs limit (+ shed·conn and
+  downstream queue depth), and amplification.
 
 ## Extending it
 
@@ -118,7 +129,8 @@ to stay animatable while preserving the ratios that drive the physics:
   latency = timeout).
 - Krizhanovsky & Koveshnikov, *Performance study of kernel TLS handshakes*
   (Tempesta) — the 10–12× full-handshake throughput penalty.
-- Sy et al. (arXiv 1902.02531) — full vs resumed handshake CPU (~7ms vs ~1–3ms).
+- Sy et al. (arXiv 1902.02531) — full vs resumed handshake CPU (~7ms vs
+  ~1–3ms), grounding the resumption cost factor.
 - Google SRE Book, *Handling Overload* — retry budgets; Google Authorized
   Buyers RTB guidance — tmax 100–300ms; "the first request on a new connection
   has a shorter effective deadline and is more likely to time out."
