@@ -3,6 +3,10 @@
  * grouped by component, lifetime counters, and the event ticker.
  * Plain DOM, no framework — knobs read/write the live SimulationConfig and
  * take effect immediately, like tuning a running system.
+ *
+ * Knob groups carry a scope: 'global' groups (Clients) always edit every
+ * sim so comparison mode keeps offered traffic identical; 'sim' groups edit
+ * the pane selected with the SIM A / SIM B tabs.
  */
 
 import { PRESETS } from '../engine/presets';
@@ -10,17 +14,28 @@ import type { Simulation } from '../engine/simulation';
 import type { SimulationConfig } from '../engine/types';
 import { Legend } from './legend';
 
+export const PANE_TAGS = ['A', 'B'] as const;
+
+type KnobScope = 'global' | 'sim';
+
 export interface ControlHooks {
-  getSim(): Simulation;
+  getSims(): Simulation[];
+  /** Single mode: swap the whole config and restart. */
   loadPreset(id: string): void;
+  /** Comparison mode: apply a preset's tuning to one pane (clients shared). */
+  applyScenario(pane: number, id: string): void;
   reset(): void;
+  /** Surge every sim at once. */
   pulse(factor: number, durationMs: number): void;
   setPaused(paused: boolean): void;
   isPaused(): boolean;
   setTimeScale(s: number): void;
   getTimeScale(): number;
   /** 'rate' → reschedule arrivals; 'structure' → entity/CPU rebuild. */
-  configChanged(kind: 'rate' | 'structure' | 'plain'): void;
+  configChanged(kind: 'rate' | 'structure' | 'plain', target: number | 'all'): void;
+  setCompare(on: boolean): void;
+  isCompare(): boolean;
+  showCompareHelp(): void;
 }
 
 interface KnobDef {
@@ -43,9 +58,10 @@ interface ToggleDef {
 const ms = (v: number) => `${Math.round(v)}ms`;
 const SIGMA_Z99 = 2.3263;
 
-const GROUPS: Array<{ name: string; knobs: KnobDef[]; toggles: ToggleDef[] }> = [
+const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles: ToggleDef[] }> = [
   {
     name: 'Clients',
+    scope: 'global',
     knobs: [
       { label: 'Clients', min: 1, max: 12, step: 1, kind: 'structure', get: (c) => c.clients.count, set: (c, v) => (c.clients.count = v) },
       { label: 'Rate / client', min: 1, max: 80, step: 1, kind: 'rate', get: (c) => c.clients.requestRatePerSec, set: (c, v) => (c.clients.requestRatePerSec = v), format: (v) => `${v}/s` },
@@ -65,6 +81,7 @@ const GROUPS: Array<{ name: string; knobs: KnobDef[]; toggles: ToggleDef[] }> = 
   },
   {
     name: 'RTB Fabric',
+    scope: 'sim',
     knobs: [
       { label: 'Connection limit', min: 8, max: 500, step: 4, get: (c) => c.fabric.maxConnections, set: (c, v) => (c.fabric.maxConnections = v) },
       { label: 'TLS permits', min: 1, max: 128, step: 1, get: (c) => c.fabric.tlsHandshakeConcurrency, set: (c, v) => (c.fabric.tlsHandshakeConcurrency = v) },
@@ -83,6 +100,7 @@ const GROUPS: Array<{ name: string; knobs: KnobDef[]; toggles: ToggleDef[] }> = 
   },
   {
     name: 'Downstream pools',
+    scope: 'sim',
     knobs: [
       { label: 'Pool / downstream', min: 1, max: 30, step: 1, get: (c) => c.downstreamPool.poolSizePerDownstream, set: (c, v) => (c.downstreamPool.poolSizePerDownstream = v) },
       { label: 'Downstream timeout', min: 50, max: 1000, step: 10, get: (c) => c.downstreamPool.requestTimeoutMs, set: (c, v) => (c.downstreamPool.requestTimeoutMs = v), format: ms },
@@ -96,6 +114,7 @@ const GROUPS: Array<{ name: string; knobs: KnobDef[]; toggles: ToggleDef[] }> = 
   },
   {
     name: 'Downstreams',
+    scope: 'sim',
     knobs: [
       { label: 'Downstreams', min: 1, max: 6, step: 1, kind: 'structure', get: (c) => c.downstreams.count, set: (c, v) => (c.downstreams.count = v) },
       { label: 'Response median', min: 10, max: 500, step: 5, get: (c) => c.downstreams.responseTimeMedianMs, set: (c, v) => (c.downstreams.responseTimeMedianMs = v), format: ms },
@@ -115,15 +134,34 @@ const GROUPS: Array<{ name: string; knobs: KnobDef[]; toggles: ToggleDef[] }> = 
   },
 ];
 
+type Totals = Simulation['metrics']['totals'];
+
+const TOTAL_METRICS: Array<{ key: string; color: string; value(t: Totals): string }> = [
+  { key: 'success', color: 'var(--ok)', value: (t) => `${(t.arrivals > 0 ? (t.successes / t.arrivals) * 100 : 100).toFixed(1)}%` },
+  { key: 'ok', color: 'var(--ok)', value: (t) => fmtCount(t.successes) },
+  { key: 'timeout', color: 'var(--bad)', value: (t) => fmtCount(t.timeouts) },
+  { key: 'error', color: 'var(--err)', value: (t) => fmtCount(t.errors) },
+  { key: 'shed·tls', color: 'var(--warn)', value: (t) => fmtCount(t.shedTls) },
+  { key: 'shed·conn', color: 'var(--warn)', value: (t) => fmtCount(t.shedConnLimit) },
+  { key: 'retries', color: 'var(--retry)', value: (t) => fmtCount(t.retries) },
+  { key: 'resumed TLS', color: 'var(--tls)', value: (t) => fmtCount(t.resumedHandshakes) },
+  { key: 'wasted TLS', color: 'var(--bad)', value: (t) => fmtCount(t.wastedHandshakes) },
+];
+
 export class ControlPanel {
   private refreshers: Array<() => void> = [];
   private logList!: HTMLElement;
   private totalsEl!: HTMLElement;
   private lastTotalsHtml = '';
-  private renderedEvents = 0;
+  /** Lifetime-event counters, one per pane. */
+  private renderedEvents: number[] = [];
   private pulseFactor = 3;
   private pulseDurationMs = 5000;
   private pauseBtn!: HTMLButtonElement;
+  private compareBtn!: HTMLButtonElement;
+  private paneTabBtns: HTMLButtonElement[] = [];
+  /** Which pane the 'sim'-scoped knobs edit in comparison mode. */
+  private activePane = 0;
   private side: HTMLElement;
   private header: HTMLElement;
   private hooks: ControlHooks;
@@ -145,7 +183,7 @@ export class ControlPanel {
     const wrap = el('div', 'time-controls');
 
     const pulseBtn = el('button', 'btn btn-pulse', '◉ PULSE ×3');
-    pulseBtn.title = 'Inject a traffic surge (×factor for the set duration)';
+    pulseBtn.title = 'Inject a traffic surge (×factor for the set duration; hits every sim)';
     pulseBtn.addEventListener('click', () => this.hooks.pulse(this.pulseFactor, this.pulseDurationMs));
     wrap.appendChild(pulseBtn);
 
@@ -196,6 +234,11 @@ export class ControlPanel {
     resetBtn.addEventListener('click', () => this.hooks.reset());
     wrap.appendChild(resetBtn);
 
+    this.compareBtn = el('button', 'btn', '⇆ COMPARE') as HTMLButtonElement;
+    this.compareBtn.title = 'Run two simulations side by side under the same client traffic';
+    this.compareBtn.addEventListener('click', () => this.hooks.setCompare(!this.hooks.isCompare()));
+    wrap.appendChild(this.compareBtn);
+
     new Legend(wrap);
 
     this.header.appendChild(wrap);
@@ -218,7 +261,9 @@ export class ControlPanel {
   private buildPresets(): void {
     const section = el('div', 'panel-section');
     section.appendChild(el('h2', 'panel-title', 'Scenarios'));
-    const grid = el('div', 'preset-grid');
+
+    // Single mode: full preset cards swap the whole config.
+    const grid = el('div', 'preset-grid single-only');
     for (const preset of PRESETS) {
       const card = el('button', 'preset-card');
       card.dataset.preset = preset.id;
@@ -232,6 +277,35 @@ export class ControlPanel {
       grid.appendChild(card);
     }
     section.appendChild(grid);
+
+    // Comparison mode: one compact scenario row per pane.
+    const cmp = el('div', 'compare-only');
+    PANE_TAGS.forEach((tag, pane) => {
+      const row = el('div', 'scenario-row');
+      row.appendChild(el('span', `scenario-tag tag-${tag.toLowerCase()}`, `SIM ${tag}`));
+      const btns = el('div', 'scenario-btns');
+      for (const preset of PRESETS) {
+        const b = el('button', 'preset-mini', preset.name);
+        b.dataset.preset = preset.id;
+        b.dataset.pane = String(pane);
+        b.title = preset.description;
+        b.addEventListener('click', () => {
+          this.hooks.applyScenario(pane, preset.id);
+          this.setActiveScenario(pane, preset.id);
+        });
+        btns.appendChild(b);
+      }
+      row.appendChild(btns);
+      cmp.appendChild(row);
+    });
+    cmp.appendChild(
+      el('div', 'scenario-note', 'A scenario sets that sim’s fabric & downstream tuning — and the shared client settings (both sims).'),
+    );
+    const helpBtn = el('button', 'btn btn-small', 'ⓘ INSTRUCTIONS');
+    helpBtn.addEventListener('click', () => this.hooks.showCompareHelp());
+    cmp.appendChild(helpBtn);
+    section.appendChild(cmp);
+
     this.side.appendChild(section);
     this.setActivePreset(PRESETS[0].id);
   }
@@ -242,12 +316,29 @@ export class ControlPanel {
     });
   }
 
+  private setActiveScenario(pane: number, id: string | null): void {
+    this.side.querySelectorAll<HTMLElement>(`.preset-mini[data-pane='${pane}']`).forEach((b) => {
+      b.classList.toggle('active', b.dataset.preset === id);
+    });
+  }
+
   // -- Knobs --------------------------------------------------------------------
+
+  /** The config a knob of the given scope currently reads/writes. */
+  private cfgFor(scope: KnobScope): SimulationConfig {
+    const sims = this.hooks.getSims();
+    const idx = scope === 'sim' ? Math.min(this.activePane, sims.length - 1) : 0;
+    return sims[idx].cfg;
+  }
 
   private buildKnobs(): void {
     const section = el('div', 'panel-section');
     section.appendChild(el('h2', 'panel-title', 'Tuning'));
     for (const group of GROUPS) {
+      // The first per-sim group is preceded by the A/B target tabs.
+      if (group.scope === 'sim' && this.paneTabBtns.length === 0) {
+        section.appendChild(this.buildPaneTabs());
+      }
       const details = document.createElement('details');
       details.className = 'knob-group';
       if (group.name === 'RTB Fabric') details.open = true;
@@ -259,12 +350,10 @@ export class ControlPanel {
         const row = el('label', 'toggle-row');
         const input = document.createElement('input');
         input.type = 'checkbox';
-        const sync = () => (input.checked = toggle.get(this.hooks.getSim().cfg));
+        const sync = () => (input.checked = toggle.get(this.cfgFor(group.scope)));
         sync();
         input.addEventListener('change', () => {
-          toggle.set(this.hooks.getSim().cfg, input.checked);
-          this.hooks.configChanged('plain');
-          this.markCustom();
+          this.applyToggle(group.scope, toggle, input.checked);
         });
         this.refreshers.push(sync);
         row.appendChild(input);
@@ -283,17 +372,14 @@ export class ControlPanel {
         input.step = String(knob.step);
         const fmt = knob.format ?? ((v: number) => String(Math.round(v * 100) / 100));
         const sync = () => {
-          const v = knob.get(this.hooks.getSim().cfg);
+          const v = knob.get(this.cfgFor(group.scope));
           input.value = String(v);
           valueEl.textContent = fmt(v);
         };
         sync();
         input.addEventListener('input', () => {
-          const v = parseFloat(input.value);
-          knob.set(this.hooks.getSim().cfg, v);
-          valueEl.textContent = fmt(knob.get(this.hooks.getSim().cfg));
-          this.hooks.configChanged(knob.kind ?? 'plain');
-          this.markCustom();
+          this.applyKnob(group.scope, knob, parseFloat(input.value));
+          valueEl.textContent = fmt(knob.get(this.cfgFor(group.scope)));
         });
         this.refreshers.push(sync);
         const top = el('div', 'knob-top');
@@ -308,12 +394,80 @@ export class ControlPanel {
     this.side.appendChild(section);
   }
 
-  private markCustom(): void {
-    this.setActivePreset(null);
+  private buildPaneTabs(): HTMLElement {
+    const tabs = el('div', 'pane-tabs compare-only');
+    tabs.appendChild(el('span', 'pane-tabs-label', 'These knobs edit'));
+    PANE_TAGS.forEach((tag, i) => {
+      const b = el('button', `pane-tab tag-${tag.toLowerCase()}`, `SIM ${tag}`) as HTMLButtonElement;
+      b.addEventListener('click', () => {
+        this.activePane = i;
+        this.syncPaneTabs();
+        this.refreshKnobs();
+      });
+      this.paneTabBtns.push(b);
+      tabs.appendChild(b);
+    });
+    this.syncPaneTabs();
+    return tabs;
+  }
+
+  private syncPaneTabs(): void {
+    this.paneTabBtns.forEach((b, i) => b.classList.toggle('active', i === this.activePane));
+  }
+
+  private applyKnob(scope: KnobScope, knob: KnobDef, v: number): void {
+    const sims = this.hooks.getSims();
+    if (scope === 'global') {
+      for (const sim of sims) knob.set(sim.cfg, v);
+      this.hooks.configChanged(knob.kind ?? 'plain', 'all');
+    } else {
+      const idx = Math.min(this.activePane, sims.length - 1);
+      knob.set(sims[idx].cfg, v);
+      this.hooks.configChanged(knob.kind ?? 'plain', idx);
+    }
+    this.markCustom(scope);
+  }
+
+  private applyToggle(scope: KnobScope, toggle: ToggleDef, v: boolean): void {
+    const sims = this.hooks.getSims();
+    if (scope === 'global') {
+      for (const sim of sims) toggle.set(sim.cfg, v);
+      this.hooks.configChanged('plain', 'all');
+    } else {
+      const idx = Math.min(this.activePane, sims.length - 1);
+      toggle.set(sims[idx].cfg, v);
+      this.hooks.configChanged('plain', idx);
+    }
+    this.markCustom(scope);
+  }
+
+  private markCustom(scope: KnobScope): void {
+    if (!this.hooks.isCompare()) {
+      this.setActivePreset(null);
+      return;
+    }
+    if (scope === 'global') {
+      this.setActiveScenario(0, null);
+      this.setActiveScenario(1, null);
+    } else {
+      this.setActiveScenario(this.activePane, null);
+    }
   }
 
   refreshKnobs(): void {
     for (const r of this.refreshers) r();
+  }
+
+  /** Mode switched by the app: sync the toggle button and per-sim state. */
+  setCompareUI(on: boolean): void {
+    this.compareBtn.classList.toggle('active', on);
+    this.activePane = 0;
+    this.syncPaneTabs();
+    this.setActiveScenario(0, null);
+    this.setActiveScenario(1, null);
+    if (!on) this.setActivePreset(null);
+    this.lastTotalsHtml = '';
+    this.refreshKnobs();
   }
 
   // -- Totals & event log ----------------------------------------------------------
@@ -341,51 +495,60 @@ export class ControlPanel {
       this.pauseBtn.textContent = glyph;
       this.pauseBtn.classList.toggle('active', this.hooks.isPaused());
     }
-    const sim = this.hooks.getSim();
-    const t = sim.metrics.totals;
-    const successRate = t.arrivals > 0 ? (t.successes / t.arrivals) * 100 : 100;
-    const entries: Array<[string, number | string, string]> = [
-      ['success', `${successRate.toFixed(1)}%`, 'var(--ok)'],
-      ['ok', t.successes, 'var(--ok)'],
-      ['timeout', t.timeouts, 'var(--bad)'],
-      ['error', t.errors, 'var(--err)'],
-      ['shed·tls', t.shedTls, 'var(--warn)'],
-      ['shed·conn', t.shedConnLimit, 'var(--warn)'],
-      ['retries', t.retries, 'var(--retry)'],
-      ['resumed TLS', t.resumedHandshakes, 'var(--tls)'],
-      ['wasted TLS', t.wastedHandshakes, 'var(--bad)'],
-    ];
-    const html = entries
-      .map(
-        ([k, v, c]) =>
-          `<div class="total"><span style="color:${c}">${typeof v === 'number' ? fmtCount(v) : v}</span><label>${k}</label></div>`,
-      )
-      .join('');
+    const sims = this.hooks.getSims();
+    const compare = sims.length > 1;
+    const html = compare ? totalsHtmlCompare(sims) : totalsHtmlSingle(sims[0]);
     if (this.lastTotalsHtml !== html) {
       this.lastTotalsHtml = html;
+      this.totalsEl.className = compare ? 'totals-cmp' : 'totals-grid';
       this.totalsEl.innerHTML = html;
     }
 
     // The engine caps events[] at 200 entries, so track the lifetime count
-    // and render the newest unseen entries from the tail.
-    const { events, totalLogged } = sim.metrics;
-    if (totalLogged < this.renderedEvents) this.resetLog();
-    const unseen = Math.min(totalLogged - this.renderedEvents, events.length);
-    for (let i = events.length - unseen; i < events.length; i++) {
-      const ev = events[i];
-      const row = el('div', `event event-${ev.severity}`);
-      row.appendChild(el('span', 'event-time', `${(ev.time / 1000).toFixed(1)}s`));
-      row.appendChild(el('span', 'event-msg', ev.message));
-      this.logList.prepend(row);
-      while (this.logList.children.length > 60) this.logList.lastChild?.remove();
-    }
-    this.renderedEvents = totalLogged;
+    // per pane and render the newest unseen entries from the tail.
+    sims.forEach((sim, pane) => {
+      const { events, totalLogged } = sim.metrics;
+      const seen = this.renderedEvents[pane] ?? 0;
+      if (totalLogged < seen) this.renderedEvents[pane] = 0;
+      const unseen = Math.min(totalLogged - (this.renderedEvents[pane] ?? 0), events.length);
+      for (let i = events.length - unseen; i < events.length; i++) {
+        const ev = events[i];
+        const row = el('div', `event event-${ev.severity}`);
+        if (compare) row.appendChild(el('span', `event-tag tag-${PANE_TAGS[pane].toLowerCase()}`, PANE_TAGS[pane]));
+        row.appendChild(el('span', 'event-time', `${(ev.time / 1000).toFixed(1)}s`));
+        row.appendChild(el('span', 'event-msg', ev.message));
+        this.logList.prepend(row);
+        while (this.logList.children.length > 60) this.logList.lastChild?.remove();
+      }
+      this.renderedEvents[pane] = totalLogged;
+    });
   }
 
   resetLog(): void {
-    this.renderedEvents = 0;
+    this.renderedEvents = [];
     this.logList.innerHTML = '';
   }
+}
+
+function totalsHtmlSingle(sim: Simulation): string {
+  const t = sim.metrics.totals;
+  return TOTAL_METRICS.map(
+    (m) => `<div class="total"><span style="color:${m.color}">${m.value(t)}</span><label>${m.key}</label></div>`,
+  ).join('');
+}
+
+function totalsHtmlCompare(sims: Simulation[]): string {
+  const head =
+    `<div class="cmp-row cmp-head"><label></label>` +
+    sims.map((_, i) => `<span class="tag-${PANE_TAGS[i].toLowerCase()}">SIM ${PANE_TAGS[i]}</span>`).join('') +
+    `</div>`;
+  const rows = TOTAL_METRICS.map((m) => {
+    const cells = sims
+      .map((s) => `<span style="color:${m.color}">${m.value(s.metrics.totals)}</span>`)
+      .join('');
+    return `<div class="cmp-row"><label>${m.key}</label>${cells}</div>`;
+  }).join('');
+  return head + rows;
 }
 
 function el(tag: string, className: string, text?: string): HTMLElement {

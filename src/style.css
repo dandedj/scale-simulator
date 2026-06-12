@@ -222,18 +222,107 @@ main {
   flex-direction: column;
   flex: 1;
   min-width: 0;
+  position: relative;
 }
 
-#stage {
+/* Mode visibility: #app gains .compare in comparison mode. */
+.compare .single-only {
+  display: none !important;
+}
+
+#app:not(.compare) .compare-only {
+  display: none !important;
+}
+
+#panes {
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 0;
-  padding: 10px 10px 4px;
+  padding: 10px;
+  gap: 10px;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 5px;
+}
+
+.pane-stage {
+  flex: 1;
+  min-height: 0;
   position: relative;
+}
+
+.pane-stage canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+.pane-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 0 2px;
+}
+
+.pane-tag {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 2px;
+}
+
+.tag-a {
+  color: var(--info);
+}
+
+.tag-b {
+  color: var(--warn);
+}
+
+.pane-storm {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 1.2px;
+  color: var(--bad);
+  border: 1px solid var(--bad);
+  border-radius: 4px;
+  padding: 1px 7px;
+  opacity: 0;
+  transition: opacity 0.25s;
+  animation: storm-pulse 0.9s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.pane-storm.visible {
+  opacity: 1;
+}
+
+.pane-stats {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.pane-stats b {
+  font-size: 13px;
+  font-weight: 600;
 }
 
 #start-gate {
   position: absolute;
-  inset: 10px 10px 4px;
+  inset: 10px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -277,26 +366,84 @@ main {
   color: var(--text-dim);
 }
 
-#scene {
-  width: 100%;
-  height: 100%;
-  display: block;
-  background: var(--canvas);
-  border: 1px solid var(--border);
+/* ---------- Comparison instructions overlay ---------- */
+
+#compare-help {
+  position: absolute;
+  inset: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 7, 9, 0.72);
+  backdrop-filter: blur(2px);
   border-radius: 9px;
+  z-index: 6;
 }
 
-#charts {
+#compare-help.hidden {
+  display: none;
+}
+
+.help-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
+  max-width: 620px;
+  width: calc(100% - 60px);
+  padding: 20px 24px;
+}
+
+.help-card h2 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 22px;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  margin-bottom: 12px;
+}
+
+.help-card ul {
+  list-style: none;
+  margin-bottom: 16px;
+}
+
+.help-card li {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  padding: 5px 0 5px 16px;
+  position: relative;
+}
+
+.help-card li::before {
+  content: '▸';
+  position: absolute;
+  left: 0;
+  color: var(--info);
+}
+
+.help-card li b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* ---------- Charts ---------- */
+
+.pane-charts {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
   gap: 6px;
-  padding: 4px 10px 10px;
   height: 124px;
   flex-shrink: 0;
 }
 
+.compare .pane-charts {
+  height: 84px;
+}
+
 @media (max-width: 1500px) {
-  #charts {
+  #app:not(.compare) .pane-charts {
     grid-template-columns: repeat(3, 1fr);
     height: 200px;
   }
@@ -405,6 +552,102 @@ main {
   font-size: 10px;
   line-height: 1.45;
   color: var(--text-dim);
+}
+
+/* Per-sim scenario rows (comparison mode) */
+
+.scenario-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.scenario-tag {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 1.5px;
+  min-width: 44px;
+}
+
+.scenario-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.preset-mini {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-dim);
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 7px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.preset-mini:hover {
+  border-color: var(--text-dim);
+  color: var(--text);
+}
+
+.preset-mini.active {
+  border-color: var(--info);
+  color: var(--info);
+}
+
+.scenario-note {
+  font-size: 9.5px;
+  line-height: 1.5;
+  color: var(--text-faint);
+  margin: 2px 0 8px;
+}
+
+.btn-small {
+  font-size: 11px;
+  padding: 4px 9px;
+}
+
+/* Per-sim knob target tabs (comparison mode) */
+
+.pane-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.pane-tabs-label {
+  font-size: 9.5px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.pane-tab {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 1.5px;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 4px 10px;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.15s, border-color 0.15s;
+}
+
+.pane-tab:hover {
+  opacity: 0.85;
+}
+
+.pane-tab.active {
+  opacity: 1;
+  border-color: currentColor;
 }
 
 /* Knobs */
@@ -569,6 +812,44 @@ input[type='range']::-moz-range-thumb {
   margin-top: 1px;
 }
 
+/* Side-by-side totals (comparison mode) */
+
+.totals-cmp {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr 1fr;
+}
+
+.totals-cmp .cmp-row {
+  display: contents;
+}
+
+.totals-cmp label {
+  font-size: 9px;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(44, 50, 53, 0.5);
+}
+
+.totals-cmp span {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(44, 50, 53, 0.5);
+}
+
+.totals-cmp .cmp-head label,
+.totals-cmp .cmp-head span {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 1.5px;
+  border-bottom: 1px solid var(--border);
+}
+
 /* Event log */
 
 .eventlog-section {
@@ -600,6 +881,15 @@ input[type='range']::-moz-range-thumb {
   font-variant-numeric: tabular-nums;
   min-width: 42px;
   text-align: right;
+}
+
+.event-tag {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 1px;
+  flex-shrink: 0;
+  min-width: 12px;
 }
 
 .event-info .event-msg {

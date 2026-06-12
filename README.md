@@ -79,6 +79,19 @@ only at dequeue.
 
 Every run is deterministic for a given seed: a demo replays identically.
 
+## Comparison mode
+
+The **⇆ COMPARE** toggle runs two simulations stacked on the same virtual
+clock, each with its own scene, charts, and totals. Client settings (the
+Clients knob group), pulse, speed, pause, and reset are shared, so both sims
+always see the same offered traffic; the RTB Fabric, downstream-pool, and
+downstream knobs are per-sim, selected with the SIM A / SIM B tabs in the
+Tuning panel. In this mode a scenario button sets one sim's fabric and
+downstream tuning plus the shared client settings — Storm-prone and Protected
+share identical client settings by construction, so that pair isolates the
+fabric-side differences under the same pulse. Run totals and the event log
+report both sims side by side.
+
 ## Reading the screen
 
 - **Particles**: blue = in flight, purple halo = retry attempt. On resolution:

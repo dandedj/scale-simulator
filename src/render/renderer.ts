@@ -305,8 +305,10 @@ export class Renderer {
       ctx.textAlign = 'left';
     }
 
-    // TLS airlock — vertical slot strip on the left edge.
-    const slots = Math.min(sim.cfg.fabric.tlsHandshakeConcurrency, 12);
+    // TLS airlock — vertical slot strip on the left edge. The slot count
+    // adapts to the box height so compact (comparison-mode) panes stay legible.
+    const slotCap = Math.max(3, Math.min(12, Math.floor((f.h - 130) / 10)));
+    const slots = Math.min(sim.cfg.fabric.tlsHandshakeConcurrency, slotCap);
     const slotTop = f.y + 70;
     const slotH = (f.h - 130) / Math.max(1, slots);
     ctx.font = '600 10px "IBM Plex Mono", monospace';
@@ -334,9 +336,9 @@ export class Renderer {
         ctx.stroke();
       }
     }
-    if (sim.cfg.fabric.tlsHandshakeConcurrency > 12 && view.handshakesActive > 12) {
+    if (sim.cfg.fabric.tlsHandshakeConcurrency > slots && view.handshakesActive > slots) {
       ctx.fillStyle = SEMANTIC.tlsPulse;
-      ctx.fillText(`+${view.handshakesActive - 12}`, f.x + 10, slotTop + slots * slotH + 12);
+      ctx.fillText(`+${view.handshakesActive - slots}`, f.x + 10, slotTop + slots * slotH + 12);
     }
 
     // CPU column in the middle.
