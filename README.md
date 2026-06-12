@@ -29,11 +29,14 @@ slower; slider from 100× slower to 2× faster).
 
 The storm is **not scripted**. It emerges from three coupled rules:
 
-1. **A request timeout poisons its connection** (HTTP/1.1 semantics). The
-   client tears it down and must eventually re-handshake. The pool's connect
-   timeout outlives the request timeout, so even at peak CPU occasional
-   (mostly resumed) handshakes land and a trickle of traffic survives —
-   goodput collapses toward zero in a storm but never to a hard zero.
+1. **A client timeout poisons its connection** (HTTP/1.1 semantics) — and
+   the client runs a *single* deadline per attempt that traps both phases:
+   the wait for a connection and the request itself. In healthy periods
+   connections are prewarmed outside the hot path; under pressure the client
+   is forced to rebuild connections inside that same deadline, handshake
+   included. At storm CPU no handshake finishes inside it, so goodput can
+   collapse to a hard zero. (Clients with high RTTs typically run higher
+   timeouts.)
 2. **A full TLS handshake costs ~25× the CPU** of proxying a request over a
    warm connection (measured range 15–70×; see sources). Resumed handshakes
    cost a configurable fraction of that (default 40%); the resumption rate
@@ -49,6 +52,11 @@ consuming fabric CPU, so changing the client RTT changes how fast clients
 come back — not the fabric's load per handshake. The client RTT also drives
 every other client↔fabric leg (SYN, request, response, RST), which is what
 makes very fast clients dangerous: their retries return quickly.
+
+When connections are scarce, clients dispatch the *freshest* waiting request
+first (adaptive LIFO): the oldest requests have the least deadline budget
+left and would only poison a freshly rebuilt connection by timing out on it;
+they fail by rejection instead, which poisons nothing.
 
 So: latency rises → timeouts fire → connections die → handshakes flood →
 CPU contention stretches everything → more timeouts. The control mechanisms:

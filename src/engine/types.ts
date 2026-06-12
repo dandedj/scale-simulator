@@ -30,17 +30,15 @@ export interface ClientConfig {
    * any fabric CPU.
    */
   tlsClientDelayMs: number;
-  /** Abort a request if no response within this time (ms). */
-  requestTimeoutMs: number;
-  /** Max time a request waits for a free pooled connection before failing (ms). */
-  poolAcquireTimeoutMs: number;
   /**
-   * The pool abandons a connection attempt after this long (ms). Separate
-   * from (and usually much longer than) the request timeout: the pool keeps
-   * establishing connections for future requests even after the request
-   * that triggered the attempt has given up.
+   * The client's single deadline per attempt (ms). It traps both phases:
+   * the wait for a connection — including any hot-path rebuild and its TLS
+   * handshake — and the request itself. Connection attempts opened under
+   * pressure are abandoned on the same bound; only prewarmed connections
+   * are built outside it. Clients with high RTTs typically run higher
+   * timeouts.
    */
-  connectTimeoutMs: number;
+  clientTimeoutMs: number;
   /** Retries after a timeout or error (0 = fire once, never retry). */
   maxRetries: number;
   /** Base delay before the first retry (ms); doubles each attempt. */

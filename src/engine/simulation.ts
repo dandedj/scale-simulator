@@ -173,14 +173,13 @@ export class RequestSim {
   attempt = 0;
   fate: RequestFate | null = null;
   fateTime = 0;
-  /** Sim time the current attempt was put on the wire. */
-  sentAt = 0;
+  /** Sim time the current attempt started (its client deadline runs from here). */
+  startedAt = 0;
   /** Client-side connection carrying this attempt. */
   conn: ConnSim | null = null;
   /** Fabric→downstream connection carrying this attempt. */
   dsConn: ConnSim | null = null;
   timeoutEvent: ScheduledEvent | null = null;
-  acquireEvent: ScheduledEvent | null = null;
   dsTimeoutEvent: ScheduledEvent | null = null;
   /** True while this request is its client breaker's single half-open probe. */
   isClientProbe = false;
@@ -502,9 +501,17 @@ export class Simulation {
       return;
     }
     const a = req.attempt;
-    req.setPhase('waitingForConnection', this.now, this.now + this.cfg.clients.poolAcquireTimeoutMs);
-    req.acquireEvent = this.queue.schedule(this.now + this.cfg.clients.poolAcquireTimeoutMs, () => {
-      if (req.attempt !== a || req.fate || req.conn) return;
+    req.startedAt = this.now;
+    const deadline = this.cfg.clients.clientTimeoutMs;
+    req.setPhase('waitingForConnection', this.now, this.now + deadline);
+    // One deadline traps both phases: still waiting for a connection when it
+    // fires → rejected; on a connection → timeout (poisons the connection).
+    req.timeoutEvent = this.queue.schedule(this.now + deadline, () => {
+      if (req.attempt !== a || req.fate) return;
+      if (req.conn) {
+        this.onClientTimeout(client, req);
+        return;
+      }
       client.waiting = client.waiting.filter((r) => r !== req);
       this.metrics.countRejected();
       this.recordClientOutcome(client, req, false);
@@ -588,11 +595,9 @@ export class Simulation {
     const conn = new ConnSim(client.id, -1);
     conn.setState('connecting', this.now);
     client.conns.push(conn);
-    // The pool's connect timeout is independent of (and longer than) the
-    // request timeout: establishment continues for future requests even
-    // after the triggering request gives up. This is why some handshakes
-    // still land under heavy contention and a trickle of traffic survives.
-    this.queue.schedule(this.now + this.cfg.clients.connectTimeoutMs, () =>
+    // Hot-path rebuild: the attempt is trapped by the same client timeout as
+    // the requests that forced it — there is no separate connect budget.
+    this.queue.schedule(this.now + this.cfg.clients.clientTimeoutMs, () =>
       this.onConnectTimeout(client, conn),
     );
     // The SYN reaches the fabric after one network hop.
@@ -613,17 +618,10 @@ export class Simulation {
     const a = req.attempt;
     conn.setState('busy', this.now);
     req.conn = conn;
-    req.sentAt = this.now;
-    if (req.acquireEvent) {
-      req.acquireEvent.active = false;
-      req.acquireEvent = null;
-    }
     client.waiting = client.waiting.filter((r) => r !== req);
+    // The deadline armed at attempt start keeps running — time spent waiting
+    // for this connection came out of the same budget.
     req.setPhase('travelingToFabric', this.now, this.now + this.clientHopMs());
-    req.timeoutEvent = this.queue.schedule(this.now + this.cfg.clients.requestTimeoutMs, () => {
-      if (req.attempt !== a || req.fate) return;
-      this.onClientTimeout(client, req);
-    });
     this.queue.schedule(this.now + this.clientHopMs(), () => {
       if (req.attempt !== a || req.fate) return;
       this.fabricReceive(req);
@@ -664,7 +662,7 @@ export class Simulation {
     }
     req.conn = null;
     if (kind === 'success') {
-      this.metrics.countSuccess(this.now - req.sentAt);
+      this.metrics.countSuccess(this.now - req.startedAt);
       this.recordClientOutcome(client, req, true);
       this.resolve(req, 'success');
     } else {
@@ -674,10 +672,18 @@ export class Simulation {
     }
   }
 
+  /**
+   * Dispatch newest-first (adaptive LIFO). With a single client deadline,
+   * the freshest waiting request has the most budget left; serving the
+   * oldest first would hand every rebuilt connection a nearly-expired
+   * request that times out and poisons it — a client-side spiral that pins
+   * goodput at zero with the fabric CPU idle. The starved oldest requests
+   * fail by deadline rejection instead, which poisons nothing.
+   */
   private serveWaiting(client: ClientSim): void {
     const idle = client.idleConn();
     if (!idle) return;
-    const req = client.waiting.shift();
+    const req = client.waiting.pop();
     if (req) this.sendOnConnection(client, req, idle);
   }
 
@@ -685,10 +691,6 @@ export class Simulation {
   private resolve(req: RequestSim, fate: RequestFate): void {
     req.fate = fate;
     req.fateTime = this.now;
-    if (req.acquireEvent) {
-      req.acquireEvent.active = false;
-      req.acquireEvent = null;
-    }
     if (req.timeoutEvent) {
       req.timeoutEvent.active = false;
       req.timeoutEvent = null;

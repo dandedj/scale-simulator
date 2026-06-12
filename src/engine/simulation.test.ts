@@ -104,12 +104,11 @@ describe('storm-prone preset (metastability)', () => {
     run(sim, 25_000); // long after the pulse: 20s..45s
     // The metastable signature: organic load is back to baseline but the
     // sustaining effect (retries + handshake CPU) keeps goodput collapsed.
+    // The single client timeout traps connection rebuilds too, so at storm
+    // CPU no handshake finishes inside the deadline — goodput goes to a
+    // hard zero, not a trickle.
     const after = statsBetween(sim, 30_000, 45_000);
-    expect(after.successRate).toBeLessThan(0.5);
-    // ...but never a hard zero: even at peak CPU, the pool's connect timeout
-    // outlives the request timeout, so occasional (mostly resumed) handshakes
-    // land and a trickle of requests gets through on the rebuilt connections.
-    expect(after.successRate).toBeGreaterThan(0.005);
+    expect(after.successRate).toBeLessThan(0.05);
     expect(after.handshakesStarted).toBeGreaterThan(after.arrivals * 0.3);
   });
 });
@@ -182,6 +181,9 @@ describe('TLS handshake wire vs CPU split', () => {
   /**
    * Isolate handshakes: one client, one connection, every request times out
    * and poisons the connection, forcing a fresh full handshake per cycle.
+   * The client timeout is set above the longest profiled handshake (so
+   * rebuilds complete inside the deadline) and below the downstream response
+   * time (so every request still times out and poisons its connection).
    * Measures mean handshake duration and fabric CPU work per handshake.
    */
   function handshakeProfile(rttMs: number, tlsClientDelayMs: number) {
@@ -190,11 +192,12 @@ describe('TLS handshake wire vs CPU split', () => {
       cfg.clients.requestRatePerSec = 4;
       cfg.clients.poolSize = 1;
       cfg.clients.maxRetries = 0;
-      cfg.clients.requestTimeoutMs = 50;
+      cfg.clients.clientTimeoutMs = 600;
       cfg.clients.rttMs = rttMs;
       cfg.clients.tlsClientDelayMs = tlsClientDelayMs;
       cfg.fabric.tlsResumptionRate = 0;
-      cfg.downstreams.responseTimeMedianMs = 400; // guarantee client timeouts
+      cfg.downstreams.responseTimeMedianMs = 2000; // guarantee client timeouts
+      cfg.downstreamPool.requestTimeoutMs = 5000; // never error before the client gives up
     });
     let busyMs = 0;
     let workUnits = 0;
@@ -313,7 +316,7 @@ describe('engine invariants', () => {
     const sim = newSim('healthy', (cfg) => {
       cfg.downstreams.count = 1;
       cfg.downstreams.responseTimeMedianMs = 400;
-      cfg.clients.requestTimeoutMs = 200;
+      cfg.clients.clientTimeoutMs = 200;
       cfg.clients.maxRetries = 2;
       cfg.downstreamPool.requestTimeoutMs = 250;
       cfg.downstreamPool.breakerCooldownMs = 1500;

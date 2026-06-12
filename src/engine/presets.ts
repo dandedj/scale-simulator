@@ -25,9 +25,7 @@ function base(): SimulationConfig {
       poolSize: 6,
       rttMs: 24,
       tlsClientDelayMs: 0,
-      requestTimeoutMs: 300,
-      poolAcquireTimeoutMs: 250,
-      connectTimeoutMs: 1000,
+      clientTimeoutMs: 300,
       maxRetries: 1,
       retryBackoffBaseMs: 25,
       retryJitter: true,
@@ -83,8 +81,7 @@ export const PRESETS: Preset[] = [
       'Raised limits: 16x the TLS permits, the permit wait maxed out, 3 un-jittered retries, pacing and breakers off. Stable at baseline — try a traffic pulse and watch what happens after it ends.',
     config: (() => {
       const c = base();
-      c.clients.requestTimeoutMs = 250;
-      c.clients.poolAcquireTimeoutMs = 200;
+      c.clients.clientTimeoutMs = 250;
       c.clients.poolSize = 12;
       c.clients.maxRetries = 3;
       c.clients.retryJitter = false;
@@ -103,8 +100,7 @@ export const PRESETS: Preset[] = [
       'Identical client settings to Storm-prone (3 retries, tight timeouts), with the fabric limits and protections enabled. Compare the two under the same pulse.',
     config: (() => {
       const c = base();
-      c.clients.requestTimeoutMs = 250;
-      c.clients.poolAcquireTimeoutMs = 200;
+      c.clients.clientTimeoutMs = 250;
       c.clients.poolSize = 12;
       c.clients.maxRetries = 3;
       c.clients.retryJitter = true;
@@ -121,9 +117,7 @@ export const PRESETS: Preset[] = [
       c.clients.count = 8;
       c.clients.requestRatePerSec = 35;
       c.clients.poolSize = 12;
-      c.clients.requestTimeoutMs = 200;
-      c.clients.poolAcquireTimeoutMs = 150;
-      c.clients.connectTimeoutMs = 800;
+      c.clients.clientTimeoutMs = 200;
       c.clients.maxRetries = 3;
       c.clients.retryBackoffBaseMs = 20;
       c.clients.retryJitter = false;

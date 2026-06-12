@@ -34,8 +34,8 @@ const CHARTS: ChartDef[] = [
       { label: 'p99', color: SEMANTIC.shed, value: (b) => percentile(b.latencies, 0.99) },
       { label: 'p50', color: SEMANTIC.inFlight, value: (b) => percentile(b.latencies, 0.5) },
     ],
-    threshold: (sim) => ({ value: sim.cfg.clients.requestTimeoutMs, label: 'client timeout' }),
-    yMax: (sim, dataMax) => Math.max(dataMax, sim.cfg.clients.requestTimeoutMs * 1.25),
+    threshold: (sim) => ({ value: sim.cfg.clients.clientTimeoutMs, label: 'client timeout' }),
+    yMax: (sim, dataMax) => Math.max(dataMax, sim.cfg.clients.clientTimeoutMs * 1.25),
   },
   {
     title: 'THROUGHPUT req/s',
