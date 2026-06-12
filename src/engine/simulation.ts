@@ -35,10 +35,12 @@ import type {
 
 // --- Fixed model constants (deliberately not knobs — they set the stage) ---
 
-/** One-way network latency, client ↔ fabric (ms). */
-export const NET_CLIENT_FABRIC_MS = 12;
 /** One-way network latency, fabric ↔ downstream (ms). */
 export const NET_FABRIC_DS_MS = 10;
+/** Network round trips in a full TLS handshake (hellos + key exchange). */
+const HANDSHAKE_RTTS_FULL = 2;
+/** An abbreviated (resumed) handshake saves a round trip. */
+const HANDSHAKE_RTTS_RESUMED = 1;
 /** Max integration slice for the CPU model (ms of sim time). */
 const SLICE_MS = 1;
 /** How long a closing connection lingers for the renderer (ms). */
@@ -574,6 +576,11 @@ export class Simulation {
     this.maybeOpenConnection(client);
   }
 
+  /** One-way wire time for a client ↔ fabric leg (half the client RTT). */
+  private clientHopMs(): number {
+    return this.cfg.clients.rttMs / 2;
+  }
+
   private maybeOpenConnection(client: ClientSim): void {
     if (this.now < client.backoffUntil) return;
     if (client.liveConnCount() >= this.cfg.clients.poolSize) return;
@@ -589,7 +596,7 @@ export class Simulation {
       this.onConnectTimeout(client, conn),
     );
     // The SYN reaches the fabric after one network hop.
-    this.queue.schedule(this.now + NET_CLIENT_FABRIC_MS, () => this.fabricAccept(client, conn));
+    this.queue.schedule(this.now + this.clientHopMs(), () => this.fabricAccept(client, conn));
   }
 
   private onConnectTimeout(client: ClientSim, conn: ConnSim): void {
@@ -612,12 +619,12 @@ export class Simulation {
       req.acquireEvent = null;
     }
     client.waiting = client.waiting.filter((r) => r !== req);
-    req.setPhase('travelingToFabric', this.now, this.now + NET_CLIENT_FABRIC_MS);
+    req.setPhase('travelingToFabric', this.now, this.now + this.clientHopMs());
     req.timeoutEvent = this.queue.schedule(this.now + this.cfg.clients.requestTimeoutMs, () => {
       if (req.attempt !== a || req.fate) return;
       this.onClientTimeout(client, req);
     });
-    this.queue.schedule(this.now + NET_CLIENT_FABRIC_MS, () => {
+    this.queue.schedule(this.now + this.clientHopMs(), () => {
       if (req.attempt !== a || req.fate) return;
       this.fabricReceive(req);
     });
@@ -803,12 +810,20 @@ export class Simulation {
     this.throttledLog('shed', 2000, 'warn', `Fabric shedding connections (${reason} — RST)`);
     this.releaseCount(conn);
     conn.setState('closing', this.now);
-    this.queue.schedule(this.now + NET_CLIENT_FABRIC_MS, () => {
+    this.queue.schedule(this.now + this.clientHopMs(), () => {
       client.conns = client.conns.filter((c) => c !== conn);
       client.backoffUntil = Math.max(client.backoffUntil, this.now + CONNECT_BACKOFF_MS);
     });
   }
 
+  /**
+   * A handshake has two parts. The fabric-side crypto loads the shared CPU
+   * (tlsHandshakeCpuMs / tlsCpuCost, stretched under contention). The wire
+   * part — hello round trips at the client RTT plus the client's own TLS
+   * processing (client TLS delay) — stretches the handshake and holds its
+   * permit but consumes no fabric CPU: a far or burdened client slows
+   * completion, not the fabric.
+   */
   private startHandshake(client: ClientSim, conn: ConnSim): void {
     const f = this.cfg.fabric;
     this.handshakesActive++;
@@ -818,7 +833,7 @@ export class Simulation {
     // Session resumption skips the expensive asymmetric crypto.
     const resumeFactor = conn.resumed ? f.tlsResumptionCostFactor : 1;
     const fraction = (startedAbandoned ? ABANDONED_HANDSHAKE_WORK : 1) * resumeFactor;
-    this.cpu.add(f.tlsHandshakeMs * fraction, f.tlsCpuCost * fraction, () => {
+    const finish = () => {
       this.handshakesActive--;
       if (conn.state === 'closing') {
         // Torn down mid-handshake; the teardown already released the count.
@@ -833,6 +848,16 @@ export class Simulation {
         this.serveWaiting(client);
       }
       this.grantPermits();
+    };
+    this.cpu.add(f.tlsHandshakeCpuMs * fraction, f.tlsCpuCost * fraction, () => {
+      if (conn.state === 'closing' || startedAbandoned || conn.abandoned) {
+        // No one is on the other end; skip the wire phase and free the permit.
+        finish();
+        return;
+      }
+      const c = this.cfg.clients;
+      const rtts = conn.resumed ? HANDSHAKE_RTTS_RESUMED : HANDSHAKE_RTTS_FULL;
+      this.queue.schedule(this.now + rtts * c.rttMs + c.tlsClientDelayMs, finish);
     });
   }
 
@@ -1008,9 +1033,10 @@ export class Simulation {
     if (isError) {
       this.respondError(req);
     } else {
-      req.setPhase('returning', this.now, this.now + NET_FABRIC_DS_MS + NET_CLIENT_FABRIC_MS);
+      const wire = NET_FABRIC_DS_MS + this.clientHopMs();
+      req.setPhase('returning', this.now, this.now + wire);
       const a = req.attempt;
-      this.queue.schedule(this.now + NET_FABRIC_DS_MS + NET_CLIENT_FABRIC_MS, () => {
+      this.queue.schedule(this.now + wire, () => {
         if (req.attempt !== a || req.fate) return;
         this.clientReceive(req, 'success');
       });
@@ -1059,8 +1085,8 @@ export class Simulation {
   private respondError(req: RequestSim): void {
     if (req.fate) return;
     const a = req.attempt;
-    req.setPhase('returning', this.now, this.now + NET_CLIENT_FABRIC_MS);
-    this.queue.schedule(this.now + NET_CLIENT_FABRIC_MS, () => {
+    req.setPhase('returning', this.now, this.now + this.clientHopMs());
+    this.queue.schedule(this.now + this.clientHopMs(), () => {
       if (req.attempt !== a || req.fate) return;
       this.clientReceive(req, 'error');
     });

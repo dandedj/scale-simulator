@@ -17,6 +17,19 @@ export interface ClientConfig {
   requestRatePerSec: number;
   /** Connections each client may hold open to RTB Fabric. */
   poolSize: number;
+  /**
+   * Round-trip network time between a client and the fabric (ms). Drives
+   * every wire leg (SYN, request, response, RST) and the handshake's hello
+   * exchanges — fast clients are dangerous because their retries come back
+   * quickly.
+   */
+  rttMs: number;
+  /**
+   * Extra time a burdened client takes to answer during the TLS handshake
+   * (ms). Stretches the handshake — holding its permit — without consuming
+   * any fabric CPU.
+   */
+  tlsClientDelayMs: number;
   /** Abort a request if no response within this time (ms). */
   requestTimeoutMs: number;
   /** Max time a request waits for a free pooled connection before failing (ms). */
@@ -57,8 +70,13 @@ export interface FabricConfig {
    * bounded wait. Typical values: 0–5ms.
    */
   tlsPermitWaitMs: number;
-  /** Nominal time to complete one full TLS handshake at idle (ms). */
-  tlsHandshakeMs: number;
+  /**
+   * Fabric-side CPU processing time for one full TLS handshake at idle (ms).
+   * The wire portion of a handshake comes from the client RTT (2 round trips
+   * full, 1 resumed) plus the client TLS delay — those stretch the handshake
+   * and hold its permit but consume no fabric CPU.
+   */
+  tlsHandshakeCpuMs: number;
   /** Fraction of handshakes that use TLS session resumption (0..1). */
   tlsResumptionRate: number;
   /** Resumed handshake cost as a fraction of a full handshake (time and CPU). */

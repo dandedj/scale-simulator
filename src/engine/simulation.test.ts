@@ -178,6 +178,59 @@ describe('downstream selection', () => {
   });
 });
 
+describe('TLS handshake wire vs CPU split', () => {
+  /**
+   * Isolate handshakes: one client, one connection, every request times out
+   * and poisons the connection, forcing a fresh full handshake per cycle.
+   * Measures mean handshake duration and fabric CPU work per handshake.
+   */
+  function handshakeProfile(rttMs: number, tlsClientDelayMs: number) {
+    const sim = newSim('healthy', (cfg) => {
+      cfg.clients.count = 1;
+      cfg.clients.requestRatePerSec = 4;
+      cfg.clients.poolSize = 1;
+      cfg.clients.maxRetries = 0;
+      cfg.clients.requestTimeoutMs = 50;
+      cfg.clients.rttMs = rttMs;
+      cfg.clients.tlsClientDelayMs = tlsClientDelayMs;
+      cfg.fabric.tlsResumptionRate = 0;
+      cfg.downstreams.responseTimeMedianMs = 400; // guarantee client timeouts
+    });
+    let busyMs = 0;
+    let workUnits = 0;
+    const capPerMs = sim.cfg.fabric.cpuCapacity / 1000;
+    const STEP = 1;
+    for (let t = 0; t < 30_000; t += STEP) {
+      sim.step(STEP);
+      if (sim.handshakesActive > 0) busyMs += STEP;
+      workUnits += Math.min(1, sim.cpu.utilization()) * capPerMs * STEP;
+    }
+    const n = sim.metrics.totals.tlsHandshakesCompleted;
+    expect(n).toBeGreaterThan(20);
+    return { durMs: busyMs / n, workPerHs: workUnits / n };
+  }
+
+  it('client RTT stretches the handshake without adding fabric CPU work', () => {
+    const fast = handshakeProfile(4, 0);
+    const slow = handshakeProfile(80, 0);
+    // Two hello round trips: duration grows by ~2×ΔRTT (= 152ms here)...
+    expect(slow.durMs - fast.durMs).toBeGreaterThan(120);
+    expect(slow.durMs - fast.durMs).toBeLessThan(185);
+    // ...while CPU work per handshake stays put.
+    expect(slow.workPerHs / fast.workPerHs).toBeGreaterThan(0.75);
+    expect(slow.workPerHs / fast.workPerHs).toBeLessThan(1.3);
+  });
+
+  it('client TLS delay holds the handshake (and its permit) without fabric CPU', () => {
+    const prompt = handshakeProfile(24, 0);
+    const burdened = handshakeProfile(24, 200);
+    expect(burdened.durMs - prompt.durMs).toBeGreaterThan(170);
+    expect(burdened.durMs - prompt.durMs).toBeLessThan(230);
+    expect(burdened.workPerHs / prompt.workPerHs).toBeGreaterThan(0.75);
+    expect(burdened.workPerHs / prompt.workPerHs).toBeLessThan(1.3);
+  });
+});
+
 describe('TLS resumption', () => {
   it('flags handshakes as resumed according to the configured rate', () => {
     const all = newSim('healthy', (cfg) => {

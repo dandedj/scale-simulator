@@ -139,7 +139,7 @@ const SECTIONS: LegendSection[] = [
     entries: [
       { swatch: line(SEMANTIC.idle, 1.5), label: 'Idle', detail: 'Warm, established, ready for a request.' },
       { swatch: line(SEMANTIC.connEstablished, 2.5), label: 'Busy', detail: 'Carrying an in-flight request (one at a time).' },
-      { swatch: handshakeLane(), label: 'TLS handshake', detail: 'Dashed + pulsing rings: full handshakes cost ~25× a proxied request in CPU; resumed ones a configurable fraction.' },
+      { swatch: handshakeLane(), label: 'TLS handshake', detail: 'Dashed + pulsing rings: the crypto costs ~25× a proxied request in fabric CPU (resumed: a configurable fraction); the hellos add 2×RTT (1× resumed) plus any client TLS delay without loading the fabric.' },
       { swatch: line(SEMANTIC.timeout, 2), label: 'Torn down / RST', detail: 'Fades red, then disappears. Timeouts poison connections; sheds RST them.' },
     ],
   },

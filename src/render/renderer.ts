@@ -8,7 +8,6 @@
  */
 
 import {
-  NET_CLIENT_FABRIC_MS,
   NET_FABRIC_DS_MS,
   Simulation,
   type ConnSim,
@@ -574,12 +573,13 @@ export class Renderer {
         };
       }
       case 'returning': {
+        const hop = sim.cfg.clients.rttMs / 2;
         const total = req.phaseUntil - req.phaseSince;
-        const fromDs = req.downstreamId >= 0 && total > NET_CLIENT_FABRIC_MS + 2;
+        const fromDs = req.downstreamId >= 0 && total > hop + 2;
         const clientLaneGeom = this.laneForClientConn(sim, l, req);
         const f = l.fabric;
         if (fromDs) {
-          const split = NET_FABRIC_DS_MS / (NET_FABRIC_DS_MS + NET_CLIENT_FABRIC_MS);
+          const split = NET_FABRIC_DS_MS / (NET_FABRIC_DS_MS + hop);
           const d = l.downstreams[req.downstreamId];
           if (t < split && d) {
             const tt = t / split;

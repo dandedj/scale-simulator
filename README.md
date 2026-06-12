@@ -41,6 +41,15 @@ The storm is **not scripted**. It emerges from three coupled rules:
 3. **Fabric CPU is shared** (processor sharing): when demanded work exceeds
    capacity, *every* in-flight operation stretches proportionally.
 
+A handshake's wall-clock time has two parts: the fabric-side crypto (the only
+part that loads the fabric CPU) and the wire — two hello round trips at the
+client RTT (one when resumed), plus any client TLS delay (a burdened client
+answering slowly). The wire part holds the handshake's permit without
+consuming fabric CPU, so changing the client RTT changes how fast clients
+come back — not the fabric's load per handshake. The client RTT also drives
+every other client↔fabric leg (SYN, request, response, RST), which is what
+makes very fast clients dangerous: their retries return quickly.
+
 So: latency rises → timeouts fire → connections die → handshakes flood →
 CPU contention stretches everything → more timeouts. The control mechanisms:
 
