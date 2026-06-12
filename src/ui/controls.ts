@@ -156,7 +156,7 @@ export class ControlPanel {
   private lastTotalsHtml = '';
   /** Lifetime-event counters, one per pane. */
   private renderedEvents: number[] = [];
-  private pulseFactor = 1.5;
+  private pulseFactor = 2;
   private pulseDurationMs = 5000;
   private pauseBtn!: HTMLButtonElement;
   private compareBtn!: HTMLButtonElement;
@@ -183,7 +183,7 @@ export class ControlPanel {
   private buildHeaderControls(): void {
     const wrap = el('div', 'time-controls');
 
-    const pulseBtn = el('button', 'btn btn-pulse', '◉ PULSE ×1.5');
+    const pulseBtn = el('button', 'btn btn-pulse', '◉ PULSE ×2');
     pulseBtn.title = 'Inject a traffic surge (×factor for the set duration; hits every sim)';
     pulseBtn.addEventListener('click', () => this.hooks.pulse(this.pulseFactor, this.pulseDurationMs));
     wrap.appendChild(pulseBtn);
