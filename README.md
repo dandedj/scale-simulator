@@ -88,9 +88,10 @@ only at dequeue.
   after a 3× pulse the storm **persists once the pulse ends** (a metastable
   failure — the trigger is gone, the retry/handshake feedback loop sustains
   the overload).
-- **Protected** — the counterpart to Storm-prone: identical client settings,
-  with the fabric's limits and protections enabled, so the two configurations
-  can be compared under the same pulse.
+- **Protected** — the counterpart to Storm-prone: the same traffic and
+  aggressive retries, but with jittered backoff and the fabric's limits and
+  protections enabled, so the two configurations can be compared under the
+  same pulse.
 - **Overwhelmed** — offered load beyond capacity, no protections: goodput → ~0
   and stays there until traffic is removed.
 
@@ -99,15 +100,16 @@ Every run is deterministic for a given seed: a demo replays identically.
 ## Comparison mode
 
 The **⇆ COMPARE** toggle runs two simulations stacked on the same virtual
-clock, each with its own scene, charts, and totals. Client settings (the
-Clients knob group), pulse, speed, pause, and reset are shared, so both sims
-always see the same offered traffic; the RTB Fabric, downstream-pool, and
-downstream knobs are per-sim, selected with the SIM A / SIM B tabs in the
-Tuning panel. In this mode a scenario button sets one sim's fabric and
-downstream tuning plus the shared client settings — Storm-prone and Protected
-share identical client settings by construction, so that pair isolates the
-fabric-side differences under the same pulse. Run totals and the event log
-report both sims side by side.
+clock, each with its own scene, charts, and totals. The traffic shape (the
+Traffic knob group: client count and per-client rate), pulse, speed, pause,
+and reset are shared, so both sims always see the same offered load. Client
+behavior (timeout, RTT, retries, jitter, breakers) and the RTB Fabric,
+downstream-pool, and downstream knobs are per-sim, selected with the
+SIM A / SIM B tabs in the Tuning panel. A scenario button applies the whole
+preset — clients included — to its sim, propagating only the traffic shape
+to both, so Storm-prone vs Protected compares un-jittered clients against
+jittered ones as well as the fabric-side differences under the same pulse.
+Run totals and the event log report both sims side by side.
 
 ## Reading the screen
 

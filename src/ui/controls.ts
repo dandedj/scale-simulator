@@ -4,9 +4,10 @@
  * Plain DOM, no framework — knobs read/write the live SimulationConfig and
  * take effect immediately, like tuning a running system.
  *
- * Knob groups carry a scope: 'global' groups (Clients) always edit every
- * sim so comparison mode keeps offered traffic identical; 'sim' groups edit
- * the pane selected with the SIM A / SIM B tabs.
+ * Knob groups carry a scope: 'global' groups (Traffic) always edit every
+ * sim so comparison mode keeps offered load identical; 'sim' groups —
+ * including client behavior — edit the pane selected with the SIM A / SIM B
+ * tabs.
  */
 
 import { PRESETS } from '../engine/presets';
@@ -61,11 +62,18 @@ const SIGMA_Z99 = 2.3263;
 
 const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles: ToggleDef[] }> = [
   {
-    name: 'Clients',
+    name: 'Traffic',
     scope: 'global',
     knobs: [
       { label: 'Clients', min: 1, max: 12, step: 1, kind: 'structure', get: (c) => c.clients.count, set: (c, v) => (c.clients.count = v) },
       { label: 'Rate / client', min: 1, max: 80, step: 1, kind: 'rate', get: (c) => c.clients.requestRatePerSec, set: (c, v) => (c.clients.requestRatePerSec = v), format: (v) => `${v}/s` },
+    ],
+    toggles: [],
+  },
+  {
+    name: 'Clients',
+    scope: 'sim',
+    knobs: [
       { label: 'Pool size', min: 1, max: 24, step: 1, get: (c) => c.clients.poolSize, set: (c, v) => (c.clients.poolSize = v) },
       { label: 'Client RTT', min: 1, max: 100, step: 1, get: (c) => c.clients.rttMs, set: (c, v) => (c.clients.rttMs = v), format: ms },
       { label: 'Client TLS delay', min: 0, max: 500, step: 10, get: (c) => c.clients.tlsClientDelayMs, set: (c, v) => (c.clients.tlsClientDelayMs = v), format: ms },
@@ -300,7 +308,7 @@ export class ControlPanel {
       cmp.appendChild(row);
     });
     cmp.appendChild(
-      el('div', 'scenario-note', 'A scenario sets that sim’s fabric & downstream tuning — and the shared client settings (both sims).'),
+      el('div', 'scenario-note', 'A scenario sets that sim’s client, fabric & downstream tuning; the traffic shape (clients × rate) applies to both sims.'),
     );
     const helpBtn = el('button', 'btn btn-small', 'ⓘ INSTRUCTIONS');
     helpBtn.addEventListener('click', () => this.hooks.showCompareHelp());

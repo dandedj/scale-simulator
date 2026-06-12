@@ -48,9 +48,9 @@
               <h2>Comparison mode</h2>
               <ul>
                 <li><b>Two sims, one clock.</b> SIM A (top) and SIM B (bottom) run in lockstep on the same virtual clock, each with its own charts and totals.</li>
-                <li><b>Shared traffic.</b> The Clients knob group — count, request rate, timeouts, retries — applies to both sims, so they always see the same offered load. Speed, pause, and reset are shared too.</li>
-                <li><b>Per-sim tuning.</b> The RTB Fabric, Downstream pools, and Downstreams groups edit one sim at a time — pick it with the SIM A / SIM B tabs in the Tuning panel.</li>
-                <li><b>Scenarios.</b> A scenario button sets that sim's fabric &amp; downstream tuning, and also sets the shared client settings (scenarios are designed as wholes). Storm-prone and Protected share identical client settings, so they isolate the fabric-side differences.</li>
+                <li><b>Shared traffic.</b> The Traffic knobs — client count and request rate — apply to both sims, so they always see the same offered load. Speed, pause, and reset are shared too.</li>
+                <li><b>Per-sim tuning.</b> The Clients, RTB Fabric, Downstream pools, and Downstreams groups edit one sim at a time — pick it with the SIM A / SIM B tabs in the Tuning panel. Client behavior (timeouts, retries, jitter, breakers) can differ between sims.</li>
+                <li><b>Scenarios.</b> A scenario button sets that sim's client, fabric &amp; downstream tuning; only the traffic shape applies to both. Storm-prone vs Protected differ on retry jitter and the fabric protections — compare them under the same pulse.</li>
                 <li><b>◉ PULSE surges both sims at once</b> — the same traffic spike, two responses.</li>
               </ul>
               <button id="help-dismiss" class="btn">GOT IT</button>

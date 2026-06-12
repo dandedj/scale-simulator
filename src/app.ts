@@ -191,9 +191,11 @@ export class App {
   }
 
   /**
-   * Comparison-mode scenario: the chosen preset's fabric + downstream tuning
-   * applies to one pane; its client settings apply to both panes (scenarios
-   * are designed as wholes, and clients are shared so offered load matches).
+   * Comparison-mode scenario: the whole preset — clients included — applies
+   * to the chosen pane, so client-side differences between scenarios (retry
+   * jitter, timeouts, breakers) are honored per sim. Only the traffic shape
+   * (client count × rate) propagates to both panes, keeping offered load
+   * identical for a fair comparison.
    */
   private applyScenario(pane: number, id: string): void {
     const preset = cloneConfig(presetById(id).config);
@@ -202,7 +204,11 @@ export class App {
     cfgs[pane].fabric = preset.fabric;
     cfgs[pane].downstreamPool = preset.downstreamPool;
     cfgs[pane].downstreams = preset.downstreams;
-    for (const c of cfgs) c.clients = structuredClone(preset.clients);
+    cfgs[pane].clients = structuredClone(preset.clients);
+    for (const c of cfgs) {
+      c.clients.count = preset.clients.count;
+      c.clients.requestRatePerSec = preset.clients.requestRatePerSec;
+    }
     this.resetPanes(cfgs);
   }
 
