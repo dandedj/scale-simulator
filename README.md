@@ -88,10 +88,10 @@ only at dequeue.
   after a 3× pulse the storm **persists once the pulse ends** (a metastable
   failure — the trigger is gone, the retry/handshake feedback loop sustains
   the overload).
-- **Protected** — the counterpart to Storm-prone: the same traffic and
-  aggressive retries, but with jittered backoff and the fabric's limits and
-  protections enabled, so the two configurations can be compared under the
-  same pulse.
+- **Protected** — the counterpart to Storm-prone: identical client settings
+  (3 un-jittered retries, tight timeouts), with the fabric's limits and
+  protections enabled, so the pair isolates the fabric-side differences
+  under the same pulse.
 - **Overwhelmed** — offered load beyond capacity, no protections: goodput → ~0
   and stays there until traffic is removed.
 
@@ -107,8 +107,10 @@ behavior (timeout, RTT, retries, jitter, breakers) and the RTB Fabric,
 downstream-pool, and downstream knobs are per-sim, selected with the
 SIM A / SIM B tabs in the Tuning panel. A scenario button applies the whole
 preset — clients included — to its sim, propagating only the traffic shape
-to both, so Storm-prone vs Protected compares un-jittered clients against
-jittered ones as well as the fabric-side differences under the same pulse.
+to both. Storm-prone and Protected share identical client settings by
+construction, so that pair isolates the fabric-side differences under the
+same pulse; per-sim client knobs also allow client-side A/B experiments
+(e.g. jittered vs un-jittered retries) against the same fabric tuning.
 Run totals and the event log report both sims side by side.
 
 ## Reading the screen

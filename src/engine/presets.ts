@@ -97,13 +97,13 @@ export const PRESETS: Preset[] = [
     id: 'protected',
     name: 'Protected',
     description:
-      'Same traffic and aggressive retries as Storm-prone (3 retries, tight timeouts), but with jittered backoff and the fabric limits and protections enabled. Compare the two under the same pulse.',
+      'Identical client settings to Storm-prone (3 un-jittered retries, tight timeouts), with the fabric limits and protections enabled. Compare the two under the same pulse.',
     config: (() => {
       const c = base();
       c.clients.clientTimeoutMs = 250;
       c.clients.poolSize = 12;
       c.clients.maxRetries = 3;
-      c.clients.retryJitter = true;
+      c.clients.retryJitter = false;
       return c;
     })(),
   },
