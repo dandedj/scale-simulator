@@ -163,12 +163,14 @@ export class ChartRail {
       }
       const yMax = def.yMax ? def.yMax(sim, dataMax) : dataMax * 1.15;
 
-      // Gridline + threshold
+      // Gridlines (baseline + midpoint) + threshold
       ctx.strokeStyle = SURFACE.grid;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(plotX, plotY + plotH);
       ctx.lineTo(plotX + plotW, plotY + plotH);
+      ctx.moveTo(plotX, plotY + plotH / 2);
+      ctx.lineTo(plotX + plotW, plotY + plotH / 2);
       ctx.stroke();
       const thr = def.threshold?.(sim);
       if (thr && thr.value <= yMax) {
@@ -218,6 +220,21 @@ export class ChartRail {
           ctx.fill();
         }
       }
+
+      // Y-axis values (drawn last so they stay legible over the series);
+      // the bottom gridline is 0.
+      ctx.font = '500 8px "IBM Plex Mono", monospace';
+      ctx.fillStyle = SURFACE.textFaint;
+      ctx.fillText(fmtAxis(yMax), plotX + 2, plotY + 8);
+      ctx.fillText(fmtAxis(yMax / 2), plotX + 2, plotY + plotH / 2 - 3);
     }
   }
+}
+
+/** Compact axis value: units live in the chart title. */
+function fmtAxis(v: number): string {
+  if (v >= 10_000) return `${Math.round(v / 1000)}k`;
+  if (v >= 1_000) return `${(v / 1000).toFixed(1)}k`;
+  if (v >= 10) return String(Math.round(v));
+  return v % 1 === 0 ? String(v) : v.toFixed(1);
 }
