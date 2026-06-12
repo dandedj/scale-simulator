@@ -37,15 +37,15 @@ function base(): SimulationConfig {
     fabric: {
       maxConnections: 96,
       tlsHandshakeConcurrency: 4,
-      tlsPermitWaitMs: 50,
+      tlsPermitWaitMs: 2,
       tlsHandshakeMs: 30,
       tlsResumptionRate: 0.7,
       tlsResumptionCostFactor: 0.4,
       processingMs: 4,
       cpuCapacity: 3000,
       tlsCpuCost: 60,
-      errorPacingEnabled: true,
-      errorPacingDelayMs: 150,
+      tlsErrorPacingEnabled: true,
+      tlsErrorPacingDelayMs: 2,
     },
     downstreamPool: {
       poolSizePerDownstream: 10,
@@ -78,7 +78,7 @@ export const PRESETS: Preset[] = [
     id: 'storm-prone',
     name: 'Storm-prone',
     description:
-      'Raised limits: 16x the TLS permits, a 1s permit wait, 3 un-jittered retries, pacing and breakers off. Stable at baseline — try a traffic pulse and watch what happens after it ends.',
+      'Raised limits: 16x the TLS permits, the permit wait maxed out, 3 un-jittered retries, pacing and breakers off. Stable at baseline — try a traffic pulse and watch what happens after it ends.',
     config: (() => {
       const c = base();
       c.clients.requestTimeoutMs = 250;
@@ -88,8 +88,8 @@ export const PRESETS: Preset[] = [
       c.clients.retryJitter = false;
       c.fabric.maxConnections = 300;
       c.fabric.tlsHandshakeConcurrency = 64;
-      c.fabric.tlsPermitWaitMs = 1000;
-      c.fabric.errorPacingEnabled = false;
+      c.fabric.tlsPermitWaitMs = 5;
+      c.fabric.tlsErrorPacingEnabled = false;
       c.downstreamPool.circuitBreakerEnabled = false;
       return c;
     })(),
@@ -127,8 +127,8 @@ export const PRESETS: Preset[] = [
       c.clients.retryJitter = false;
       c.fabric.maxConnections = 500;
       c.fabric.tlsHandshakeConcurrency = 128;
-      c.fabric.tlsPermitWaitMs = 2000;
-      c.fabric.errorPacingEnabled = false;
+      c.fabric.tlsPermitWaitMs = 5;
+      c.fabric.tlsErrorPacingEnabled = false;
       c.downstreamPool.poolSizePerDownstream = 12;
       c.downstreamPool.requestTimeoutMs = 180;
       c.downstreamPool.circuitBreakerEnabled = false;

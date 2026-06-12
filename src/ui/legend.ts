@@ -63,13 +63,6 @@ function cross(color: string): string {
   );
 }
 
-function pacedDot(): string {
-  return svg(
-    `<circle cx="${c}" cy="${c}" r="3.5" fill="${SEMANTIC.shed}"/>` +
-      `<path d="M${c} ${c - 7} A7 7 0 0 1 ${c + 7} ${c}" fill="none" stroke="${SEMANTIC.shed}" stroke-width="1.8"/>`,
-  );
-}
-
 function line(color: string, width: number, dash = ''): string {
   return svg(
     `<line x1="2" y1="${c}" x2="${S - 2}" y2="${c}" stroke="${color}" stroke-width="${width}"${dash ? ` stroke-dasharray="${dash}"` : ''}/>`,
@@ -139,7 +132,6 @@ const SECTIONS: LegendSection[] = [
       { swatch: spikedStar(SEMANTIC.timeout), label: 'Timeout', detail: 'Client gave up — and tore down the connection it was using.' },
       { swatch: square(SEMANTIC.error), label: 'Error', detail: 'Downstream error or fabric-side downstream timeout, returned to the client.' },
       { swatch: cross(SEMANTIC.shed), label: 'Rejected', detail: 'Failed client-side: no connection in time, or the client’s own breaker is open.' },
-      { swatch: pacedDot(), label: 'Paced error', detail: 'Error response deliberately held in the fabric (error pacing) before being sent.' },
     ],
   },
   {

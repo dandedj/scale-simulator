@@ -760,8 +760,7 @@ export class Simulation {
       );
       this.permitWaiters.push(waiter);
     } else {
-      this.metrics.countShedTls();
-      this.shedConnection(client, conn, 'TLS permits exhausted');
+      this.shedTls(client, conn);
     }
   }
 
@@ -775,8 +774,28 @@ export class Simulation {
       this.releaseCount(conn);
       return;
     }
+    this.shedTls(client, conn);
+  }
+
+  /**
+   * Shed at TLS admission. With TLS error pacing on, the RST is held for the
+   * pacing delay before it is sent, so shed clients don't learn — and
+   * reconnect — in lockstep.
+   */
+  private shedTls(client: ClientSim, conn: ConnSim): void {
+    const f = this.cfg.fabric;
     this.metrics.countShedTls();
-    this.shedConnection(client, conn, 'TLS permits exhausted');
+    if (f.tlsErrorPacingEnabled && f.tlsErrorPacingDelayMs > 0) {
+      this.queue.schedule(this.now + f.tlsErrorPacingDelayMs, () => {
+        if (conn.state === 'closing') {
+          this.releaseCount(conn);
+          return;
+        }
+        this.shedConnection(client, conn, 'TLS permits exhausted');
+      });
+    } else {
+      this.shedConnection(client, conn, 'TLS permits exhausted');
+    }
   }
 
   /** RST: the connection is invalidated; the client learns one hop later. */
@@ -1036,28 +1055,15 @@ export class Simulation {
     }
   }
 
-  /** Send an error response to the client, paced if pacing is enabled. */
+  /** Send an error response back to the client. */
   private respondError(req: RequestSim): void {
-    const f = this.cfg.fabric;
+    if (req.fate) return;
     const a = req.attempt;
-    const send = () => {
+    req.setPhase('returning', this.now, this.now + NET_CLIENT_FABRIC_MS);
+    this.queue.schedule(this.now + NET_CLIENT_FABRIC_MS, () => {
       if (req.attempt !== a || req.fate) return;
-      req.setPhase('returning', this.now, this.now + NET_CLIENT_FABRIC_MS);
-      this.queue.schedule(this.now + NET_CLIENT_FABRIC_MS, () => {
-        if (req.attempt !== a || req.fate) return;
-        this.clientReceive(req, 'error');
-      });
-    };
-    if (f.errorPacingEnabled && f.errorPacingDelayMs > 0) {
-      // Holding the error breaks the tight client retry loop: a client slot
-      // can only generate one attempt per (pacing delay + backoff). The cost:
-      // the connection stays occupied for the delay — pacing converts
-      // retry-rate pressure into connection-slot pressure.
-      req.setPhase('pacedError', this.now, this.now + f.errorPacingDelayMs);
-      this.queue.schedule(this.now + f.errorPacingDelayMs, send);
-    } else {
-      send();
-    }
+      this.clientReceive(req, 'error');
+    });
   }
 
   // -- Views & condition detection ----------------------------------------------

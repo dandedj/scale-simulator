@@ -54,7 +54,7 @@ export interface FabricConfig {
    * How long a connection may wait for a free TLS permit before the fabric
    * sheds it with an RST (which invalidates the connection). 0 = shed
    * immediately when no permit is free. There is no TLS queue — only this
-   * bounded wait.
+   * bounded wait. Typical values: 0–5ms.
    */
   tlsPermitWaitMs: number;
   /** Nominal time to complete one full TLS handshake at idle (ms). */
@@ -75,9 +75,13 @@ export interface FabricConfig {
   /** CPU work-units consumed by one full TLS handshake (vs ~processingMs for a request). */
   tlsCpuCost: number;
 
-  /** Error pacing: delay error responses to damp client retry loops. */
-  errorPacingEnabled: boolean;
-  errorPacingDelayMs: number;
+  /**
+   * TLS error pacing: how long the fabric holds the RST when shedding a
+   * connection at TLS admission, so shed clients don't learn — and
+   * reconnect — in lockstep. Typical values: 0–5ms.
+   */
+  tlsErrorPacingEnabled: boolean;
+  tlsErrorPacingDelayMs: number;
 }
 
 export interface DownstreamPoolConfig {
@@ -148,8 +152,7 @@ export type RequestPhase =
   | 'processingAtFabric'
   | 'travelingToDownstream'
   | 'atDownstream'
-  | 'returning'            // response traveling back to the client
-  | 'pacedError';          // error response held by error pacing
+  | 'returning';           // response traveling back to the client
 
 export type RequestFate = 'success' | 'timeout' | 'error' | 'rejected';
 

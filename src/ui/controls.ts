@@ -56,6 +56,7 @@ interface ToggleDef {
 }
 
 const ms = (v: number) => `${Math.round(v)}ms`;
+const msFine = (v: number) => `${v}ms`;
 const SIGMA_Z99 = 2.3263;
 
 const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles: ToggleDef[] }> = [
@@ -85,17 +86,17 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
     knobs: [
       { label: 'Connection limit', min: 8, max: 500, step: 4, get: (c) => c.fabric.maxConnections, set: (c, v) => (c.fabric.maxConnections = v) },
       { label: 'TLS permits', min: 1, max: 128, step: 1, get: (c) => c.fabric.tlsHandshakeConcurrency, set: (c, v) => (c.fabric.tlsHandshakeConcurrency = v) },
-      { label: 'TLS permit wait', min: 0, max: 2000, step: 10, get: (c) => c.fabric.tlsPermitWaitMs, set: (c, v) => (c.fabric.tlsPermitWaitMs = v), format: ms },
+      { label: 'TLS permit wait', min: 0, max: 5, step: 0.25, get: (c) => c.fabric.tlsPermitWaitMs, set: (c, v) => (c.fabric.tlsPermitWaitMs = v), format: msFine },
       { label: 'TLS resumption', min: 0, max: 1, step: 0.05, get: (c) => c.fabric.tlsResumptionRate, set: (c, v) => (c.fabric.tlsResumptionRate = v), format: (v) => `${Math.round(v * 100)}%` },
       { label: 'Resumed cost (vs full)', min: 0.1, max: 1, step: 0.05, get: (c) => c.fabric.tlsResumptionCostFactor, set: (c, v) => (c.fabric.tlsResumptionCostFactor = v), format: (v) => `${Math.round(v * 100)}%` },
       { label: 'TLS handshake time', min: 5, max: 100, step: 5, get: (c) => c.fabric.tlsHandshakeMs, set: (c, v) => (c.fabric.tlsHandshakeMs = v), format: ms },
       { label: 'TLS CPU cost', min: 5, max: 200, step: 5, get: (c) => c.fabric.tlsCpuCost, set: (c, v) => (c.fabric.tlsCpuCost = v), format: (v) => `${v}u` },
       { label: 'Processing time', min: 1, max: 10, step: 0.5, get: (c) => c.fabric.processingMs, set: (c, v) => (c.fabric.processingMs = v), format: ms },
       { label: 'CPU capacity', min: 500, max: 12000, step: 250, kind: 'structure', get: (c) => c.fabric.cpuCapacity, set: (c, v) => (c.fabric.cpuCapacity = v), format: (v) => `${(v / 1000).toFixed(1)}ku/s` },
-      { label: 'Error pacing delay', min: 10, max: 1000, step: 10, get: (c) => c.fabric.errorPacingDelayMs, set: (c, v) => (c.fabric.errorPacingDelayMs = v), format: ms },
+      { label: 'TLS error pacing delay', min: 0, max: 5, step: 0.25, get: (c) => c.fabric.tlsErrorPacingDelayMs, set: (c, v) => (c.fabric.tlsErrorPacingDelayMs = v), format: msFine },
     ],
     toggles: [
-      { label: 'Error pacing', get: (c) => c.fabric.errorPacingEnabled, set: (c, v) => (c.fabric.errorPacingEnabled = v) },
+      { label: 'TLS error pacing', get: (c) => c.fabric.tlsErrorPacingEnabled, set: (c, v) => (c.fabric.tlsErrorPacingEnabled = v) },
     ],
   },
   {
@@ -155,7 +156,7 @@ export class ControlPanel {
   private lastTotalsHtml = '';
   /** Lifetime-event counters, one per pane. */
   private renderedEvents: number[] = [];
-  private pulseFactor = 3;
+  private pulseFactor = 1.5;
   private pulseDurationMs = 5000;
   private pauseBtn!: HTMLButtonElement;
   private compareBtn!: HTMLButtonElement;
@@ -182,12 +183,12 @@ export class ControlPanel {
   private buildHeaderControls(): void {
     const wrap = el('div', 'time-controls');
 
-    const pulseBtn = el('button', 'btn btn-pulse', '◉ PULSE ×3');
+    const pulseBtn = el('button', 'btn btn-pulse', '◉ PULSE ×1.5');
     pulseBtn.title = 'Inject a traffic surge (×factor for the set duration; hits every sim)';
     pulseBtn.addEventListener('click', () => this.hooks.pulse(this.pulseFactor, this.pulseDurationMs));
     wrap.appendChild(pulseBtn);
 
-    const pulseFactor = this.miniSlider(2, 10, 1, this.pulseFactor, (v) => {
+    const pulseFactor = this.miniSlider(1.1, 4, 0.1, this.pulseFactor, (v) => {
       this.pulseFactor = v;
       pulseBtn.textContent = `◉ PULSE ×${v}`;
     });

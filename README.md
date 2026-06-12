@@ -4,7 +4,7 @@ An animated, browser-based discrete-event simulation of **TLS connection
 retry storms** in a high-throughput RTB proxy fabric. It models the full
 feedback loop — timeouts, connection teardown, TLS handshake cost, shared
 CPU — and lets you experiment live with limit settings and protection
-mechanisms (TLS handshake permits with a bounded wait, error pacing,
+mechanisms (TLS handshake permits with a bounded wait, TLS error pacing,
 session resumption, and circuit breakers on both the clients and the
 fabric→downstream pools) to see how each changes the system's response to
 load surges.
@@ -48,7 +48,7 @@ CPU contention stretches everything → more timeouts. The control mechanisms:
 |---|---|
 | TLS permits + permit wait | At most N handshakes run concurrently. A connection without a permit waits up to the permit wait time, then is **shed with an RST** (the connection is invalidated). There is no TLS queue — only this bounded wait. |
 | Connection limit | Beyond the cap, new connections are **shed with an RST** before any TLS work happens. |
-| Error pacing | Error responses are held for a pacing delay — a client slot can only retry once per (pacing delay + backoff), rate-limiting tight retry loops. |
+| TLS error pacing | When a connection is shed at TLS admission, the RST is held for the pacing delay (typically 0–5ms) before being sent, so shed clients don't learn — and reconnect — in lockstep. |
 | TLS session resumption | A configurable share of handshakes resume a prior session, skipping most of the asymmetric crypto. |
 | Downstream circuit breaker | Ejection-style (random IP selection preserved): a failing downstream is ejected from the rotation, then re-enters directly after the cooldown with a fresh window — no probe serialization, so recovered traffic re-spreads across all downstreams immediately. |
 | Client circuit breaker | A client that sees sustained failures stops sending entirely, removing its load until a half-open probe succeeds. |
@@ -66,8 +66,8 @@ only at dequeue.
 
 - **Healthy** — conservative limits, protections on, mostly-resumed
   handshakes. Pulse it and watch the response.
-- **Storm-prone** — raised limits: 16× the TLS permits, a 1-second permit
-  wait, 3 un-jittered retries, pacing and breakers off. Stable at baseline;
+- **Storm-prone** — raised limits: 16× the TLS permits, the permit wait maxed
+  out, 3 un-jittered retries, pacing and breakers off. Stable at baseline;
   after a 3× pulse the storm **persists once the pulse ends** (a metastable
   failure — the trigger is gone, the retry/handshake feedback loop sustains
   the overload).
@@ -102,8 +102,9 @@ report both sims side by side.
   rings = TLS handshaking, red fade = torn down.
 - **Fabric internals**: connection gauge vs limit, TLS permit slots with the
   count of connections in the permit wait, the CPU column (overflow hatching +
-  slowdown factor when demand exceeds capacity), per-downstream queues, the
-  error-pacing tray, lifetime shed counters split by cause, and the PACE chip.
+  slowdown factor when demand exceeds capacity), per-downstream queues,
+  lifetime shed counters split by cause, and the PACE chip (TLS error pacing
+  on/off).
 - **Breaker dots**: each downstream and (when enabled) each client shows its
   breaker state — green dot closed; orange arc = ejected/open with cooldown
   progress; a client breaker also shows an orange ring while its half-open
@@ -154,4 +155,4 @@ to stay animatable while preserving the ratios that drive the physics:
   Buyers RTB guidance — tmax 100–300ms; "the first request on a new connection
   has a shorter effective deadline and is more likely to time out."
 - HAProxy `maxsslconn`/`maxsslrate` and tarpit — the production analogs of the
-  handshake cap and error pacing.
+  handshake cap and TLS error pacing.

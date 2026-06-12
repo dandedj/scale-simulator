@@ -377,7 +377,7 @@ export class Renderer {
       ctx.fillStyle = SEMANTIC.shed;
       ctx.fillText(`shed tls ${t.shedTls} · conn ${t.shedConnLimit}`, f.x + 12, f.y + f.h - 25);
     }
-    const pacingOn = sim.cfg.fabric.errorPacingEnabled;
+    const pacingOn = sim.cfg.fabric.tlsErrorPacingEnabled;
     ctx.textAlign = 'right';
     ctx.fillStyle = pacingOn ? SEMANTIC.success : withAlpha(SURFACE.textFaint, 0.8);
     ctx.fillText(pacingOn ? '●PACE' : '○PACE', f.x + f.w - 12, f.y + f.h - 12);
@@ -524,7 +524,7 @@ export class Renderer {
       }
       const pos = this.particlePosition(sim, l, req, waitingDrawn);
       if (!pos) continue;
-      this.drawRequestDot(pos.x, pos.y, req, sim.now);
+      this.drawRequestDot(pos.x, pos.y, req);
     }
   }
 
@@ -592,11 +592,6 @@ export class Renderer {
         if (!clientLaneGeom) return null;
         return { x: lerp(clientLaneGeom.x1, clientLaneGeom.x0, t), y: lerp(clientLaneGeom.y1, clientLaneGeom.y0, t) };
       }
-      case 'pacedError': {
-        const f = l.fabric;
-        const h = (req.id * 7919) % 12;
-        return { x: f.x + 30 + h * ((f.w - 60) / 12), y: f.y + f.h - 28 };
-      }
     }
   }
 
@@ -616,10 +611,9 @@ export class Renderer {
     return dsLane(l, req.downstreamId, idx, ds.conns.length);
   }
 
-  private drawRequestDot(x: number, y: number, req: RequestSim, now: number): void {
+  private drawRequestDot(x: number, y: number, req: RequestSim): void {
     const ctx = this.ctx;
-    const isPaced = req.phase === 'pacedError';
-    const color = isPaced ? SEMANTIC.shed : SEMANTIC.inFlight;
+    const color = SEMANTIC.inFlight;
     if (req.attempt > 0) {
       ctx.strokeStyle = withAlpha(SEMANTIC.retry, 0.85);
       ctx.lineWidth = 1.6;
@@ -635,15 +629,6 @@ export class Renderer {
     ctx.beginPath();
     ctx.arc(x, y, 3, 0, Math.PI * 2);
     ctx.fill();
-    if (isPaced) {
-      // countdown arc while the error response is deliberately held
-      const t = clamp01((now - req.phaseSince) / Math.max(1, req.phaseUntil - req.phaseSince));
-      ctx.strokeStyle = SEMANTIC.shed;
-      ctx.lineWidth = 1.4;
-      ctx.beginPath();
-      ctx.arc(x, y, 6.5, -Math.PI / 2, -Math.PI / 2 + t * Math.PI * 2);
-      ctx.stroke();
-    }
   }
 
   private drawFateFlash(sim: Simulation, l: SceneLayout, req: RequestSim): void {
