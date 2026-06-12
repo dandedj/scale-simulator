@@ -134,8 +134,9 @@ report both sims side by side.
   arrivals) and attempts sent ÷ successes over the last couple of seconds.
 - **Charts** (60s rolling): latency p50/p99 vs the client-timeout line,
   offered vs goodput, failure rates, TLS permit pressure (starts, active,
-  shed·tls) vs the permit count, connections vs limit (+ shed·conn and
-  downstream queue depth), and amplification.
+  shed·tls) vs the permit count, fabric CPU demand vs the capacity line,
+  connections vs limit (+ shed·conn and downstream queue depth), and
+  amplification.
 
 ## Extending it
 

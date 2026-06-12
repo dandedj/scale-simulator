@@ -1,8 +1,9 @@
 /**
- * The chart rail: six synchronized strip charts over the same rolling
+ * The chart rail: seven synchronized strip charts over the same rolling
  * 60-second window of sim time. Together they tell the storm story:
  * latency crosses the timeout line → goodput gap opens → failures spike →
- * handshakes flood → connections churn → amplification goes super-unity.
+ * handshakes flood → fabric CPU demand crosses capacity → connections
+ * churn → amplification goes super-unity.
  */
 
 import { BUCKET_MS, HISTORY_MS, percentile } from '../engine/metrics';
@@ -60,6 +61,17 @@ const CHARTS: ChartDef[] = [
       { label: 'shed/s', color: SEMANTIC.shed, value: (b) => b.shedTls * PER_SEC },
     ],
     threshold: (sim) => ({ value: sim.cfg.fabric.tlsHandshakeConcurrency, label: 'permits' }),
+  },
+  {
+    title: 'FABRIC CPU %',
+    series: [
+      // Demanded work vs capacity; >100% means every in-flight operation is
+      // stretching. The sampled gauge can far exceed 100% in a storm — the
+      // y-axis follows it so the depth of the hole stays readable.
+      { label: 'demand', color: SEMANTIC.cpuBad, fill: true, value: (b) => b.cpuUtilization * 100 },
+    ],
+    threshold: () => ({ value: 100, label: 'capacity' }),
+    yMax: (_sim, dataMax) => Math.max(dataMax * 1.1, 130),
   },
   {
     title: 'CONNECTIONS',

@@ -432,7 +432,7 @@ main {
 
 .pane-charts {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(7, 1fr);
   gap: 6px;
   height: 124px;
   flex-shrink: 0;
@@ -444,7 +444,7 @@ main {
 
 @media (max-width: 1500px) {
   #app:not(.compare) .pane-charts {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     height: 200px;
   }
 }
