@@ -708,7 +708,7 @@ export class Renderer {
       let y: number;
       let alpha: number;
       if (age < FALL_MS) {
-        y = lerp(m.y0, m.y1, clamp01(age / FALL_MS));
+        y = Math.min(floor, lerp(m.y0, m.y1, clamp01(age / FALL_MS)));
         x += Math.sin(age / 60) * 2;
         alpha = 0.9;
       } else {

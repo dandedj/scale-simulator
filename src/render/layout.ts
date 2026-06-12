@@ -26,6 +26,8 @@ export interface SceneLayout {
 }
 
 const MARGIN_Y = 26;
+/** Vertical room reserved below the fabric for the graveyard pile. */
+const GRAVEYARD_BAND = 46;
 
 export function computeLayout(sim: Simulation, width: number, height: number): SceneLayout {
   const clientCount = sim.clients.length;
@@ -36,9 +38,11 @@ export function computeLayout(sim: Simulation, width: number, height: number): S
   const clientX = width * 0.025;
 
   const fabricW = Math.min(240, width * 0.24);
-  const fabricH = Math.min(height * 0.74, 460);
+  const fabricH = Math.min(height * 0.74, 460, height - GRAVEYARD_BAND - 24);
   const fabricX = width * 0.5 - fabricW / 2;
-  const fabricY = (height - fabricH) / 2 - 8;
+  // Center the fabric in the space above the graveyard band so the pile is
+  // never pushed past the canvas bottom in compact (comparison-mode) panes.
+  const fabricY = Math.max(12, (height - GRAVEYARD_BAND - fabricH) / 2);
 
   const dsW = Math.min(160, width * 0.17);
   const dsH = Math.min(86, (height - 2 * MARGIN_Y) / Math.max(1, dsCount) - 12);
