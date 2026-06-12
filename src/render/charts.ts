@@ -180,6 +180,12 @@ export class ChartRail {
         ctx.lineTo(plotX + plotW, ty);
         ctx.stroke();
         ctx.setLineDash([]);
+        // Name the reference line; flip below it when it hugs the top edge.
+        ctx.font = '600 8px "IBM Plex Mono", monospace';
+        ctx.fillStyle = withAlpha(SEMANTIC.timeout, 0.85);
+        ctx.textAlign = 'right';
+        ctx.fillText(thr.label, plotX + plotW - 2, ty < plotY + 12 ? ty + 9 : ty - 3);
+        ctx.textAlign = 'left';
       }
 
       // Series
