@@ -25,3 +25,6 @@ dist-ssr
 
 # Claude Code session files
 .claude/
+
+# Playwright MCP screenshot/output artifacts
+.playwright-mcp/

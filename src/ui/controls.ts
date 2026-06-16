@@ -39,6 +39,21 @@ export interface ControlHooks {
   showCompareHelp(): void;
 }
 
+/**
+ * The detail behind a setting's ⓘ icon. Split into three fixed parts so every
+ * knob documents the same things: the definition, the model mechanic it drives,
+ * and the behavior to expect when it moves. Written against the engine in
+ * simulation.ts — these double as the spec the model is checked against.
+ */
+interface SettingInfo {
+  /** What the setting is. */
+  what: string;
+  /** How it works inside the model. */
+  how: string;
+  /** What to expect on the board when you change it. */
+  expect: string;
+}
+
 interface KnobDef {
   label: string;
   min: number;
@@ -48,12 +63,14 @@ interface KnobDef {
   get(cfg: SimulationConfig): number;
   set(cfg: SimulationConfig, v: number): void;
   format?(v: number): string;
+  info?: SettingInfo;
 }
 
 interface ToggleDef {
   label: string;
   get(cfg: SimulationConfig): boolean;
   set(cfg: SimulationConfig, v: boolean): void;
+  info?: SettingInfo;
 }
 
 const ms = (v: number) => `${Math.round(v)}ms`;
@@ -65,8 +82,22 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
     name: 'Traffic',
     scope: 'global',
     knobs: [
-      { label: 'Clients', min: 1, max: 12, step: 1, kind: 'structure', get: (c) => c.clients.count, set: (c, v) => (c.clients.count = v) },
-      { label: 'Rate / client', min: 1, max: 80, step: 1, kind: 'rate', get: (c) => c.clients.requestRatePerSec, set: (c, v) => (c.clients.requestRatePerSec = v), format: (v) => `${v}/s` },
+      {
+        label: 'Clients', min: 1, max: 12, step: 1, kind: 'structure', get: (c) => c.clients.count, set: (c, v) => (c.clients.count = v),
+        info: {
+          what: 'How many independent client instances offer traffic to the fabric.',
+          how: 'Each client runs its own Poisson arrival process, its own connection pool, and (when enabled) its own circuit breaker. Total offered load = clients × rate/client. This is a structural change — the client set is rebuilt live; in comparison mode it always applies to both sims so the offered load stays identical.',
+          expect: 'More clients scales offered load and the number of connections competing for fabric CPU and TLS permits. Doubling clients roughly doubles handshake and request demand.',
+        },
+      },
+      {
+        label: 'Rate / client', min: 1, max: 80, step: 1, kind: 'rate', get: (c) => c.clients.requestRatePerSec, set: (c, v) => (c.clients.requestRatePerSec = v), format: (v) => `${v}/s`,
+        info: {
+          what: 'Target requests per second from each client (per client, not the total).',
+          how: 'Arrivals are Poisson: inter-arrival gaps are exponential around 1000/rate ms, so short bursts happen naturally. Changing it reschedules every client’s next arrival immediately, and a traffic pulse multiplies this rate for its duration.',
+          expect: 'Higher rate means more requests and deeper pools needed (pool ≈ 2× rate × latency). Push it past what CPU and downstreams can serve and goodput falls while retries amplify the load.',
+        },
+      },
     ],
     toggles: [],
   },
@@ -74,59 +105,262 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
     name: 'Clients',
     scope: 'sim',
     knobs: [
-      { label: 'Pool size', min: 1, max: 24, step: 1, get: (c) => c.clients.poolSize, set: (c, v) => (c.clients.poolSize = v) },
-      { label: 'Client RTT', min: 1, max: 100, step: 1, get: (c) => c.clients.rttMs, set: (c, v) => (c.clients.rttMs = v), format: ms },
-      { label: 'Client TLS delay', min: 0, max: 500, step: 10, get: (c) => c.clients.tlsClientDelayMs, set: (c, v) => (c.clients.tlsClientDelayMs = v), format: ms },
-      { label: 'Client timeout', min: 50, max: 1000, step: 10, get: (c) => c.clients.clientTimeoutMs, set: (c, v) => (c.clients.clientTimeoutMs = v), format: ms },
-      { label: 'Max retries', min: 0, max: 5, step: 1, get: (c) => c.clients.maxRetries, set: (c, v) => (c.clients.maxRetries = v) },
-      { label: 'Backoff base', min: 5, max: 250, step: 5, get: (c) => c.clients.retryBackoffBaseMs, set: (c, v) => (c.clients.retryBackoffBaseMs = v), format: ms },
-      { label: 'Breaker trip ratio', min: 0.1, max: 0.9, step: 0.05, get: (c) => c.clients.breakerFailureRatio, set: (c, v) => (c.clients.breakerFailureRatio = v), format: (v) => `${Math.round(v * 100)}%` },
-      { label: 'Breaker cooldown', min: 500, max: 10000, step: 250, get: (c) => c.clients.breakerCooldownMs, set: (c, v) => (c.clients.breakerCooldownMs = v), format: (v) => `${(v / 1000).toFixed(1)}s` },
+      {
+        label: 'Pool size', min: 1, max: 24, step: 1, get: (c) => c.clients.poolSize, set: (c, v) => (c.clients.poolSize = v),
+        info: {
+          what: 'Maximum connections one client keeps open to the fabric.',
+          how: 'A request with no idle connection waits; the client opens a new one only when it holds fewer live connections than the pool size and is not in post-refusal backoff. Pools are pre-warmed at start to ~20% of the rate. Every open connection counts against the fabric’s connection limit.',
+          expect: 'Too small and requests queue client-side and reject on the client timeout even while the fabric is idle. Generous pools absorb bursts but, once a timeout poisons connections, force more simultaneous re-handshakes. Rule of thumb ≈ 2× Little’s law (rate × latency).',
+        },
+      },
+      {
+        label: 'Client RTT', min: 1, max: 100, step: 1, get: (c) => c.clients.rttMs, set: (c, v) => (c.clients.rttMs = v), format: ms,
+        info: {
+          what: 'Round-trip network time between a client and the fabric.',
+          how: 'Every wire leg uses half the RTT one-way: the SYN, request, response, and RST. A full TLS handshake adds 2× RTT of hello exchanges (1× when resumed) — this stretches the handshake and holds its permit but burns no fabric CPU.',
+          expect: 'Higher RTT slows handshakes and round trips, so the client timeout must be looser. Low-RTT clients are the dangerous ones: their retries return fast and hammer the fabric before it recovers.',
+        },
+      },
+      {
+        label: 'Client TLS delay', min: 0, max: 500, step: 10, get: (c) => c.clients.tlsClientDelayMs, set: (c, v) => (c.clients.tlsClientDelayMs = v), format: ms,
+        info: {
+          what: 'Extra time a burdened client takes to answer during the TLS handshake.',
+          how: 'Added once to handshake completion, on top of the hello round trips. It holds the TLS permit longer but consumes no fabric CPU — it models a slow client, not a slow fabric.',
+          expect: 'Higher delay makes handshakes occupy permits longer, so fewer complete per second and the permit pool saturates sooner under churn, even though CPU is untouched.',
+        },
+      },
+      {
+        label: 'Client timeout', min: 50, max: 1000, step: 10, get: (c) => c.clients.clientTimeoutMs, set: (c, v) => (c.clients.clientTimeoutMs = v), format: ms,
+        info: {
+          what: 'The client’s single deadline per attempt.',
+          how: 'One deadline covers everything: waiting for a connection (including a hot-path rebuild and its handshake) and the request itself. Fire while still waiting for a connection → rejected (poisons nothing). Fire on a connection → timeout, which tears down (poisons) that connection. Presets set it ≈ p99 latency (~1% baseline timeouts).',
+          expect: 'Set below typical latency and you get mass timeouts that poison connections faster than TLS can rebuild them — the storm. Looser timeouts tolerate the tail but hold pool slots longer.',
+        },
+      },
+      {
+        label: 'Max retries', min: 0, max: 5, step: 1, get: (c) => c.clients.maxRetries, set: (c, v) => (c.clients.maxRetries = v),
+        info: {
+          what: 'Retries after a timeout or error (0 = fire once, never retry).',
+          how: 'After a non-success the request waits exponential backoff, then the same request object is reused for another attempt; each retry is counted and re-enters the breaker window. Retries are pure added load.',
+          expect: 'More retries lift success under transient faults but multiply offered load exactly when the system is already failing. Amplification (attempts ÷ successes) climbs past ~1.5 and the retry loop sustains the storm after the trigger is gone.',
+        },
+      },
+      {
+        label: 'Backoff base', min: 5, max: 250, step: 5, get: (c) => c.clients.retryBackoffBaseMs, set: (c, v) => (c.clients.retryBackoffBaseMs = v), format: ms,
+        info: {
+          what: 'Base delay before the first retry; doubles each attempt.',
+          how: 'Backoff = base × 2^attempt, capped at 2000ms. With jitter on it becomes AWS “full jitter”: a random value in [0, that]. With jitter off, every client that failed together retries at the same instant.',
+          expect: 'A small base makes retries return fast and synchronized, re-poisoning freshly rebuilt connections. A larger base spreads waves out, giving the fabric time to drain handshakes between them.',
+        },
+      },
+      {
+        label: 'Breaker trip ratio', min: 0.1, max: 0.9, step: 0.05, get: (c) => c.clients.breakerFailureRatio, set: (c, v) => (c.clients.breakerFailureRatio = v), format: (v) => `${Math.round(v * 100)}%`,
+        info: {
+          what: 'Failure fraction over the rolling window that opens the client’s breaker.',
+          how: 'An 8-bucket, ~2s window tracks outcomes; once it has enough samples and failures ÷ total ≥ this ratio, the breaker opens and the client fast-fails (rejected) for the cooldown, then half-opens and sends one probe. Only active when the Circuit breaker toggle below is on.',
+          expect: 'A lower ratio trips earlier, shedding the client’s own load sooner to protect the fabric — at the cost of rejecting requests that might have succeeded. A higher ratio tolerates more failure before cutting off.',
+        },
+      },
+      {
+        label: 'Breaker cooldown', min: 500, max: 10000, step: 250, get: (c) => c.clients.breakerCooldownMs, set: (c, v) => (c.clients.breakerCooldownMs = v), format: (v) => `${(v / 1000).toFixed(1)}s`,
+        info: {
+          what: 'How long the client breaker stays open before probing.',
+          how: 'While open, every attempt fast-fails as rejected. After the cooldown it half-opens and allows exactly one probe; a success closes it, a failure re-opens it for another cooldown.',
+          expect: 'A longer cooldown gives the fabric more time to recover before traffic resumes, but rejects more requests meanwhile. Too short and it reopens repeatedly, drip-feeding load into a system that has not healed.',
+        },
+      },
     ],
     toggles: [
-      { label: 'Retry jitter', get: (c) => c.clients.retryJitter, set: (c, v) => (c.clients.retryJitter = v) },
-      { label: 'Circuit breaker', get: (c) => c.clients.circuitBreakerEnabled, set: (c, v) => (c.clients.circuitBreakerEnabled = v) },
+      {
+        label: 'Retry jitter', get: (c) => c.clients.retryJitter, set: (c, v) => (c.clients.retryJitter = v),
+        info: {
+          what: 'Adds full jitter to retry backoff.',
+          how: 'On → backoff is randomized to [0, base × 2^attempt]. Off → every retry fires at exactly base × 2^attempt. The difference between a smooth wave and a synchronized wall of retries.',
+          expect: 'On smooths retry load and usually prevents the post-pulse echo storm. Off, a pulse that times out a cohort of requests sends them all back in lockstep — watch the storm form after the pulse ends.',
+        },
+      },
+      {
+        label: 'Circuit breaker', get: (c) => c.clients.circuitBreakerEnabled, set: (c, v) => (c.clients.circuitBreakerEnabled = v),
+        info: {
+          what: 'The client-side circuit breaker toward the fabric.',
+          how: 'On → sustained failures open the breaker (per the trip ratio) and the client fast-fails locally instead of opening more connections, cutting the retry and handshake load it contributes. Off → the client keeps trying regardless.',
+          expect: 'On caps the load a failing client adds and helps the fabric drain. Off lets a struggling client pour reconnects and retries into the storm unchecked.',
+        },
+      },
     ],
   },
   {
     name: 'RTB Fabric',
     scope: 'sim',
     knobs: [
-      { label: 'Connection limit', min: 8, max: 500, step: 4, get: (c) => c.fabric.maxConnections, set: (c, v) => (c.fabric.maxConnections = v) },
-      { label: 'TLS permits', min: 1, max: 128, step: 1, get: (c) => c.fabric.tlsHandshakeConcurrency, set: (c, v) => (c.fabric.tlsHandshakeConcurrency = v) },
-      { label: 'TLS permit wait', min: 0, max: 5, step: 0.25, get: (c) => c.fabric.tlsPermitWaitMs, set: (c, v) => (c.fabric.tlsPermitWaitMs = v), format: msFine },
-      { label: 'TLS resumption', min: 0, max: 1, step: 0.05, get: (c) => c.fabric.tlsResumptionRate, set: (c, v) => (c.fabric.tlsResumptionRate = v), format: (v) => `${Math.round(v * 100)}%` },
-      { label: 'Resumed cost (vs full)', min: 0.1, max: 1, step: 0.05, get: (c) => c.fabric.tlsResumptionCostFactor, set: (c, v) => (c.fabric.tlsResumptionCostFactor = v), format: (v) => `${Math.round(v * 100)}%` },
-      { label: 'TLS CPU time', min: 5, max: 100, step: 5, get: (c) => c.fabric.tlsHandshakeCpuMs, set: (c, v) => (c.fabric.tlsHandshakeCpuMs = v), format: ms },
-      { label: 'TLS CPU cost', min: 5, max: 200, step: 5, get: (c) => c.fabric.tlsCpuCost, set: (c, v) => (c.fabric.tlsCpuCost = v), format: (v) => `${v}u` },
-      { label: 'Processing time', min: 1, max: 10, step: 0.5, get: (c) => c.fabric.processingMs, set: (c, v) => (c.fabric.processingMs = v), format: ms },
-      { label: 'CPU capacity', min: 500, max: 12000, step: 250, kind: 'structure', get: (c) => c.fabric.cpuCapacity, set: (c, v) => (c.fabric.cpuCapacity = v), format: (v) => `${(v / 1000).toFixed(1)}ku/s` },
-      { label: 'TLS error pacing delay', min: 0, max: 5, step: 0.25, get: (c) => c.fabric.tlsErrorPacingDelayMs, set: (c, v) => (c.fabric.tlsErrorPacingDelayMs = v), format: msFine },
+      {
+        label: 'Connection limit', min: 8, max: 500, step: 4, get: (c) => c.fabric.maxConnections, set: (c, v) => (c.fabric.maxConnections = v),
+        info: {
+          what: 'Hard cap on concurrent client-facing connections.',
+          how: 'On accept, if held connections are already at the limit the connection is shed with an RST (shed·conn) before any TLS work. The client learns one hop later and backs off briefly.',
+          expect: 'A generous limit admits more connections but lets a handshake flood reach the CPU. A tight limit sheds early and cheaply (pre-crypto) — protective, but set too low it rejects healthy traffic. Sheds show as hollow triangles in the graveyard.',
+        },
+      },
+      {
+        label: 'TLS permits', min: 1, max: 128, step: 1, get: (c) => c.fabric.tlsHandshakeConcurrency, set: (c, v) => (c.fabric.tlsHandshakeConcurrency = v),
+        info: {
+          what: 'How many TLS handshakes the fabric processes concurrently.',
+          how: 'There is no TLS queue. With all permits busy, a connection waits up to the permit wait for one to free, then is shed (shed·tls, RST). A permit is held for the whole handshake — crypto plus the wire hellos. Sized to what the CPU can finish before clients hang up.',
+          expect: 'Too few and connections are shed under churn even with CPU to spare. Too many and a handshake flood hits the shared CPU at once (each ~25× a request), saturating it and stretching everything — the amplifier that turns churn into a storm.',
+        },
+      },
+      {
+        label: 'TLS permit wait', min: 0, max: 5, step: 0.25, get: (c) => c.fabric.tlsPermitWaitMs, set: (c, v) => (c.fabric.tlsPermitWaitMs = v), format: msFine,
+        info: {
+          what: 'How long a connection waits for a free permit before being shed.',
+          how: 'With no permit available the connection waits this long; if none frees in time it is shed with an RST. 0 = shed immediately. There is no queue, only this bounded wait. Typical 0–5ms.',
+          expect: 'A longer wait converts sheds into completed handshakes when permits free quickly, but holds connections (and client deadlines) longer. With many permits, a long wait lets a backlog of handshakes accumulate and pile onto the CPU.',
+        },
+      },
+      {
+        label: 'TLS resumption', min: 0, max: 1, step: 0.05, get: (c) => c.fabric.tlsResumptionRate, set: (c, v) => (c.fabric.tlsResumptionRate = v), format: (v) => `${Math.round(v * 100)}%`,
+        info: {
+          what: 'Fraction of handshakes that use TLS session resumption.',
+          how: 'Each handshake is independently resumed with this probability. A resumed handshake skips the expensive asymmetric crypto — costing the resumed-cost fraction of a full handshake in both CPU and time — and saves one hello round trip.',
+          expect: 'Higher resumption makes reconnects dramatically cheaper, so a churn event costs far less CPU and is far less likely to storm. This is the single biggest lever on handshake cost; resumed handshakes appear in Run totals.',
+        },
+      },
+      {
+        label: 'Resumed cost (vs full)', min: 0.1, max: 1, step: 0.05, get: (c) => c.fabric.tlsResumptionCostFactor, set: (c, v) => (c.fabric.tlsResumptionCostFactor = v), format: (v) => `${Math.round(v * 100)}%`,
+        info: {
+          what: 'A resumed handshake’s cost as a fraction of a full one (time and CPU).',
+          how: 'Multiplies both the fabric CPU work and the crypto time of any resumed handshake. 40% means a resumed handshake costs 40% of a full one.',
+          expect: 'A lower factor makes resumption save more, so the resumption rate matters more. At 100% resumption saves no CPU and only the saved round trip remains.',
+        },
+      },
+      {
+        label: 'TLS CPU time', min: 5, max: 100, step: 5, get: (c) => c.fabric.tlsHandshakeCpuMs, set: (c, v) => (c.fabric.tlsHandshakeCpuMs = v), format: ms,
+        info: {
+          what: 'Fabric CPU processing time for one full handshake at idle.',
+          how: 'This is the crypto work that loads the shared CPU; under contention it stretches by the slowdown factor. It excludes the wire hellos (those come from RTT + client TLS delay and burn no CPU). Paired with TLS CPU cost as the work-units it demands.',
+          expect: 'Higher and each handshake occupies the CPU longer, so a permitted handshake burst saturates sooner and stretches every concurrent request more.',
+        },
+      },
+      {
+        label: 'TLS CPU cost', min: 5, max: 200, step: 5, get: (c) => c.fabric.tlsCpuCost, set: (c, v) => (c.fabric.tlsCpuCost = v), format: (v) => `${v}u`,
+        info: {
+          what: 'CPU work-units one full handshake consumes, versus ~processing-time units for a request.',
+          how: 'In the processor-sharing model, demand = Σ work-rates; a handshake demands this many units while a warm request demands ~processing time. The preset ratio is ~25× (measured 15–70×). It also scales outbound fabric→downstream connects (at half).',
+          expect: 'Raising it widens the gap between a handshake and a proxied request, so fewer simultaneous handshakes saturate the CPU. This ratio is the core reason connection churn is so much costlier than serving traffic.',
+        },
+      },
+      {
+        label: 'Processing time', min: 1, max: 10, step: 0.5, get: (c) => c.fabric.processingMs, set: (c, v) => (c.fabric.processingMs = v), format: ms,
+        info: {
+          what: 'Nominal fabric processing time per request at idle.',
+          how: 'Each request demands ~1 work-unit per ms of processing on the shared CPU, stretched under contention. It is the cheap end of the CPU model that handshakes are measured against.',
+          expect: 'Higher per-request processing raises baseline CPU load and shrinks the headroom available to absorb a handshake burst before saturation.',
+        },
+      },
+      {
+        label: 'CPU capacity', min: 500, max: 12000, step: 250, kind: 'structure', get: (c) => c.fabric.cpuCapacity, set: (c, v) => (c.fabric.cpuCapacity = v), format: (v) => `${(v / 1000).toFixed(1)}ku/s`,
+        info: {
+          what: 'Total fabric CPU work-units per second, shared by requests and handshakes.',
+          how: 'Processor sharing: when demanded work-rate exceeds capacity, every in-flight operation slows proportionally (utilization >1 → ×slow on everything). This coupling is what turns a handshake burst into system-wide latency. Applied live.',
+          expect: 'More capacity means more headroom before saturation and a higher tolerated handshake rate without storming. Too little and even modest churn pushes utilization past 100%, stretching all service times and feeding more timeouts.',
+        },
+      },
+      {
+        label: 'TLS error pacing delay', min: 0, max: 5, step: 0.25, get: (c) => c.fabric.tlsErrorPacingDelayMs, set: (c, v) => (c.fabric.tlsErrorPacingDelayMs = v), format: msFine,
+        info: {
+          what: 'How long the fabric holds the RST when shedding a connection at TLS admission.',
+          how: 'With pacing on, a shed connection’s RST is delayed by this much before the client is told, so a cohort of shed clients does not all learn — and reconnect — at the same instant. Typical 0–5ms. No effect when the pacing toggle is off.',
+          expect: 'A small delay de-synchronizes reconnect waves, smoothing the load of clients retrying after a shed. Set to 0 (or pacing off) and shed clients rebound in lockstep.',
+        },
+      },
     ],
     toggles: [
-      { label: 'TLS error pacing', get: (c) => c.fabric.tlsErrorPacingEnabled, set: (c, v) => (c.fabric.tlsErrorPacingEnabled = v) },
+      {
+        label: 'TLS error pacing', get: (c) => c.fabric.tlsErrorPacingEnabled, set: (c, v) => (c.fabric.tlsErrorPacingEnabled = v),
+        info: {
+          what: 'Whether shed RSTs at TLS admission are paced.',
+          how: 'On → each shed RST is held for the pacing delay above. Off → sheds are signaled immediately, so all clients shed in the same instant reconnect together.',
+          expect: 'On breaks up synchronized reconnect storms after a shedding episode. Off lets sheds become their own thundering herd.',
+        },
+      },
     ],
   },
   {
     name: 'Downstream pools',
     scope: 'sim',
     knobs: [
-      { label: 'Pool / downstream', min: 1, max: 30, step: 1, get: (c) => c.downstreamPool.poolSizePerDownstream, set: (c, v) => (c.downstreamPool.poolSizePerDownstream = v) },
-      { label: 'Downstream timeout', min: 50, max: 1000, step: 10, get: (c) => c.downstreamPool.requestTimeoutMs, set: (c, v) => (c.downstreamPool.requestTimeoutMs = v), format: ms },
-      { label: 'Connect time', min: 5, max: 100, step: 5, get: (c) => c.downstreamPool.connectMs, set: (c, v) => (c.downstreamPool.connectMs = v), format: ms },
-      { label: 'Breaker trip ratio', min: 0.1, max: 0.9, step: 0.05, get: (c) => c.downstreamPool.breakerFailureRatio, set: (c, v) => (c.downstreamPool.breakerFailureRatio = v), format: (v) => `${Math.round(v * 100)}%` },
-      { label: 'Breaker cooldown', min: 500, max: 10000, step: 250, get: (c) => c.downstreamPool.breakerCooldownMs, set: (c, v) => (c.downstreamPool.breakerCooldownMs = v), format: (v) => `${(v / 1000).toFixed(1)}s` },
+      {
+        label: 'Pool / downstream', min: 1, max: 30, step: 1, get: (c) => c.downstreamPool.poolSizePerDownstream, set: (c, v) => (c.downstreamPool.poolSizePerDownstream = v),
+        info: {
+          what: 'Connections the fabric holds to each downstream.',
+          how: 'A routed request uses an idle downstream connection or opens one (up to this size); otherwise it waits in that downstream’s time-bounded queue. Pre-warmed at start. Opening an outbound connection also draws some fabric CPU.',
+          expect: 'Larger pools absorb more concurrency per downstream before queueing. Too small and requests queue and expire on the downstream timeout even when the downstream itself is healthy.',
+        },
+      },
+      {
+        label: 'Downstream timeout', min: 50, max: 1000, step: 10, get: (c) => c.downstreamPool.requestTimeoutMs, set: (c, v) => (c.downstreamPool.requestTimeoutMs = v), format: ms,
+        info: {
+          what: 'How long after routing the fabric waits for a downstream call.',
+          how: 'One budget covers queue wait + wire + service. A request that sat in the queue forwards with only its remaining budget; if it expires, the fabric returns an error and poisons (tears down) the outbound connection. Requests found dead on dequeue are dropped — why queues must be time-bounded.',
+          expect: 'Tight timeouts free the fabric from slow downstreams fast but error out tail-latency requests. Loose timeouts wait through tails at the cost of holding pool slots and queue depth longer.',
+        },
+      },
+      {
+        label: 'Connect time', min: 5, max: 100, step: 5, get: (c) => c.downstreamPool.connectMs, set: (c, v) => (c.downstreamPool.connectMs = v), format: ms,
+        info: {
+          what: 'Time to establish a fabric→downstream connection.',
+          how: 'Charged when opening a new outbound connection (it also draws some fabric CPU). Until it completes, requests needing that connection wait in the queue.',
+          expect: 'Slower connects make pool growth lag demand, so bursts queue longer before new connections come online. Negligible once the pool is warm.',
+        },
+      },
+      {
+        label: 'Breaker trip ratio', min: 0.1, max: 0.9, step: 0.05, get: (c) => c.downstreamPool.breakerFailureRatio, set: (c, v) => (c.downstreamPool.breakerFailureRatio = v), format: (v) => `${Math.round(v * 100)}%`,
+        info: {
+          what: 'Failure fraction that ejects a downstream from rotation.',
+          how: 'Each downstream has its own 8-bucket window; once failures ÷ total ≥ this ratio (with enough samples) it is ejected from the random routing rotation for the cooldown. Ejection-style: it re-enters directly with a fresh window. Requires the Circuit breaker toggle below on.',
+          expect: 'A lower ratio ejects a sick downstream faster, concentrating traffic on healthy ones and cutting timeouts — but a transient blip can eject a still-useful node. Higher tolerates more errors before ejecting.',
+        },
+      },
+      {
+        label: 'Breaker cooldown', min: 500, max: 10000, step: 250, get: (c) => c.downstreamPool.breakerCooldownMs, set: (c, v) => (c.downstreamPool.breakerCooldownMs = v), format: (v) => `${(v / 1000).toFixed(1)}s`,
+        info: {
+          what: 'How long an ejected downstream stays out of rotation.',
+          how: 'While ejected, no traffic is routed to it; routing spreads across the remaining healthy downstreams. After the cooldown it rejoins with a clean window and re-trips quickly if still broken.',
+          expect: 'A longer cooldown shields clients from a flapping downstream longer but loads the survivors more. A shorter cooldown re-probes sooner, risking repeated ejections of a node that has not recovered.',
+        },
+      },
     ],
     toggles: [
-      { label: 'Circuit breaker', get: (c) => c.downstreamPool.circuitBreakerEnabled, set: (c, v) => (c.downstreamPool.circuitBreakerEnabled = v) },
+      {
+        label: 'Circuit breaker', get: (c) => c.downstreamPool.circuitBreakerEnabled, set: (c, v) => (c.downstreamPool.circuitBreakerEnabled = v),
+        info: {
+          what: 'The per-downstream ejection breaker.',
+          how: 'On → a downstream that exceeds the trip ratio is ejected from the routing rotation; if all are broken the fabric fails fast. Off → every request routes to all downstreams regardless of health, riding the full downstream timeout on a dead node.',
+          expect: 'On contains the damage of one bad downstream and keeps goodput up. Off lets a slow or erroring downstream soak up timeouts and queue slots, dragging the whole fabric.',
+        },
+      },
     ],
   },
   {
     name: 'Downstreams',
     scope: 'sim',
     knobs: [
-      { label: 'Downstreams', min: 1, max: 6, step: 1, kind: 'structure', get: (c) => c.downstreams.count, set: (c, v) => (c.downstreams.count = v) },
-      { label: 'Response median', min: 10, max: 500, step: 5, get: (c) => c.downstreams.responseTimeMedianMs, set: (c, v) => (c.downstreams.responseTimeMedianMs = v), format: ms },
+      {
+        label: 'Downstreams', min: 1, max: 6, step: 1, kind: 'structure', get: (c) => c.downstreams.count, set: (c, v) => (c.downstreams.count = v),
+        info: {
+          what: 'Number of downstream systems behind the fabric.',
+          how: 'Each request is routed to a random healthy downstream. Total downstream capacity = count × concurrency cap. Applied live (adds or removes nodes; removing one drains its queue).',
+          expect: 'More downstreams give more aggregate concurrency and resilience (losing one matters less). Fewer concentrates load, so each saturates sooner and its latency inflates.',
+        },
+      },
+      {
+        label: 'Response median', min: 10, max: 500, step: 5, get: (c) => c.downstreams.responseTimeMedianMs, set: (c, v) => (c.downstreams.responseTimeMedianMs = v), format: ms,
+        info: {
+          what: 'Median downstream service time (log-normal).',
+          how: 'Each response samples a log-normal around this median; the tail is set by the p99 ÷ p50 knob. Service time also inflates by the downstream’s load factor once it is past its concurrency cap.',
+          expect: 'Slower downstreams push end-to-end latency toward the client timeout — fewer requests beat the deadline, more time out (and poison connections). Drives how much pool and timeout headroom you need.',
+        },
+      },
       {
         label: 'Tail (p99 ÷ p50)',
         min: 1.2,
@@ -135,9 +369,28 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
         get: (c) => Math.exp(SIGMA_Z99 * c.downstreams.responseTimeSigma),
         set: (c, v) => (c.downstreams.responseTimeSigma = Math.log(v) / SIGMA_Z99),
         format: (v) => `${v.toFixed(1)}×`,
+        info: {
+          what: 'How heavy the downstream latency tail is — p99 as a multiple of the median.',
+          how: 'Sets the log-normal sigma (the knob shows p99 ÷ p50; sigma = ln(ratio) ÷ 2.3263). Samples are clamped to 25× the median. A fat tail means occasional very slow responses even when the median is fine.',
+          expect: 'A heavier tail puts more requests randomly brushing or blowing the client timeout, so timeouts and the connection churn they cause rise even at a healthy median.',
+        },
       },
-      { label: 'Error rate', min: 0, max: 0.5, step: 0.005, get: (c) => c.downstreams.errorRate, set: (c, v) => (c.downstreams.errorRate = v), format: (v) => `${(v * 100).toFixed(1)}%` },
-      { label: 'Concurrency cap', min: 1, max: 100, step: 1, get: (c) => c.downstreams.concurrencyCapacity, set: (c, v) => (c.downstreams.concurrencyCapacity = v) },
+      {
+        label: 'Error rate', min: 0, max: 0.5, step: 0.005, get: (c) => c.downstreams.errorRate, set: (c, v) => (c.downstreams.errorRate = v), format: (v) => `${(v * 100).toFixed(1)}%`,
+        info: {
+          what: 'Probability a downstream returns an error instead of a success.',
+          how: 'Sampled per request; errors return faster than successes (half the sampled time) and feed the downstream breaker’s failure window. An error is returned to the client (square glyph), distinct from a timeout — it does not poison the connection.',
+          expect: 'A higher error rate lowers success directly, drives more retries, and — with the downstream breaker on — ejects the offending node faster. Errors are cheaper than timeouts but still feed amplification.',
+        },
+      },
+      {
+        label: 'Concurrency cap', min: 1, max: 100, step: 1, get: (c) => c.downstreams.concurrencyCapacity, set: (c, v) => (c.downstreams.concurrencyCapacity = v),
+        info: {
+          what: 'Concurrent requests one downstream absorbs before its latency inflates.',
+          how: 'Load factor = max(1, in-flight ÷ cap); service time is multiplied by it, so past the cap every in-flight request slows proportionally — the downstream’s own processor-sharing.',
+          expect: 'A low cap makes a downstream’s latency balloon under load, cascading into fabric queueing and client timeouts. A high cap keeps response times flat until much higher concurrency.',
+        },
+      },
     ],
     toggles: [],
   },
@@ -367,7 +620,10 @@ export class ControlPanel {
         this.refreshers.push(sync);
         row.appendChild(input);
         row.appendChild(el('span', 'toggle-label', toggle.label));
+        const info = toggle.info ? this.buildInfo(toggle.info) : null;
+        if (info) row.appendChild(info.btn);
         details.appendChild(row);
+        if (info) details.appendChild(info.panel);
       }
 
       for (const knob of group.knobs) {
@@ -393,14 +649,51 @@ export class ControlPanel {
         this.refreshers.push(sync);
         const top = el('div', 'knob-top');
         top.appendChild(labelEl);
-        top.appendChild(valueEl);
+        const meta = el('div', 'knob-meta');
+        meta.appendChild(valueEl);
+        const info = knob.info ? this.buildInfo(knob.info) : null;
+        if (info) meta.appendChild(info.btn);
+        top.appendChild(meta);
         row.appendChild(top);
         row.appendChild(input);
+        if (info) row.appendChild(info.panel);
         details.appendChild(row);
       }
       section.appendChild(details);
     }
     this.side.appendChild(section);
+  }
+
+  /**
+   * The ⓘ affordance for one setting: a button plus a collapsible detail panel.
+   * The caller appends the button into the row and the panel just after it; the
+   * button toggles the panel open. preventDefault/stopPropagation keep a click
+   * inside a toggle's <label> from flipping the checkbox.
+   */
+  private buildInfo(info: SettingInfo): { btn: HTMLButtonElement; panel: HTMLElement } {
+    const btn = el('button', 'info-btn', 'ⓘ') as HTMLButtonElement;
+    btn.type = 'button';
+    btn.title = 'What this setting does';
+    btn.setAttribute('aria-label', 'Explain this setting');
+    const panel = el('div', 'setting-info');
+    const parts: Array<[string, string]> = [
+      ['What', info.what],
+      ['How', info.how],
+      ['Expect', info.expect],
+    ];
+    for (const [tag, text] of parts) {
+      const p = el('p', '');
+      p.appendChild(el('b', '', tag));
+      p.appendChild(document.createTextNode(` ${text}`));
+      panel.appendChild(p);
+    }
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const open = panel.classList.toggle('open');
+      btn.classList.toggle('active', open);
+    });
+    return { btn, panel };
   }
 
   private buildPaneTabs(): HTMLElement {

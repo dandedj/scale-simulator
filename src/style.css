@@ -702,6 +702,85 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
+.knob-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Per-setting ⓘ explanation */
+
+.info-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-faint);
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: color 0.15s;
+}
+
+.info-btn:hover {
+  color: var(--info);
+}
+
+.info-btn.active {
+  color: var(--info);
+}
+
+/* In a toggle row the ⓘ sits flush right, past the label. */
+.toggle-row .info-btn {
+  margin-left: auto;
+}
+
+.setting-info {
+  display: none;
+  margin: 5px 11px 8px;
+  padding: 8px 10px;
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--info);
+  border-radius: 5px;
+}
+
+.knob-row .setting-info {
+  margin: 7px 0 1px;
+}
+
+.setting-info.open {
+  display: block;
+}
+
+.setting-info p {
+  font-size: 10.5px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  margin-bottom: 5px;
+}
+
+.setting-info p:last-child {
+  margin-bottom: 0;
+}
+
+.setting-info b {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 9.5px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--info);
+  margin-right: 5px;
+}
+
 .toggle-row {
   display: flex;
   align-items: center;
