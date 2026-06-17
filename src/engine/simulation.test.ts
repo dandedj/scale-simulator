@@ -351,3 +351,63 @@ describe('engine invariants', () => {
     expect(sim.fabricInFlight).toBeGreaterThanOrEqual(0);
   });
 });
+
+describe('connection-rate shedding (accept-rate limiter)', () => {
+  // Defaults tuned for the demo load: healthy accept rate peaks ~12/s (steady)
+  // and ~20/s (under a 3x pulse); a storm floods accept at 200-350/s. A 40/s
+  // limit with a 30-burst sits cleanly between the two.
+  const enableLimiter = (cfg: SimulationConfig) => {
+    cfg.fabric.connRateShedEnabled = true;
+    cfg.fabric.connRateLimitPerSec = 40;
+    cfg.fabric.connRateBurst = 30;
+  };
+
+  it('never fires under healthy load and leaves goodput untouched', () => {
+    const sim = newSim('healthy', enableLimiter);
+    run(sim, 60_000);
+    expect(sim.metrics.totals.shedConnRate).toBe(0);
+    const s = statsBetween(sim, 5_000, 60_000);
+    expect(s.successRate).toBeGreaterThan(0.95);
+  });
+
+  it('does not throttle a healthy 3x pulse (accept rate stays under the limit)', () => {
+    const sim = newSim('healthy', enableLimiter);
+    run(sim, 15_000);
+    sim.triggerPulse(3, 5_000);
+    run(sim, 15_000);
+    expect(sim.metrics.totals.shedConnRate).toBe(0);
+    expect(statsBetween(sim, 25_000, 30_000).successRate).toBeGreaterThan(0.9);
+  });
+
+  it('alone prevents the storm-prone metastable collapse', () => {
+    // Baseline: storm-prone collapses to ~zero goodput long after the pulse.
+    const off = newSim('storm-prone');
+    run(off, 15_000);
+    off.triggerPulse(3, 5_000);
+    run(off, 30_000);
+    expect(statsBetween(off, 30_000, 45_000).successRate).toBeLessThan(0.05);
+
+    // Same preset and pulse, with only the accept-rate limiter added: the
+    // fabric sheds the connection flood at accept and goodput survives —
+    // something the static connection limit and TLS permit cap could not do.
+    const on = newSim('storm-prone', enableLimiter);
+    run(on, 15_000);
+    on.triggerPulse(3, 5_000);
+    run(on, 30_000);
+    expect(on.metrics.totals.shedConnRate).toBeGreaterThan(0);
+    expect(statsBetween(on, 30_000, 45_000).successRate).toBeGreaterThan(0.85);
+  });
+
+  it('caps the sustained accept rate near the configured limit under a storm', () => {
+    const sim = newSim('storm-prone', enableLimiter);
+    run(sim, 10_000);
+    sim.triggerPulse(3, 5_000);
+    run(sim, 20_000);
+    // Connections that actually pass accept (start a handshake) per second,
+    // averaged over the storm window, must not exceed the limit by much — the
+    // burst allows a little overage but the sustained rate is bounded.
+    const s = statsBetween(sim, 15_000, 30_000);
+    const acceptedPerSec = s.handshakesStarted / 15;
+    expect(acceptedPerSec).toBeLessThan(40 * 1.5);
+  });
+});

@@ -46,6 +46,9 @@ function base(): SimulationConfig {
       tlsCpuCost: 60,
       tlsErrorPacingEnabled: true,
       tlsErrorPacingDelayMs: 2,
+      connRateShedEnabled: false,
+      connRateLimitPerSec: 40,
+      connRateBurst: 30,
     },
     downstreamPool: {
       poolSizePerDownstream: 10,

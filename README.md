@@ -65,13 +65,15 @@ CPU contention stretches everything → more timeouts. The control mechanisms:
 |---|---|
 | TLS permits + permit wait | At most N handshakes run concurrently. A connection without a permit waits up to the permit wait time, then is **shed with an RST** (the connection is invalidated). There is no TLS queue — only this bounded wait. |
 | Connection limit | Beyond the cap, new connections are **shed with an RST** before any TLS work happens. |
+| Accept-rate shedding | A per-server, in-memory **token bucket** at TCP accept: new connections refill it at the accept-rate limit (with a burst allowance), and when it runs dry, connections are **shed with an RST** at accept — before the connection-limit check and before any TLS work. Unlike the connection limit (a cap on *concurrent* connections) or the TLS permit cap (a cap on *concurrent* handshakes), this caps the *rate* of new connections, throttling handshake demand at the source. The cheapest rejection there is, and the most direct defense against a connection storm. |
 | TLS error pacing | When a connection is shed at TLS admission, the RST is held for the pacing delay (typically 0–5ms, up to 100ms) before being sent, so shed clients don't learn — and reconnect — in lockstep. The held connection stays live for the delay and carries a small trickle of fabric CPU, so a long hold under a heavy shed is not free. |
 | TLS session resumption | A configurable share of handshakes resume a prior session, skipping most of the asymmetric crypto. |
 | Client circuit breaker | A client that sees sustained failures stops sending entirely, removing its load until a half-open probe succeeds. |
 
 **"Shed" here means connection-level rejection**, and the simulator counts
-the two causes separately: `shed·tls` (TLS permits stayed occupied past the
-wait) and `shed·conn` (connection limit exceeded).
+the causes separately: `shed·tls` (TLS permits stayed occupied past the
+wait), `shed·conn` (connection limit exceeded), and `shed·rate` (accept-rate
+limit exceeded — bounced at TCP accept before any TLS work).
 
 Faithfully modeled wasted work: the fabric completes handshakes for clients
 that already gave up, downstreams finish responses the fabric already timed
@@ -123,8 +125,8 @@ Run totals and the event log report both sims side by side.
 - **Fabric internals**: connection gauge vs limit, TLS permit slots with the
   count of connections in the permit wait, the CPU column (overflow hatching +
   slowdown factor when demand exceeds capacity), per-downstream queues,
-  lifetime shed counters split by cause, and the PACE chip (TLS error pacing
-  on/off).
+  lifetime shed counters split by cause, and the PACE / RATE chips (TLS error
+  pacing and accept-rate shedding on/off).
 - **Breaker dots**: when a client's circuit breaker is enabled it shows its
   state — green dot closed; orange arc = open with cooldown progress; an orange
   ring while its half-open probe is out. The fabric does not circuit-break
@@ -132,7 +134,7 @@ Run totals and the event log report both sims side by side.
 - **The graveyard**: failures pile up under the fabric and settle downward as
   they fade. Squares are request fates (red timeout, orange rejection, yellow
   error); hollow rings are TLS-permit sheds; hollow triangles are
-  connection-limit sheds.
+  connection-limit sheds; hollow diamonds are accept-rate sheds.
 - **Success rate + amplification (HUD)**: rolling success rate (successes ÷
   arrivals) and attempts sent ÷ successes over the last couple of seconds.
 - **Charts** (60s rolling): latency p50/p99 vs the client-timeout line,

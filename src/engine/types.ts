@@ -100,6 +100,22 @@ export interface FabricConfig {
    */
   tlsErrorPacingEnabled: boolean;
   tlsErrorPacingDelayMs: number;
+
+  /**
+   * Connection-rate shedding: a per-server, in-memory token-bucket limiter at
+   * TCP accept. New connections refill the bucket at connRateLimitPerSec; each
+   * accepted connection spends a token. When the bucket is empty the connection
+   * is rejected at accept (RST) before any TLS work — so a storm of new
+   * connections is bounced at near-zero cost, before it can melt the handshake
+   * CPU. Unlike the static connection limit (a cap on concurrent connections)
+   * or the TLS permit limit (a cap on concurrent handshakes), this caps the
+   * *rate* of new connections, throttling handshake demand at the source.
+   */
+  connRateShedEnabled: boolean;
+  /** Sustained new-connection accept rate per fabric server (conns/sec) — the bucket's refill rate. */
+  connRateLimitPerSec: number;
+  /** Burst capacity (tokens): how many new connections are absorbed at once before the rate throttles. */
+  connRateBurst: number;
 }
 
 export interface DownstreamPoolConfig {
@@ -197,6 +213,8 @@ export interface MetricsBucket {
   shedTls: number;
   /** Connections shed because the connection limit was exceeded (RST). */
   shedConnLimit: number;
+  /** Connections shed at TCP accept because the new-connection rate limit was exceeded (RST). */
+  shedConnRate: number;
   errors: number;
   rejected: number;
   retries: number;

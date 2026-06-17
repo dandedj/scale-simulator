@@ -273,6 +273,22 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
           expect: 'A small delay de-synchronizes reconnect waves, smoothing the load of clients retrying after a shed. But the held connection stays live for the whole delay and carries a trickle of CPU — negligible when short, but a long delay under a heavy shed keeps many connections open at once and adds real load. Set to 0 (or pacing off) and shed clients rebound in lockstep.',
         },
       },
+      {
+        label: 'Accept rate limit', min: 5, max: 200, step: 5, get: (c) => c.fabric.connRateLimitPerSec, set: (c, v) => (c.fabric.connRateLimitPerSec = v), format: (v) => `${v}/s`,
+        info: {
+          what: 'Sustained new-connection accept rate per fabric server, when accept-rate shedding is on.',
+          how: 'A per-server, in-memory token bucket refills at this rate; each accepted connection spends a token. When it runs dry, new connections are rejected at TCP accept (RST) before any TLS work. No effect when the toggle is off. At this demo scale the healthy accept rate is ~12/s (≈20/s under a pulse) and a storm floods accept at 200–350/s, so a limit around 40/s sits between the two.',
+          expect: 'Set it above the real new-connection rate and a storm’s reconnect flood is bounced at the door — handshake demand is capped at the source, so the CPU never melts. Set it below the working rate and you throttle legitimate traffic.',
+        },
+      },
+      {
+        label: 'Accept burst', min: 1, max: 100, step: 1, get: (c) => c.fabric.connRateBurst, set: (c, v) => (c.fabric.connRateBurst = v), format: (v) => `${v}`,
+        info: {
+          what: 'Token-bucket burst capacity: how many new connections are absorbed at once before the rate limit throttles.',
+          how: 'The bucket holds at most this many tokens, so a momentary spike up to this size passes untouched; only a sustained rate above the limit drains it and triggers shedding. No effect when the toggle is off.',
+          expect: 'Larger burst tolerates brief reconnect bunches (warm-up, a short blip) without shedding; smaller burst clamps sooner and harder. Too large and a real storm slips through before throttling engages.',
+        },
+      },
     ],
     toggles: [
       {
@@ -281,6 +297,14 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
           what: 'Whether shed RSTs at TLS admission are paced.',
           how: 'On → each shed RST is held for the pacing delay above. Off → sheds are signaled immediately, so all clients shed in the same instant reconnect together.',
           expect: 'On breaks up synchronized reconnect storms after a shedding episode. Off lets sheds become their own thundering herd.',
+        },
+      },
+      {
+        label: 'Accept-rate shedding', get: (c) => c.fabric.connRateShedEnabled, set: (c, v) => (c.fabric.connRateShedEnabled = v),
+        info: {
+          what: 'Whether the fabric sheds new connections by rate at TCP accept, before any TLS work.',
+          how: 'On → a per-server token bucket (accept rate limit + burst above) bounces new connections with an RST once their rate exceeds the limit, before the connection-limit check and before any handshake. Off → every connection reaches the connection-limit and TLS-permit checks as usual.',
+          expect: 'Unlike the static connection limit (a cap on concurrent connections) or the TLS permit cap (a cap on concurrent handshakes), this caps the rate of new connections — throttling handshake demand at the source. It is the cheapest rejection and the most direct defense against a connection storm. Turn it on over Storm-prone and watch the collapse not happen.',
         },
       },
     ],

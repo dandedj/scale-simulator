@@ -21,6 +21,7 @@ export class MetricsCollector {
     timeouts: 0,
     shedTls: 0,
     shedConnLimit: 0,
+    shedConnRate: 0,
     errors: 0,
     rejected: 0,
     retries: 0,
@@ -80,6 +81,10 @@ export class MetricsCollector {
     this.current.shedConnLimit++;
     this.totals.shedConnLimit++;
   }
+  countShedConnRate(): void {
+    this.current.shedConnRate++;
+    this.totals.shedConnRate++;
+  }
   countError(): void {
     this.current.errors++;
     this.totals.errors++;
@@ -135,6 +140,7 @@ export class MetricsCollector {
       timeouts: 0,
       shedTls: 0,
       shedConnLimit: 0,
+      shedConnRate: 0,
       errors: 0,
       rejected: 0,
       retries: 0,

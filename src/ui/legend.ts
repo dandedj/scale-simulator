@@ -122,6 +122,12 @@ function shedConnMote(): string {
   );
 }
 
+function shedConnRateMote(): string {
+  return svg(
+    `<path d="M${c} ${c - 4} L${c + 4} ${c} L${c} ${c + 4} L${c - 4} ${c} Z" fill="none" stroke="${SEMANTIC.shed}" stroke-width="1.5"/>`,
+  );
+}
+
 const SECTIONS: LegendSection[] = [
   {
     title: 'Requests (particles)',
@@ -148,11 +154,13 @@ const SECTIONS: LegendSection[] = [
     entries: [
       { swatch: gauge(SEMANTIC.cpuOk, 0.4), label: 'Connection gauge', detail: 'Held connections vs the connection limit. Beyond the limit: shed·conn (RST).' },
       { swatch: ring(SEMANTIC.tlsPulse, 5), label: 'TLS permits', detail: 'Each slot is one concurrent handshake. “+N permit wait” connections are waiting; past the permit wait they are shed·tls (RST). There is no TLS queue.' },
+      { swatch: dot(SEMANTIC.success, 3.5), label: 'PACE / RATE chips', detail: 'Footer chips: ●/○ show whether TLS error pacing and accept-rate shedding are on. With RATE on, the fabric throttles new connections at TCP accept (token bucket: rate + burst).' },
       { swatch: gauge(SEMANTIC.cpuBad, 0.95), label: 'CPU column', detail: 'Demanded work vs capacity. Hatching above = overload; “×N slow” = every in-flight operation stretched by contention.' },
       { swatch: gauge(SEMANTIC.shed, 0.6), label: 'Downstream queues', detail: 'Requests waiting for a fabric→downstream connection, colored by age (blue→red).' },
       { swatch: graveyardSwatch(), label: 'Graveyard', detail: 'Failures pile up below the fabric and slowly settle downward as they fade. Squares are request fates: red timeouts, orange rejections, yellow errors.' },
       { swatch: shedTlsMote(), label: 'Shed TLS conn', detail: 'Hollow ring in the graveyard: a connection shed by RST because TLS permits stayed occupied past the permit wait.' },
       { swatch: shedConnMote(), label: 'Shed at conn limit', detail: 'Hollow triangle in the graveyard: a connection shed by RST at the connection limit, before any TLS work.' },
+      { swatch: shedConnRateMote(), label: 'Shed by accept rate', detail: 'Hollow diamond in the graveyard: a connection shed by RST at TCP accept because the new-connection rate exceeded the limit — the cheapest rejection, before the connection-limit check and any TLS work.' },
     ],
   },
   {

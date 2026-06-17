@@ -330,6 +330,13 @@ export class Simulation {
   permitWaiters: PermitWaiter[] = [];
   /** Requests inside the fabric (processing, queued, or at a downstream). */
   fabricInFlight = 0;
+  /**
+   * Accept-rate token bucket (per fabric server, in memory). Tokens refill at
+   * connRateLimitPerSec up to connRateBurst; each accepted connection spends
+   * one. Starts full so a warm fabric isn't throttled on the first connection.
+   */
+  private connRateTokens = 0;
+  private connRateLastRefill = 0;
 
   // Pulse state
   pulseFactor = 1;
@@ -347,6 +354,7 @@ export class Simulation {
     this.cfg = cfg;
     this.rng = new Rng(cfg.seed);
     this.cpu = new CpuScheduler(cfg.fabric.cpuCapacity);
+    this.connRateTokens = cfg.fabric.connRateBurst;
     for (let i = 0; i < cfg.clients.count; i++) this.addClient();
     for (let i = 0; i < cfg.downstreams.count; i++) this.downstreams.push(new DownstreamSim(i));
     this.prewarm();
@@ -737,6 +745,22 @@ export class Simulation {
 
   // -- Fabric: inbound connections & TLS ---------------------------------------
 
+  /**
+   * Lazy token-bucket admission for the accept-rate limiter. Refills tokens for
+   * the elapsed time (capped at the burst), then spends one if available.
+   * Returns false when the bucket is empty — the connection should be shed.
+   */
+  private admitConnRate(f: SimulationConfig['fabric']): boolean {
+    const refill = ((this.now - this.connRateLastRefill) * f.connRateLimitPerSec) / 1000;
+    this.connRateTokens = Math.min(f.connRateBurst, this.connRateTokens + refill);
+    this.connRateLastRefill = this.now;
+    if (this.connRateTokens >= 1) {
+      this.connRateTokens -= 1;
+      return true;
+    }
+    return false;
+  }
+
   private acceptCount(conn: ConnSim): void {
     this.fabricConnCount++;
     conn.counted = true;
@@ -752,6 +776,15 @@ export class Simulation {
   private fabricAccept(client: ClientSim, conn: ConnSim): void {
     if (conn.abandoned || conn.state === 'closing') return;
     const f = this.cfg.fabric;
+    // Accept-rate shedding: bounce excess new connections at TCP accept, before
+    // the connection-limit check and before any TLS work. This is the cheapest
+    // possible rejection — it caps how fast new handshakes can be demanded, so a
+    // connection storm is throttled at the source instead of melting the CPU.
+    if (f.connRateShedEnabled && !this.admitConnRate(f)) {
+      this.metrics.countShedConnRate();
+      this.shedConnection(client, conn, 'connection rate exceeded');
+      return;
+    }
     if (this.fabricConnCount >= f.maxConnections) {
       this.metrics.countShedConnLimit();
       this.shedConnection(client, conn, 'connection limit exceeded');

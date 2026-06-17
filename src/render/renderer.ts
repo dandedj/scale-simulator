@@ -18,7 +18,7 @@ import { clamp01, clientLane, computeLayout, dsLane, lerp, type SceneLayout } fr
 
 const FATE_LINGER_MS = 250;
 
-type MoteKind = 'timeout' | 'rejected' | 'error' | 'shedTls' | 'shedConn';
+type MoteKind = 'timeout' | 'rejected' | 'error' | 'shedTls' | 'shedConn' | 'shedConnRate';
 
 interface GraveMote {
   x: number;
@@ -37,6 +37,7 @@ export class Renderer {
   private graveSeq = 0;
   private seenShedTls = 0;
   private seenShedConn = 0;
+  private seenShedRate = 0;
   private canvas: HTMLCanvasElement;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -62,6 +63,7 @@ export class Renderer {
     this.graveSeq = 0;
     this.seenShedTls = 0;
     this.seenShedConn = 0;
+    this.seenShedRate = 0;
   }
 
   draw(sim: Simulation): void {
@@ -372,14 +374,18 @@ export class Renderer {
     ctx.fillStyle = SURFACE.textDim;
     ctx.fillText(`in-flight ${view.inFlight}`, f.x + 12, f.y + f.h - 12);
     const t = sim.metrics.totals;
-    if (t.shedTls + t.shedConnLimit > 0) {
+    if (t.shedTls + t.shedConnLimit + t.shedConnRate > 0) {
       ctx.fillStyle = SEMANTIC.shed;
-      ctx.fillText(`shed tls ${t.shedTls} · conn ${t.shedConnLimit}`, f.x + 12, f.y + f.h - 25);
+      const rate = sim.cfg.fabric.connRateShedEnabled ? ` · rate ${t.shedConnRate}` : '';
+      ctx.fillText(`shed tls ${t.shedTls} · conn ${t.shedConnLimit}${rate}`, f.x + 12, f.y + f.h - 25);
     }
     const pacingOn = sim.cfg.fabric.tlsErrorPacingEnabled;
+    const rateOn = sim.cfg.fabric.connRateShedEnabled;
     ctx.textAlign = 'right';
     ctx.fillStyle = pacingOn ? SEMANTIC.success : withAlpha(SURFACE.textFaint, 0.8);
     ctx.fillText(pacingOn ? '●PACE' : '○PACE', f.x + f.w - 12, f.y + f.h - 12);
+    ctx.fillStyle = rateOn ? SEMANTIC.success : withAlpha(SURFACE.textFaint, 0.8);
+    ctx.fillText(rateOn ? '●RATE' : '○RATE', f.x + f.w - 52, f.y + f.h - 12);
     ctx.textAlign = 'left';
   }
 
@@ -473,10 +479,13 @@ export class Renderer {
     const t = sim.metrics.totals;
     const newTls = Math.min(20, t.shedTls - this.seenShedTls);
     const newConn = Math.min(20, t.shedConnLimit - this.seenShedConn);
+    const newRate = Math.min(20, t.shedConnRate - this.seenShedRate);
     for (let i = 0; i < newTls; i++) this.spawnMote(sim, l, 'shedTls');
     for (let i = 0; i < newConn; i++) this.spawnMote(sim, l, 'shedConn');
+    for (let i = 0; i < newRate; i++) this.spawnMote(sim, l, 'shedConnRate');
     this.seenShedTls = t.shedTls;
     this.seenShedConn = t.shedConnLimit;
+    this.seenShedRate = t.shedConnRate;
     // Bound the bookkeeping map.
     if (this.seenFates.size > 4096) {
       const live = new Set<number>();
@@ -717,6 +726,19 @@ export class Renderer {
           ctx.moveTo(x + 1.5, y - 2);
           ctx.lineTo(x + 4.5, y + 3);
           ctx.lineTo(x - 1.5, y + 3);
+          ctx.closePath();
+          ctx.stroke();
+          break;
+        case 'shedConnRate':
+          // Shed by accept rate: hollow diamond (bounced at TCP accept, before
+          // any TLS work — the cheapest rejection).
+          ctx.strokeStyle = withAlpha(SEMANTIC.shed, alpha);
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.moveTo(x + 1.5, y - 2.5);
+          ctx.lineTo(x + 4, y + 0.5);
+          ctx.lineTo(x + 1.5, y + 3.5);
+          ctx.lineTo(x - 1, y + 0.5);
           ctx.closePath();
           ctx.stroke();
           break;

@@ -77,7 +77,8 @@ const CHARTS: ChartDef[] = [
     title: 'CONNECTIONS',
     series: [
       { label: 'fabric conns', color: SEMANTIC.connEstablished, value: (b) => b.fabricConnections },
-      { label: 'shed/s', color: SEMANTIC.shed, value: (b) => b.shedConnLimit * PER_SEC },
+      // Connection-level door sheds: the static-limit RST and the accept-rate RST.
+      { label: 'shed/s', color: SEMANTIC.shed, value: (b) => (b.shedConnLimit + b.shedConnRate) * PER_SEC },
       { label: 'ds queue', color: SEMANTIC.error, fill: true, value: (b) => b.fabricQueueDepth },
     ],
     threshold: (sim) => ({ value: sim.cfg.fabric.maxConnections, label: 'conn limit' }),
