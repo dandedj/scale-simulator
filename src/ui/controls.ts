@@ -266,11 +266,11 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
         },
       },
       {
-        label: 'TLS error pacing delay', min: 0, max: 5, step: 0.25, get: (c) => c.fabric.tlsErrorPacingDelayMs, set: (c, v) => (c.fabric.tlsErrorPacingDelayMs = v), format: msFine,
+        label: 'TLS error pacing delay', min: 0, max: 100, step: 0.25, get: (c) => c.fabric.tlsErrorPacingDelayMs, set: (c, v) => (c.fabric.tlsErrorPacingDelayMs = v), format: msFine,
         info: {
           what: 'How long the fabric holds the RST when shedding a connection at TLS admission.',
-          how: 'With pacing on, a shed connection’s RST is delayed by this much before the client is told, so a cohort of shed clients does not all learn — and reconnect — at the same instant. Typical 0–5ms. No effect when the pacing toggle is off.',
-          expect: 'A small delay de-synchronizes reconnect waves, smoothing the load of clients retrying after a shed. Set to 0 (or pacing off) and shed clients rebound in lockstep.',
+          how: 'With pacing on, a shed connection’s RST is delayed by this much before the client is told, so a cohort of shed clients does not all learn — and reconnect — at the same instant. Typical 0–5ms; the range runs to 100ms to expose the long-hold tradeoff. No effect when the pacing toggle is off.',
+          expect: 'A small delay de-synchronizes reconnect waves, smoothing the load of clients retrying after a shed. But the held connection stays live for the whole delay and carries a trickle of CPU — negligible when short, but a long delay under a heavy shed keeps many connections open at once and adds real load. Set to 0 (or pacing off) and shed clients rebound in lockstep.',
         },
       },
     ],
@@ -313,33 +313,8 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
           expect: 'Slower connects make pool growth lag demand, so bursts queue longer before new connections come online. Negligible once the pool is warm.',
         },
       },
-      {
-        label: 'Breaker trip ratio', min: 0.1, max: 0.9, step: 0.05, get: (c) => c.downstreamPool.breakerFailureRatio, set: (c, v) => (c.downstreamPool.breakerFailureRatio = v), format: (v) => `${Math.round(v * 100)}%`,
-        info: {
-          what: 'Failure fraction that ejects a downstream from rotation.',
-          how: 'Each downstream has its own 8-bucket window; once failures ÷ total ≥ this ratio (with enough samples) it is ejected from the random routing rotation for the cooldown. Ejection-style: it re-enters directly with a fresh window. Requires the Circuit breaker toggle below on.',
-          expect: 'A lower ratio ejects a sick downstream faster, concentrating traffic on healthy ones and cutting timeouts — but a transient blip can eject a still-useful node. Higher tolerates more errors before ejecting.',
-        },
-      },
-      {
-        label: 'Breaker cooldown', min: 500, max: 10000, step: 250, get: (c) => c.downstreamPool.breakerCooldownMs, set: (c, v) => (c.downstreamPool.breakerCooldownMs = v), format: (v) => `${(v / 1000).toFixed(1)}s`,
-        info: {
-          what: 'How long an ejected downstream stays out of rotation.',
-          how: 'While ejected, no traffic is routed to it; routing spreads across the remaining healthy downstreams. After the cooldown it rejoins with a clean window and re-trips quickly if still broken.',
-          expect: 'A longer cooldown shields clients from a flapping downstream longer but loads the survivors more. A shorter cooldown re-probes sooner, risking repeated ejections of a node that has not recovered.',
-        },
-      },
     ],
-    toggles: [
-      {
-        label: 'Circuit breaker', get: (c) => c.downstreamPool.circuitBreakerEnabled, set: (c, v) => (c.downstreamPool.circuitBreakerEnabled = v),
-        info: {
-          what: 'The per-downstream ejection breaker.',
-          how: 'On → a downstream that exceeds the trip ratio is ejected from the routing rotation; if all are broken the fabric fails fast. Off → every request routes to all downstreams regardless of health, riding the full downstream timeout on a dead node.',
-          expect: 'On contains the damage of one bad downstream and keeps goodput up. Off lets a slow or erroring downstream soak up timeouts and queue slots, dragging the whole fabric.',
-        },
-      },
-    ],
+    toggles: [],
   },
   {
     name: 'Downstreams',
@@ -379,8 +354,8 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
         label: 'Error rate', min: 0, max: 0.5, step: 0.005, get: (c) => c.downstreams.errorRate, set: (c, v) => (c.downstreams.errorRate = v), format: (v) => `${(v * 100).toFixed(1)}%`,
         info: {
           what: 'Probability a downstream returns an error instead of a success.',
-          how: 'Sampled per request; errors return faster than successes (half the sampled time) and feed the downstream breaker’s failure window. An error is returned to the client (square glyph), distinct from a timeout — it does not poison the connection.',
-          expect: 'A higher error rate lowers success directly, drives more retries, and — with the downstream breaker on — ejects the offending node faster. Errors are cheaper than timeouts but still feed amplification.',
+          how: 'Sampled per request; errors return faster than successes (half the sampled time). An error is returned to the client (square glyph), distinct from a timeout — it does not poison the connection.',
+          expect: 'A higher error rate lowers success directly and drives more retries. The fabric does not eject erroring downstreams, so a bad node keeps taking its share of traffic. Errors are cheaper than timeouts but still feed amplification.',
         },
       },
       {

@@ -414,35 +414,6 @@ export class Renderer {
           b.y + 51,
         );
       }
-
-      // Circuit breaker indicator (top-right corner)
-      const bx = b.x + b.w - 14;
-      const by = b.y + 13;
-      if (!sim.cfg.downstreamPool.circuitBreakerEnabled) {
-        ctx.strokeStyle = withAlpha(SURFACE.textFaint, 0.7);
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.arc(bx, by, 4, 0, Math.PI * 2);
-        ctx.stroke();
-      } else if (ds.breaker === 'closed') {
-        ctx.fillStyle = SEMANTIC.success;
-        ctx.beginPath();
-        ctx.arc(bx, by, 4, 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        // Ejected from rotation; arc shows progress toward re-entry.
-        const frac = clamp01((sim.now - ds.breakerSince) / sim.cfg.downstreamPool.breakerCooldownMs);
-        ctx.strokeStyle = SEMANTIC.shed;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(bx, by, 5, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
-        ctx.stroke();
-        ctx.font = '600 9px "IBM Plex Mono", monospace';
-        ctx.fillStyle = SEMANTIC.shed;
-        ctx.textAlign = 'right';
-        ctx.fillText('EJECTED', bx - 9, by + 3);
-        ctx.textAlign = 'left';
-      }
     }
   }
 

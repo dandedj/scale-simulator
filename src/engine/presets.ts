@@ -51,10 +51,6 @@ function base(): SimulationConfig {
       poolSizePerDownstream: 10,
       requestTimeoutMs: 250,
       connectMs: 25,
-      circuitBreakerEnabled: true,
-      breakerFailureRatio: 0.5,
-      breakerMinSamples: 8,
-      breakerCooldownMs: 4000,
     },
     downstreams: {
       count: 3,
@@ -78,7 +74,7 @@ export const PRESETS: Preset[] = [
     id: 'storm-prone',
     name: 'Storm-prone',
     description:
-      'Raised limits: 16x the TLS permits, the permit wait maxed out, 3 un-jittered retries, pacing and breakers off. Stable at baseline — try a traffic pulse and watch what happens after it ends.',
+      'Raised limits: 16x the TLS permits, the permit wait maxed out, 3 un-jittered retries, pacing off. Stable at baseline — try a traffic pulse and watch what happens after it ends.',
     config: (() => {
       const c = base();
       c.clients.clientTimeoutMs = 250;
@@ -89,7 +85,6 @@ export const PRESETS: Preset[] = [
       c.fabric.tlsHandshakeConcurrency = 64;
       c.fabric.tlsPermitWaitMs = 5;
       c.fabric.tlsErrorPacingEnabled = false;
-      c.downstreamPool.circuitBreakerEnabled = false;
       return c;
     })(),
   },
@@ -127,7 +122,6 @@ export const PRESETS: Preset[] = [
       c.fabric.tlsErrorPacingEnabled = false;
       c.downstreamPool.poolSizePerDownstream = 12;
       c.downstreamPool.requestTimeoutMs = 180;
-      c.downstreamPool.circuitBreakerEnabled = false;
       c.downstreams.responseTimeMedianMs = 140;
       c.downstreams.responseTimeSigma = 0.5;
       c.downstreams.errorRate = 0.15;

@@ -170,7 +170,7 @@ describe('downstream selection', () => {
       // shortly after recovery — no sticking to the first one back.
       expect(s / total).toBeGreaterThan(0.15);
     }
-    // Full recovery follows once breaker re-entries and pool rebuilds settle.
+    // Full recovery follows once the stall clears and pool rebuilds settle.
     run(sim, 10_000);
     const recovered = statsBetween(sim, 30_000, 36_000);
     expect(recovered.successRate).toBeGreaterThan(0.85);
@@ -310,35 +310,6 @@ describe('engine invariants', () => {
       ).length;
     }
     expect(sim.fabricConnCount).toBe(counted);
-  });
-
-  it('ejected downstream cycles through cooldowns while broken and recovers after healing', () => {
-    const sim = newSim('healthy', (cfg) => {
-      cfg.downstreams.count = 1;
-      cfg.downstreams.responseTimeMedianMs = 400;
-      cfg.clients.clientTimeoutMs = 200;
-      cfg.clients.maxRetries = 2;
-      cfg.downstreamPool.requestTimeoutMs = 250;
-      cfg.downstreamPool.breakerCooldownMs = 1500;
-      cfg.downstreamPool.breakerMinSamples = 6;
-    });
-    // While broken, the breaker must keep cycling (eject → re-enter → re-trip),
-    // never wedging in a state that blocks recovery.
-    let sawOpen = 0;
-    let sawClosed = 0;
-    const STEP = 2;
-    for (let t = 0; t < 15_000; t += STEP) {
-      sim.step(STEP);
-      if (sim.downstreams[0].breaker === 'open') sawOpen++;
-      else sawClosed++;
-    }
-    expect(sawOpen).toBeGreaterThan(0);
-    expect(sawClosed).toBeGreaterThan(0);
-    sim.cfg.downstreams.responseTimeMedianMs = 50; // downstream heals
-    run(sim, 20_000);
-    expect(sim.downstreams[0].breaker).toBe('closed');
-    const recovered = statsBetween(sim, 30_000, 35_000);
-    expect(recovered.successRate).toBeGreaterThan(0.8);
   });
 
   it('counters never go negative under storm churn', () => {

@@ -58,6 +58,15 @@ const RETRY_BACKOFF_CAP_MS = 2000;
 const ABANDONED_HANDSHAKE_WORK = 0.5;
 /** Outbound (fabric→downstream) TLS client work relative to inbound server work. */
 const OUTBOUND_TLS_CPU_FACTOR = 0.5;
+/**
+ * CPU work-units per ms to hold a shed connection open while its RST is paced.
+ * A paced shed is not free: the socket and its buffers stay live for the whole
+ * pacing delay, so the fabric carries a small trickle of work per held
+ * connection. Tiny at the typical 0–5ms delay; at a long delay under a heavy
+ * shed, the held-open connections add up to real shared-CPU load — the cost of
+ * pacing the storm instead of cutting it instantly.
+ */
+const TLS_ERROR_PACING_HOLD_CPU_PER_MS = 0.02;
 /** Downstream errors return faster than successes (fraction of sampled time). */
 const ERROR_TIME_FACTOR = 0.5;
 /** Log-normal samples are clamped to this multiple of the median. */
@@ -251,14 +260,6 @@ interface PermitWaiter {
 
 export class DownstreamSim {
   inFlight = 0;
-  /**
-   * Ejection-style breaker (no half-open probes): open removes the
-   * downstream from the random rotation; after the cooldown it re-enters
-   * directly with a fresh window, re-tripping quickly if still broken.
-   */
-  breaker: BreakerState = 'closed';
-  breakerSince = 0;
-  window = new BreakerWindow();
   /** Fabric-side connections to this downstream. */
   conns: ConnSim[] = [];
   /** Requests waiting for a free fabric→downstream connection. */
@@ -789,12 +790,21 @@ export class Simulation {
   /**
    * Shed at TLS admission. With TLS error pacing on, the RST is held for the
    * pacing delay before it is sent, so shed clients don't learn — and
-   * reconnect — in lockstep.
+   * reconnect — in lockstep. Holding it open is not free: the connection
+   * carries a small trickle of CPU work for the duration of the hold.
    */
   private shedTls(client: ClientSim, conn: ConnSim): void {
     const f = this.cfg.fabric;
     this.metrics.countShedTls();
     if (f.tlsErrorPacingEnabled && f.tlsErrorPacingDelayMs > 0) {
+      // Charge the shared CPU for keeping the connection live while it waits
+      // for its paced RST. Negligible per connection at a typical delay; under
+      // a heavy shed at a long delay the held-open connections add up.
+      this.cpu.add(
+        f.tlsErrorPacingDelayMs,
+        TLS_ERROR_PACING_HOLD_CPU_PER_MS * f.tlsErrorPacingDelayMs,
+        () => {},
+      );
       this.queue.schedule(this.now + f.tlsErrorPacingDelayMs, () => {
         if (conn.state === 'closing') {
           this.releaseCount(conn);
@@ -903,18 +913,15 @@ export class Simulation {
 
   private routeToDownstream(req: RequestSim): void {
     const p = this.cfg.downstreamPool;
-    // Random IP selection across all downstreams in rotation (ejected ones
-    // are skipped until their cooldown re-admits them).
-    const healthy = this.downstreams.filter(
-      (ds) => !p.circuitBreakerEnabled || ds.breaker === 'closed',
-    );
-    if (healthy.length === 0) {
+    // Random IP selection across all downstreams — the fabric does not
+    // circuit-break or eject downstreams; a slow or erroring one is bounded
+    // only by the per-call downstream timeout.
+    if (this.downstreams.length === 0) {
       this.fabricInFlight--;
-      this.throttledLog('nods', 2000, 'critical', 'All downstreams circuit-broken — failing fast');
       this.respondError(req);
       return;
     }
-    const ds = healthy[Math.floor(this.rng.next() * healthy.length)];
+    const ds = this.downstreams[Math.floor(this.rng.next() * this.downstreams.length)];
     req.downstreamId = ds.id;
     const deadline = this.now + p.requestTimeoutMs;
     const idle = ds.conns.find((c) => c.state === 'idle');
@@ -1029,7 +1036,6 @@ export class Simulation {
       req.dsTimeoutEvent = null;
     }
     req.dsConn = null;
-    this.recordBreakerResult(ds, req, !isError);
     this.fabricInFlight--;
     if (req.fate) return; // client timed out; the response has nowhere to go
     if (isError) {
@@ -1055,32 +1061,9 @@ export class Simulation {
         ds.conns = ds.conns.filter((c) => c !== conn);
       });
     }
-    this.recordBreakerResult(ds, req, false);
     this.fabricInFlight--;
     if (req.fate) return;
     this.respondError(req);
-  }
-
-  private recordBreakerResult(ds: DownstreamSim, _req: RequestSim, ok: boolean): void {
-    const p = this.cfg.downstreamPool;
-    ds.window.record(this.now, ok);
-    if (!p.circuitBreakerEnabled || ds.breaker !== 'closed') return;
-    const { failures, total } = ds.window.ratio(this.now);
-    if (total >= p.breakerMinSamples && failures / total >= p.breakerFailureRatio) {
-      ds.breaker = 'open';
-      ds.breakerSince = this.now;
-      this.metrics.log(this.now, 'warn', `Downstream ${ds.id + 1} ejected (breaker open)`);
-      this.queue.schedule(this.now + p.breakerCooldownMs, () => {
-        // Ejection-style re-entry: rejoin the random rotation with a clean
-        // window. If it is still broken, the window re-trips it quickly.
-        if (ds.breaker === 'open') {
-          ds.breaker = 'closed';
-          ds.breakerSince = this.now;
-          ds.window.reset();
-          this.metrics.log(this.now, 'info', `Downstream ${ds.id + 1} re-entered rotation`);
-        }
-      });
-    }
   }
 
   /** Send an error response back to the client. */

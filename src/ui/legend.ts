@@ -159,8 +159,8 @@ const SECTIONS: LegendSection[] = [
     title: 'Clients & downstreams',
     entries: [
       { swatch: poolDots(), label: 'Pool dots', detail: 'One per connection slot: dim idle, blue busy, cyan handshaking, hollow unused.' },
-      { swatch: dot(SEMANTIC.success, 3.5), label: 'Breaker closed', detail: 'Circuit breaker healthy (clients when enabled, and each downstream).' },
-      { swatch: breakerOpen(), label: 'Breaker open', detail: 'Arc fills over the cooldown. Downstreams are ejected from the random rotation and re-enter directly; an open client breaker half-opens and sends one probe (full orange ring).' },
+      { swatch: dot(SEMANTIC.success, 3.5), label: 'Breaker closed', detail: 'A client’s circuit breaker is healthy (shown when the client breaker is enabled).' },
+      { swatch: breakerOpen(), label: 'Breaker open', detail: 'A client breaker tripped: the arc fills over the cooldown, then it half-opens and sends one probe (full orange ring). The fabric does not circuit-break downstreams.' },
       { swatch: gauge(SEMANTIC.cpuWarn, 0.8), label: 'Downstream load', detail: 'In-flight vs concurrency capacity; past capacity its latency inflates.' },
     ],
   },

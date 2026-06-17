@@ -65,9 +65,8 @@ CPU contention stretches everything → more timeouts. The control mechanisms:
 |---|---|
 | TLS permits + permit wait | At most N handshakes run concurrently. A connection without a permit waits up to the permit wait time, then is **shed with an RST** (the connection is invalidated). There is no TLS queue — only this bounded wait. |
 | Connection limit | Beyond the cap, new connections are **shed with an RST** before any TLS work happens. |
-| TLS error pacing | When a connection is shed at TLS admission, the RST is held for the pacing delay (typically 0–5ms) before being sent, so shed clients don't learn — and reconnect — in lockstep. |
+| TLS error pacing | When a connection is shed at TLS admission, the RST is held for the pacing delay (typically 0–5ms, up to 100ms) before being sent, so shed clients don't learn — and reconnect — in lockstep. The held connection stays live for the delay and carries a small trickle of fabric CPU, so a long hold under a heavy shed is not free. |
 | TLS session resumption | A configurable share of handshakes resume a prior session, skipping most of the asymmetric crypto. |
-| Downstream circuit breaker | Ejection-style (random IP selection preserved): a failing downstream is ejected from the rotation, then re-enters directly after the cooldown with a fresh window — no probe serialization, so recovered traffic re-spreads across all downstreams immediately. |
 | Client circuit breaker | A client that sees sustained failures stops sending entirely, removing its load until a half-open probe succeeds. |
 
 **"Shed" here means connection-level rejection**, and the simulator counts
@@ -84,7 +83,7 @@ only at dequeue.
 - **Healthy** — conservative limits, protections on, mostly-resumed
   handshakes. Pulse it and watch the response.
 - **Storm-prone** — raised limits: 16× the TLS permits, the permit wait maxed
-  out, 3 un-jittered retries, pacing and breakers off. Stable at baseline;
+  out, 3 un-jittered retries, pacing off. Stable at baseline;
   after a 3× pulse the storm **persists once the pulse ends** (a metastable
   failure — the trigger is gone, the retry/handshake feedback loop sustains
   the overload).
@@ -126,10 +125,10 @@ Run totals and the event log report both sims side by side.
   slowdown factor when demand exceeds capacity), per-downstream queues,
   lifetime shed counters split by cause, and the PACE chip (TLS error pacing
   on/off).
-- **Breaker dots**: each downstream and (when enabled) each client shows its
-  breaker state — green dot closed; orange arc = ejected/open with cooldown
-  progress; a client breaker also shows an orange ring while its half-open
-  probe is out.
+- **Breaker dots**: when a client's circuit breaker is enabled it shows its
+  state — green dot closed; orange arc = open with cooldown progress; an orange
+  ring while its half-open probe is out. The fabric does not circuit-break
+  downstreams, so bidder nodes carry no breaker dot.
 - **The graveyard**: failures pile up under the fabric and settle downward as
   they fade. Squares are request fates (red timeout, orange rejection, yellow
   error); hollow rings are TLS-permit sheds; hollow triangles are

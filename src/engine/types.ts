@@ -94,7 +94,9 @@ export interface FabricConfig {
   /**
    * TLS error pacing: how long the fabric holds the RST when shedding a
    * connection at TLS admission, so shed clients don't learn — and
-   * reconnect — in lockstep. Typical values: 0–5ms.
+   * reconnect — in lockstep. Typical values: 0–5ms (range runs to 100ms).
+   * The held connection stays live for the delay and carries a small trickle
+   * of fabric CPU, so a long hold under a heavy shed is not free.
    */
   tlsErrorPacingEnabled: boolean;
   tlsErrorPacingDelayMs: number;
@@ -107,15 +109,6 @@ export interface DownstreamPoolConfig {
   requestTimeoutMs: number;
   /** Time to establish a fabric→downstream connection (ms). */
   connectMs: number;
-
-  /** Circuit breaker on each downstream. */
-  circuitBreakerEnabled: boolean;
-  /** Open the breaker when failure ratio over the rolling window exceeds this. */
-  breakerFailureRatio: number;
-  /** Minimum samples in the window before the breaker may trip. */
-  breakerMinSamples: number;
-  /** How long the breaker stays open before probing (ms). */
-  breakerCooldownMs: number;
 }
 
 export interface DownstreamConfig {
