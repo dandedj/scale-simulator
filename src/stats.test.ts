@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { compareSuccessRates, normalCdf } from './stats';
+import { compareMeans, compareSuccessRates, normalCdf } from './stats';
+
+/** Build (n, sum, sumSq) moments from an explicit sample array. */
+function moments(xs: number[]): [number, number, number] {
+  let sum = 0;
+  let sumSq = 0;
+  for (const x of xs) {
+    sum += x;
+    sumSq += x * x;
+  }
+  return [xs.length, sum, sumSq];
+}
+
+/** Moments for n i.i.d.-ish points alternating mean±spread (fixed variance, no RNG). */
+function synthMoments(n: number, mean: number, spread: number): [number, number, number] {
+  const xs = Array.from({ length: n }, (_, i) => mean + (i % 2 === 0 ? spread : -spread));
+  return moments(xs);
+}
 
 describe('normalCdf', () => {
   it('matches known standard-normal values', () => {
@@ -47,5 +64,49 @@ describe('compareSuccessRates', () => {
     expect(r.deltaPp).toBeCloseTo(0, 6);
     expect(r.confidence).toBe(0);
     expect(r.better).toBeNull();
+  });
+});
+
+describe('compareMeans (Welch t-test)', () => {
+  it('withholds a verdict below the minimum sample', () => {
+    const a = synthMoments(5, 100, 10);
+    const b = synthMoments(5, 130, 10);
+    const r = compareMeans(...a, ...b);
+    expect(r.enough).toBe(false);
+  });
+
+  it('finds no significance for overlapping distributions', () => {
+    // Means 100 vs 101 with spread ±40 over 500 points: swamped by variance.
+    const a = synthMoments(500, 100, 40);
+    const b = synthMoments(500, 101, 40);
+    const r = compareMeans(...a, ...b);
+    expect(r.confidence).toBe(0);
+    expect(r.pValue).toBeGreaterThan(0.05);
+  });
+
+  it('flags a clear mean separation as highly significant', () => {
+    // Means 100 vs 130, tight spread ±10 over 500 points.
+    const a = synthMoments(500, 100, 10);
+    const b = synthMoments(500, 130, 10);
+    const r = compareMeans(...a, ...b);
+    expect(r.deltaMean).toBeCloseTo(30, 0);
+    expect(r.confidence).toBe(0.99);
+    expect(r.pValue).toBeLessThan(0.01);
+    expect(r.t).toBeGreaterThan(0); // B's mean is higher
+  });
+
+  it('reports no difference for identical moments', () => {
+    const a = synthMoments(500, 100, 15);
+    const r = compareMeans(...a, ...a);
+    expect(r.deltaMean).toBeCloseTo(0, 6);
+    expect(r.confidence).toBe(0);
+  });
+
+  it('handles zero-variance samples without dividing by zero', () => {
+    const a = moments(Array(100).fill(50));
+    const b = moments(Array(100).fill(50));
+    const r = compareMeans(...a, ...b);
+    expect(Number.isFinite(r.t)).toBe(true);
+    expect(r.confidence).toBe(0);
   });
 });

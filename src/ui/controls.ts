@@ -13,7 +13,7 @@
 import { PRESETS } from '../engine/presets';
 import type { Simulation } from '../engine/simulation';
 import type { LockConfig, LockSite, SimulationConfig } from '../engine/types';
-import { compareSuccessRates } from '../stats';
+import { compareMeans, compareSuccessRates } from '../stats';
 import { Legend } from './legend';
 
 const LOCK_SITES: LockSite[] = ['accept', 'request', 'handshake'];
@@ -1008,39 +1008,71 @@ function totalsHtmlCompare(sims: Simulation[]): string {
 }
 
 /**
- * Goodput significance for the first two sims: is the success-rate gap real, or
- * noise? Two-proportion z-test on arrivals (trials) vs successes. Only the first
- * two panes are compared (comparison mode runs exactly two).
+ * Significance for the first two sims (comparison mode runs exactly two): is the
+ * gap real or noise? Goodput via a two-proportion z-test on arrivals (trials) vs
+ * successes; latency via Welch's t-test on the mean of successful requests.
  */
 function significanceHtml(sims: Simulation[]): string {
   if (sims.length < 2) return '';
   const a = sims[0].metrics.totals;
   const b = sims[1].metrics.totals;
-  const r = compareSuccessRates(a.arrivals, a.successes, b.arrivals, b.successes);
-  const sign = r.deltaPp >= 0 ? '+' : '−';
-  const delta = `${sign}${Math.abs(r.deltaPp).toFixed(1)}pp`;
+
+  const g = compareSuccessRates(a.arrivals, a.successes, b.arrivals, b.successes);
+  const goodput = sigBlock(
+    'Δ goodput (B−A)',
+    `${g.deltaPp >= 0 ? '+' : '−'}${Math.abs(g.deltaPp).toFixed(1)}pp`,
+    g.enough,
+    g.confidence,
+    g.better ? `SIM ${g.better} better` : '',
+    g.enough ? `z=${g.z.toFixed(2)} · p=${fmtP(g.pValue)}` : `n=${a.arrivals}/${b.arrivals}`,
+  );
+
+  const m = compareMeans(a.successes, a.latencySum, a.latencySumSq, b.successes, b.latencySum, b.latencySumSq);
+  const faster = m.enough && m.confidence > 0 ? (m.deltaMean < 0 ? 'B' : 'A') : '';
+  const latency = sigBlock(
+    'Δ latency mean (B−A)',
+    `${m.deltaMean >= 0 ? '+' : '−'}${Math.abs(m.deltaMean).toFixed(1)}ms`,
+    m.enough,
+    m.confidence,
+    faster ? `SIM ${faster} faster` : '',
+    m.enough ? `t=${m.t.toFixed(2)} · p=${fmtP(m.pValue)}` : `n=${a.successes}/${b.successes}`,
+  );
+
+  const note =
+    `<div class="cmp-sig-note">assumes independent requests (correlated storm failures inflate confidence); ` +
+    `latency compares successful requests only</div>`;
+  return goodput + latency + note;
+}
+
+/** One significance callout (goodput or latency). */
+function sigBlock(
+  label: string,
+  delta: string,
+  enough: boolean,
+  confidence: number,
+  lead: string,
+  stats: string,
+): string {
   let cls: string;
   let verdict: string;
-  if (!r.enough) {
+  if (!enough) {
     cls = 'sig-wait';
     verdict = 'gathering data…';
-  } else if (r.confidence >= 0.95) {
+  } else if (confidence >= 0.95) {
     cls = 'sig-strong';
-    verdict = `significant (${Math.round(r.confidence * 100)}%) · SIM ${r.better} better`;
-  } else if (r.confidence > 0) {
+    verdict = `significant (${Math.round(confidence * 100)}%)${lead ? ` · ${lead}` : ''}`;
+  } else if (confidence > 0) {
     cls = 'sig-some';
-    verdict = `weak (90%) · SIM ${r.better} leads`;
+    verdict = `weak (90%)${lead ? ` · ${lead}` : ''}`;
   } else {
     cls = 'sig-none';
     verdict = 'not significant — likely noise';
   }
-  const stats = r.enough ? `z=${r.z.toFixed(2)} · p=${fmtP(r.pValue)}` : `n=${a.arrivals}/${b.arrivals}`;
   return (
     `<div class="cmp-sig ${cls}">` +
-    `<div class="cmp-sig-head"><label>Δ goodput (B−A)</label><b>${delta}</b></div>` +
+    `<div class="cmp-sig-head"><label>${label}</label><b>${delta}</b></div>` +
     `<div class="cmp-sig-verdict">${verdict}</div>` +
     `<div class="cmp-sig-stats">${stats}</div>` +
-    `<div class="cmp-sig-note">assumes independent requests; correlated storm failures inflate confidence</div>` +
     `</div>`
   );
 }

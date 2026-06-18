@@ -142,19 +142,26 @@ same pulse; per-sim client knobs also allow client-side A/B experiments
 (e.g. jittered vs un-jittered retries) against the same fabric tuning.
 Run totals and the event log report both sims side by side.
 
-**Is the difference real?** Under the totals, an A/B significance callout
-answers whether the goodput gap is signal or noise. Each request is a Bernoulli
-trial (it succeeds within the deadline or not), so it runs a two-proportion
-z-test on arrivals vs successes and reports Δ goodput (B − A in percentage
-points), the z-statistic, the p-value, and a verdict — "not significant — likely
-noise" until the gap clears a confidence band, then "significant (95% / 99%) ·
-SIM X better". Two identical sims sit at "not significant" no matter how long
-they run; a small but real edge crosses into significance as the sample grows
-(reset to start a clean comparison). One caveat, stated on the callout: the test
-assumes independent requests — storm failures are correlated (one poisoned
-connection fails a burst), so the effective sample is smaller than the raw count
-and the reported confidence is optimistic. Read it as "clearly beyond noise,"
-not a precise p-value.
+**Is the difference real?** Under the totals, two A/B significance callouts
+answer whether the gap is signal or noise — one for goodput, one for latency:
+
+- **Δ goodput** — each request is a Bernoulli trial (it succeeds within the
+  deadline or not), so a two-proportion z-test on arrivals vs successes reports
+  Δ goodput (B − A in percentage points), the z-statistic, the p-value, and a
+  verdict: "not significant — likely noise" until the gap clears a confidence
+  band, then "significant (95% / 99%) · SIM X better".
+- **Δ latency mean** — Welch's t-test on the mean latency of successful
+  requests (computed from running moments, no samples retained), reporting Δ in
+  ms, t, p, and "SIM X faster" when significant.
+
+Two identical sims sit at "not significant" no matter how long they run; a
+small but real edge crosses into significance as the sample grows (reset to
+start a clean comparison). Caveats, stated on the callout: both tests assume
+independent requests — storm failures are correlated (one poisoned connection
+fails a burst), so the effective sample is smaller than the raw count and the
+reported confidence is optimistic; and the latency test only sees successful
+requests, so a sim that sheds its slow work can look artificially faster. Read
+these as "clearly beyond noise," not precise p-values.
 
 ## Reading the screen
 

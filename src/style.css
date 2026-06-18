@@ -980,7 +980,8 @@ input[type='range']::-moz-range-thumb {
   margin-top: 1px;
 }
 
-.cmp-sig-note {
+.totals-cmp .cmp-sig-note {
+  grid-column: 1 / -1;
   font-size: 8.5px;
   color: var(--text-faint);
   line-height: 1.35;

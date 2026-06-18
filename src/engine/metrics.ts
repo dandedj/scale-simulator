@@ -28,6 +28,9 @@ export class MetricsCollector {
     tlsHandshakesCompleted: 0,
     resumedHandshakes: 0,
     wastedHandshakes: 0,
+    // Running latency moments (over successful requests) for the A/B mean test.
+    latencySum: 0,
+    latencySumSq: 0,
   };
   events: SimEventLog[] = [];
   /** Lifetime count of logged events (events[] is capped; this never resets mid-run). */
@@ -83,6 +86,8 @@ export class MetricsCollector {
     this.current.successes++;
     this.current.latencies.push(latencyMs);
     this.totals.successes++;
+    this.totals.latencySum += latencyMs;
+    this.totals.latencySumSq += latencyMs * latencyMs;
   }
   countTimeout(): void {
     this.current.timeouts++;

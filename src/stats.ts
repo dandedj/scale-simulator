@@ -67,3 +67,47 @@ export function compareSuccessRates(nA: number, kA: number, nB: number, kB: numb
   const better = !enough || confidence === 0 ? null : pB > pA ? 'B' : 'A';
   return { deltaPp, z, pValue, confidence, enough, better };
 }
+
+export interface ABMeans {
+  /** Difference in mean, B − A (same units as the samples, e.g. ms). */
+  deltaMean: number;
+  /** Welch t statistic (positive ⇒ B's mean is higher). */
+  t: number;
+  /** Two-sided p-value (normal approximation; valid here because n is large). */
+  pValue: number;
+  /** Highest confidence band cleared: 0, 0.90, 0.95, or 0.99. */
+  confidence: number;
+  /** False until both samples are large enough to judge. */
+  enough: boolean;
+}
+
+/**
+ * Welch's t-test comparing two means from running moments (count, sum, sum of
+ * squares) — no need to retain the samples. Unequal variances allowed. With the
+ * large counts this sim accumulates the t-distribution ≈ normal, so the p-value
+ * uses the normal CDF (a precise t-CDF would shift it only at tiny n).
+ */
+export function compareMeans(
+  nA: number,
+  sumA: number,
+  sumSqA: number,
+  nB: number,
+  sumB: number,
+  sumSqB: number,
+): ABMeans {
+  const enough = nA >= MIN_SAMPLE && nB >= MIN_SAMPLE;
+  const meanA = nA > 0 ? sumA / nA : 0;
+  const meanB = nB > 0 ? sumB / nB : 0;
+  const deltaMean = meanB - meanA;
+  // Sample variance via the moments; clamp tiny negatives from float error.
+  const varA = nA > 1 ? Math.max(0, (sumSqA - (sumA * sumA) / nA) / (nA - 1)) : 0;
+  const varB = nB > 1 ? Math.max(0, (sumSqB - (sumB * sumB) / nB) / (nB - 1)) : 0;
+  const se = Math.sqrt(varA / Math.max(1, nA) + varB / Math.max(1, nB));
+  const t = se > 0 ? deltaMean / se : 0;
+  const pValue = 2 * (1 - normalCdf(Math.abs(t)));
+  let confidence = 0;
+  if (Math.abs(t) >= 2.5758) confidence = 0.99;
+  else if (Math.abs(t) >= 1.96) confidence = 0.95;
+  else if (Math.abs(t) >= 1.645) confidence = 0.9;
+  return { deltaMean, t, pValue, confidence, enough };
+}
