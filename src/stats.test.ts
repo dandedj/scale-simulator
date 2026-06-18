@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { compareMeans, compareSuccessRates, normalCdf } from './stats';
+import { compareMeans, compareQuantiles, compareSuccessRates, normalCdf } from './stats';
+
+/** Sorted ramp [base, base+1, …, base+n-1] — a fixed sample, no RNG. */
+function ramp(n: number, base = 0): number[] {
+  return Array.from({ length: n }, (_, i) => base + i);
+}
 
 /** Build (n, sum, sumSq) moments from an explicit sample array. */
 function moments(xs: number[]): [number, number, number] {
@@ -108,5 +113,37 @@ describe('compareMeans (Welch t-test)', () => {
     const r = compareMeans(...a, ...b);
     expect(Number.isFinite(r.t)).toBe(true);
     expect(r.confidence).toBe(0);
+  });
+});
+
+describe('compareQuantiles (tail/p99)', () => {
+  it('withholds a verdict below the tail-sample floor', () => {
+    const r = compareQuantiles(ramp(100), ramp(100, 50), 0.99);
+    expect(r.enough).toBe(false);
+  });
+
+  it('flags a clearly shifted tail as significant and signs the delta', () => {
+    // Both 0..999 but B shifted up 100: p99 ≈ 990 vs ≈ 1090.
+    const r = compareQuantiles(ramp(1000), ramp(1000, 100), 0.99);
+    expect(r.enough).toBe(true);
+    expect(r.delta).toBeCloseTo(100, 0);
+    expect(r.confidence).toBeGreaterThanOrEqual(0.95);
+    expect(r.z).toBeGreaterThan(0); // B's tail is higher (slower)
+  });
+
+  it('finds no tail difference for identical distributions', () => {
+    const r = compareQuantiles(ramp(1000), ramp(1000), 0.99);
+    expect(r.delta).toBeCloseTo(0, 6);
+    expect(r.confidence).toBe(0);
+  });
+
+  it('can separate tails even when the means barely move', () => {
+    // A: tight 0..999. B: same bulk but a heavier top 1% (last 10 values large).
+    const a = ramp(1000);
+    const b = ramp(1000);
+    for (let i = 990; i < 1000; i++) b[i] = 5000;
+    const tail = compareQuantiles(a, b, 0.99);
+    expect(tail.confidence).toBeGreaterThanOrEqual(0.95);
+    expect(tail.delta).toBeGreaterThan(0);
   });
 });

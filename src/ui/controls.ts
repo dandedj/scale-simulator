@@ -13,7 +13,7 @@
 import { PRESETS } from '../engine/presets';
 import type { Simulation } from '../engine/simulation';
 import type { LockConfig, LockSite, SimulationConfig } from '../engine/types';
-import { compareMeans, compareSuccessRates } from '../stats';
+import { compareMeans, compareQuantiles, compareSuccessRates, type ABQuantile } from '../stats';
 import { Legend } from './legend';
 
 const LOCK_SITES: LockSite[] = ['accept', 'request', 'handshake'];
@@ -428,6 +428,9 @@ export class ControlPanel {
   private totalsEl!: HTMLElement;
   private locksListEl!: HTMLElement;
   private lastTotalsHtml = '';
+  /** Cached p99 tail comparison (recomputed on a throttle — it pools+sorts samples). */
+  private tailResult: ABQuantile | null = null;
+  private lastTailWall = 0;
   /** Lifetime-event counters, one per pane. */
   private renderedEvents: number[] = [];
   private pulseFactor = 2;
@@ -953,7 +956,22 @@ export class ControlPanel {
     }
     const sims = this.hooks.getSims();
     const compare = sims.length > 1;
-    const html = compare ? totalsHtmlCompare(sims) : totalsHtmlSingle(sims[0]);
+    // The p99 tail test pools and sorts the rolling latency window, so recompute
+    // it on a throttle (a few times a second) rather than every frame.
+    if (compare) {
+      const wall = performance.now();
+      if (wall - this.lastTailWall > 250) {
+        this.lastTailWall = wall;
+        this.tailResult = compareQuantiles(
+          pooledSortedLatencies(sims[0]),
+          pooledSortedLatencies(sims[1]),
+          0.99,
+        );
+      }
+    } else {
+      this.tailResult = null;
+    }
+    const html = compare ? totalsHtmlCompare(sims, this.tailResult) : totalsHtmlSingle(sims[0]);
     if (this.lastTotalsHtml !== html) {
       this.lastTotalsHtml = html;
       this.totalsEl.className = compare ? 'totals-cmp' : 'totals-grid';
@@ -993,7 +1011,17 @@ function totalsHtmlSingle(sim: Simulation): string {
   ).join('');
 }
 
-function totalsHtmlCompare(sims: Simulation[]): string {
+/** Pool the rolling-window latency samples for a sim and sort them ascending. */
+function pooledSortedLatencies(sim: Simulation): number[] {
+  const all: number[] = [];
+  for (const b of sim.metrics.buckets) {
+    for (const x of b.latencies) all.push(x);
+  }
+  all.sort((a, b) => a - b);
+  return all;
+}
+
+function totalsHtmlCompare(sims: Simulation[], tail: ABQuantile | null): string {
   const head =
     `<div class="cmp-row cmp-head"><label></label>` +
     sims.map((_, i) => `<span class="tag-${PANE_TAGS[i].toLowerCase()}">SIM ${PANE_TAGS[i]}</span>`).join('') +
@@ -1004,7 +1032,7 @@ function totalsHtmlCompare(sims: Simulation[]): string {
       .join('');
     return `<div class="cmp-row"><label>${m.key}</label>${cells}</div>`;
   }).join('');
-  return head + rows + significanceHtml(sims);
+  return head + rows + significanceHtml(sims, tail);
 }
 
 /**
@@ -1012,7 +1040,7 @@ function totalsHtmlCompare(sims: Simulation[]): string {
  * gap real or noise? Goodput via a two-proportion z-test on arrivals (trials) vs
  * successes; latency via Welch's t-test on the mean of successful requests.
  */
-function significanceHtml(sims: Simulation[]): string {
+function significanceHtml(sims: Simulation[], tail: ABQuantile | null): string {
   if (sims.length < 2) return '';
   const a = sims[0].metrics.totals;
   const b = sims[1].metrics.totals;
@@ -1028,20 +1056,31 @@ function significanceHtml(sims: Simulation[]): string {
   );
 
   const m = compareMeans(a.successes, a.latencySum, a.latencySumSq, b.successes, b.latencySum, b.latencySumSq);
-  const faster = m.enough && m.confidence > 0 ? (m.deltaMean < 0 ? 'B' : 'A') : '';
+  const meanFaster = m.enough && m.confidence > 0 ? (m.deltaMean < 0 ? 'B' : 'A') : '';
   const latency = sigBlock(
     'Δ latency mean (B−A)',
     `${m.deltaMean >= 0 ? '+' : '−'}${Math.abs(m.deltaMean).toFixed(1)}ms`,
     m.enough,
     m.confidence,
-    faster ? `SIM ${faster} faster` : '',
+    meanFaster ? `SIM ${meanFaster} faster` : '',
     m.enough ? `t=${m.t.toFixed(2)} · p=${fmtP(m.pValue)}` : `n=${a.successes}/${b.successes}`,
+  );
+
+  const tailEnough = !!tail && tail.enough;
+  const tailFaster = tail && tailEnough && tail.confidence > 0 ? (tail.delta < 0 ? 'B' : 'A') : '';
+  const tailLatency = sigBlock(
+    'Δ p99 latency (B−A, 60s)',
+    tail ? `${tail.delta >= 0 ? '+' : '−'}${Math.abs(tail.delta).toFixed(1)}ms` : '—',
+    tailEnough,
+    tail ? tail.confidence : 0,
+    tailFaster ? `SIM ${tailFaster} faster` : '',
+    tailEnough ? `z=${tail!.z.toFixed(2)} · p=${fmtP(tail!.pValue)}` : 'need 500+ successes each',
   );
 
   const note =
     `<div class="cmp-sig-note">assumes independent requests (correlated storm failures inflate confidence); ` +
-    `latency compares successful requests only</div>`;
-  return goodput + latency + note;
+    `latency compares successful requests only; p99 is over the last 60s</div>`;
+  return goodput + latency + tailLatency + note;
 }
 
 /** One significance callout (goodput or latency). */

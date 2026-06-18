@@ -142,8 +142,8 @@ same pulse; per-sim client knobs also allow client-side A/B experiments
 (e.g. jittered vs un-jittered retries) against the same fabric tuning.
 Run totals and the event log report both sims side by side.
 
-**Is the difference real?** Under the totals, two A/B significance callouts
-answer whether the gap is signal or noise — one for goodput, one for latency:
+**Is the difference real?** Under the totals, three A/B significance callouts
+answer whether the gap is signal or noise — goodput, mean latency, and the tail:
 
 - **Δ goodput** — each request is a Bernoulli trial (it succeeds within the
   deadline or not), so a two-proportion z-test on arrivals vs successes reports
@@ -153,15 +153,23 @@ answer whether the gap is signal or noise — one for goodput, one for latency:
 - **Δ latency mean** — Welch's t-test on the mean latency of successful
   requests (computed from running moments, no samples retained), reporting Δ in
   ms, t, p, and "SIM X faster" when significant.
+- **Δ p99 latency** — the tail. Mean latency can miss a heavier tail entirely
+  (the slowest requests time out and drop from the successes-only mean), so the
+  p99 is tested separately: pool the last-60s latency window per sim, estimate
+  each p99 and its standard error from the order statistics (the distribution-
+  free binomial method — no bootstrap), and run a two-sample z-test on the
+  difference. Needs ~500 successes per sim before it offers a verdict.
 
 Two identical sims sit at "not significant" no matter how long they run; a
 small but real edge crosses into significance as the sample grows (reset to
-start a clean comparison). Caveats, stated on the callout: both tests assume
-independent requests — storm failures are correlated (one poisoned connection
-fails a burst), so the effective sample is smaller than the raw count and the
-reported confidence is optimistic; and the latency test only sees successful
-requests, so a sim that sheds its slow work can look artificially faster. Read
-these as "clearly beyond noise," not precise p-values.
+start a clean comparison). It is common and instructive to see goodput and p99
+significant while the mean is not. Caveats, stated on the callout: the tests
+assume independent requests — storm failures are correlated (one poisoned
+connection fails a burst), so the effective sample is smaller than the raw count
+and the reported confidence is optimistic; the latency tests only see successful
+requests, so a sim that sheds its slow work can look artificially faster; and
+p99 is computed over the last 60s, not the whole run. Read these as "clearly
+beyond noise," not precise p-values.
 
 ## Reading the screen
 

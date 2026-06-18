@@ -111,3 +111,62 @@ export function compareMeans(
   else if (Math.abs(t) >= 1.645) confidence = 0.9;
   return { deltaMean, t, pValue, confidence, enough };
 }
+
+export interface ABQuantile {
+  /** Difference in the quantile, B − A (sample units, e.g. ms). */
+  delta: number;
+  /** z statistic for the quantile difference. */
+  z: number;
+  pValue: number;
+  confidence: number;
+  enough: boolean;
+}
+
+/** Larger floor than the mean test: a stable tail quantile needs more samples. */
+const MIN_TAIL_SAMPLE = 500;
+
+/** Value at quantile p of an already-sorted sample (p in [0,1]). */
+function quantileSorted(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
+}
+
+/**
+ * Distribution-free standard error of a sample quantile, from order statistics:
+ * the index of the p-quantile is ~Normal(np, np(1−p)), so the spread of the two
+ * order statistics one index-SD either side of np is ≈ ±1 SE of the quantile.
+ * No density estimate or bootstrap needed.
+ */
+function quantileSE(sorted: number[], p: number): number {
+  const n = sorted.length;
+  if (n < 2) return 0;
+  const idxSd = Math.sqrt(n * p * (1 - p));
+  const lo = Math.max(0, Math.floor(n * p - idxSd));
+  const hi = Math.min(n - 1, Math.ceil(n * p + idxSd));
+  return (sorted[hi] - sorted[lo]) / 2;
+}
+
+/**
+ * Compare a tail quantile (e.g. p99 latency) between two SORTED samples via the
+ * order-statistic SE and a two-sample z-test on the difference. Robust to the
+ * skewed, heavy-tailed latency distributions here, and cheap enough to run on a
+ * pooled window of samples.
+ */
+export function compareQuantiles(sortedA: number[], sortedB: number[], p: number): ABQuantile {
+  const nA = sortedA.length;
+  const nB = sortedB.length;
+  const enough = nA >= MIN_TAIL_SAMPLE && nB >= MIN_TAIL_SAMPLE;
+  const qA = quantileSorted(sortedA, p);
+  const qB = quantileSorted(sortedB, p);
+  const delta = qB - qA;
+  const seA = quantileSE(sortedA, p);
+  const seB = quantileSE(sortedB, p);
+  const se = Math.sqrt(seA * seA + seB * seB);
+  const z = se > 0 ? delta / se : 0;
+  const pValue = 2 * (1 - normalCdf(Math.abs(z)));
+  let confidence = 0;
+  if (Math.abs(z) >= 2.5758) confidence = 0.99;
+  else if (Math.abs(z) >= 1.96) confidence = 0.95;
+  else if (Math.abs(z) >= 1.645) confidence = 0.9;
+  return { delta, z, pValue, confidence, enough };
+}
