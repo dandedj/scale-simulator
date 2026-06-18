@@ -69,6 +69,7 @@ CPU contention stretches everything → more timeouts. The control mechanisms:
 | TLS error pacing | When a connection is shed at TLS admission, the RST is held for the pacing delay (typically 0–5ms, up to 100ms) before being sent, so shed clients don't learn — and reconnect — in lockstep. The held connection stays live for the delay and carries a small trickle of fabric CPU, so a long hold under a heavy shed is not free. |
 | TLS session resumption | A configurable share of handshakes resume a prior session, skipping most of the asymmetric crypto. |
 | Client circuit breaker | A client that sees sustained failures stops sending entirely, removing its load until a half-open probe succeeds. |
+| Locks (contention) | User-defined serialization points (mutexes / `Arc<Mutex<…>>`) the fabric holds around shared state — e.g. the max-connections counter. Each is a single-server FIFO with a hold time; the wait it imposes is added to latency but **consumes no CPU**. Under load the lock — not the CPU — becomes the wall. See [Locks](#locks-modeling-serialization-bottlenecks). |
 
 **"Shed" here means connection-level rejection**, and the simulator counts
 the causes separately: `shed·tls` (TLS permits stayed occupied past the
@@ -79,6 +80,33 @@ Faithfully modeled wasted work: the fabric completes handshakes for clients
 that already gave up, downstreams finish responses the fabric already timed
 out, and requests waiting for a downstream connection are discovered dead
 only at dequeue.
+
+## Locks: modeling serialization bottlenecks
+
+The fabric protects shared state (a global counter, a router table, a session
+cache) with locks. Add them in the **Locks** group: each lock has a name, a
+**site** (`accept` — every new connection, like the `Arc<Mutex<usize>>`
+max-connections counter; `request` — every request; `handshake` — every
+handshake), a **hold time** in microseconds, and an enable toggle.
+
+Each lock is a single-server FIFO: an acquisition waits behind the current
+holder, then holds for its hold time. That wait is added to the operation's
+latency but **costs no CPU** — the lock is a serialization resource orthogonal
+to the compute model. Its ceiling is `1 / holdTime` acquisitions per second no
+matter how many cores you add (Amdahl / USL); past that, the queue — and the
+wait — grow without bound.
+
+**The scale bridge.** A 2µs lock is invisible at the demo's actual event rate;
+it only bottlenecks near a real server's throughput. So lock pressure is scaled
+to a **Representative QPS** — the real per-server request rate the demo stands
+in for. A request-site lock's utilization then works out to
+`Representative QPS × hold time` (so 500k/s × 2µs = 100%), and raising offered
+load or firing a pulse scales it further. Treat Representative QPS as the
+**vertical-scale dial**: crank it and a fixed-hold lock climbs to 100%
+utilization and its wait time explodes — **while the CPU stays flat**. That is
+the whole point: past a certain scale the limit isn't compute, it's the time
+spent waiting on the lock. Watch the **LOCK CONTENTION %** chart peg at 100%
+while **FABRIC CPU %** sits low.
 
 ## Scenarios
 
@@ -140,8 +168,8 @@ Run totals and the event log report both sims side by side.
 - **Charts** (60s rolling): latency p50/p99 vs the client-timeout line,
   offered vs goodput, failure rates, TLS permit pressure (starts, active,
   shed·tls) vs the permit count, fabric CPU demand vs the capacity line,
-  connections vs limit (+ shed·conn and downstream queue depth), and
-  amplification.
+  lock contention vs saturation, connections vs limit (+ shed·conn and
+  downstream queue depth), and amplification.
 
 ## Extending it
 

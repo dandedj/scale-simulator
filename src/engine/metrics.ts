@@ -35,6 +35,8 @@ export class MetricsCollector {
 
   private current: MetricsBucket;
   private peakCpu = 0;
+  private peakLockUtil = 0;
+  private peakLockWaitMs = 0;
 
   constructor() {
     this.current = this.newBucket(0);
@@ -43,20 +45,33 @@ export class MetricsCollector {
   /** Close out buckets up to `now`; called by the engine each step. */
   advance(
     now: number,
-    gauges: { connections: number; queueDepth: number; cpu: number; handshakesActive: number },
+    gauges: {
+      connections: number;
+      queueDepth: number;
+      cpu: number;
+      handshakesActive: number;
+      lockUtilization: number;
+      lockWaitMs: number;
+    },
   ): void {
     this.peakCpu = Math.max(this.peakCpu, gauges.cpu);
+    this.peakLockUtil = Math.max(this.peakLockUtil, gauges.lockUtilization);
+    this.peakLockWaitMs = Math.max(this.peakLockWaitMs, gauges.lockWaitMs);
     while (now >= this.current.time + BUCKET_MS) {
       this.current.fabricConnections = gauges.connections;
       this.current.fabricQueueDepth = gauges.queueDepth;
       this.current.cpuUtilization = this.peakCpu;
       this.current.handshakesActive = gauges.handshakesActive;
+      this.current.lockUtilization = this.peakLockUtil;
+      this.current.lockWaitMs = this.peakLockWaitMs;
       // Closed buckets are immutable; sort once so percentile() can index.
       this.current.latencies.sort((a, b) => a - b);
       this.buckets.push(this.current);
       if (this.buckets.length > MAX_BUCKETS) this.buckets.shift();
       this.current = this.newBucket(this.current.time + BUCKET_MS);
       this.peakCpu = gauges.cpu;
+      this.peakLockUtil = gauges.lockUtilization;
+      this.peakLockWaitMs = gauges.lockWaitMs;
     }
   }
 
@@ -127,6 +142,8 @@ export class MetricsCollector {
     this.totalLogged = 0;
     this.current = this.newBucket(0);
     this.peakCpu = 0;
+    this.peakLockUtil = 0;
+    this.peakLockWaitMs = 0;
     for (const k of Object.keys(this.totals) as (keyof typeof this.totals)[]) {
       this.totals[k] = 0;
     }
@@ -152,6 +169,8 @@ export class MetricsCollector {
       fabricQueueDepth: 0,
       cpuUtilization: 0,
       handshakesActive: 0,
+      lockUtilization: 0,
+      lockWaitMs: 0,
     };
   }
 }

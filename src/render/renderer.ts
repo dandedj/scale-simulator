@@ -369,6 +369,8 @@ export class Renderer {
     }
     ctx.textAlign = 'left';
 
+    this.drawLocks(sim, f);
+
     // Footer: in-flight, lifetime shed counters, pacing chip.
     ctx.font = '500 10px "IBM Plex Mono", monospace';
     ctx.fillStyle = SURFACE.textDim;
@@ -387,6 +389,58 @@ export class Renderer {
     ctx.fillStyle = rateOn ? SEMANTIC.success : withAlpha(SURFACE.textFaint, 0.8);
     ctx.fillText(rateOn ? '●RATE' : '○RATE', f.x + f.w - 52, f.y + f.h - 12);
     ctx.textAlign = 'left';
+  }
+
+  /**
+   * Live readout for enabled locks, stacked on the right of the fabric panel:
+   * a utilization bar (green→red, hatched when saturated) plus the wait it is
+   * adding. A lock pegged at 100% while the CPU column sits low is the lesson.
+   */
+  private drawLocks(sim: Simulation, f: { x: number; y: number; w: number; h: number }): void {
+    const locks = sim.lockViews();
+    if (locks.length === 0) return;
+    const ctx = this.ctx;
+    const lx = f.x + f.w * 0.57;
+    const lw = f.x + f.w - 14 - lx;
+    if (lw < 60) return; // too cramped (compact comparison pane)
+    let y = f.y + 74;
+    ctx.font = '600 9px "IBM Plex Mono", monospace';
+    ctx.fillStyle = SURFACE.textDim;
+    ctx.textAlign = 'left';
+    ctx.fillText('LOCKS', lx, y);
+    y += 10;
+    const maxRows = Math.max(1, Math.min(locks.length, Math.floor((f.h - 150) / 26)));
+    for (let i = 0; i < maxRows; i++) {
+      const lock = locks[i];
+      const util = lock.utilization;
+      const col = loadColor(util);
+      ctx.font = '500 9px "IBM Plex Mono", monospace';
+      ctx.fillStyle = SURFACE.text;
+      const name = lock.name.length > 18 ? lock.name.slice(0, 17) + '…' : lock.name;
+      ctx.fillText(name, lx, y);
+      // Utilization bar.
+      const barY = y + 4;
+      ctx.fillStyle = SURFACE.panelRaised;
+      ctx.fillRect(lx, barY, lw, 5);
+      ctx.fillStyle = withAlpha(col, 0.9);
+      ctx.fillRect(lx, barY, lw * clamp01(util), 5);
+      if (util > 1) {
+        ctx.fillStyle = withAlpha(SEMANTIC.cpuBad, 0.5);
+        ctx.fillRect(lx, barY - 3, lw, 2);
+      }
+      // Value line: utilization % and the wait it is adding.
+      ctx.font = '500 8.5px "IBM Plex Mono", monospace';
+      ctx.fillStyle = withAlpha(SURFACE.textDim, 0.95);
+      const waitTxt = lock.waitMs >= 0.1 ? ` · ${lock.waitMs.toFixed(lock.waitMs >= 10 ? 0 : 1)}ms` : '';
+      ctx.fillStyle = util >= 1 ? SEMANTIC.cpuBad : SURFACE.textDim;
+      ctx.fillText(`${Math.round(util * 100)}%${waitTxt}`, lx, barY + 14);
+      y += 26;
+    }
+    if (locks.length > maxRows) {
+      ctx.font = '500 8.5px "IBM Plex Mono", monospace';
+      ctx.fillStyle = SURFACE.textFaint;
+      ctx.fillText(`+${locks.length - maxRows} more`, lx, y);
+    }
   }
 
   private drawDownstreams(sim: Simulation, l: SceneLayout): void {

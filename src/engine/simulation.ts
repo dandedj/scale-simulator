@@ -28,6 +28,9 @@ import type {
   BreakerState,
   ConnectionState,
   FabricView,
+  LockConfig,
+  LockSite,
+  LockView,
   RequestFate,
   RequestPhase,
   SimulationConfig,
@@ -67,6 +70,10 @@ const OUTBOUND_TLS_CPU_FACTOR = 0.5;
  * pacing the storm instead of cutting it instantly.
  */
 const TLS_ERROR_PACING_HOLD_CPU_PER_MS = 0.02;
+/** Cap on how far a saturated lock's backlog runs ahead of now (ms). */
+const LOCK_MAX_BACKLOG_MS = 2000;
+/** Time constant for the smoothed lock-utilization gauge (ms). */
+const LOCK_UTIL_TAU_MS = 250;
 /** Downstream errors return faster than successes (fraction of sampled time). */
 const ERROR_TIME_FACTOR = 0.5;
 /** Log-normal samples are clamped to this multiple of the median. */
@@ -139,6 +146,44 @@ class CpuScheduler {
       this.ops.delete(op);
       op.onComplete();
     }
+  }
+}
+
+/**
+ * Runtime contention state for one lock: a single-server FIFO modeled by a
+ * single `busyUntil` timestamp (the lock is busy until then). An acquisition
+ * arriving at time t starts service at max(t, busyUntil) and holds for the
+ * effective hold time, so as acquisitions arrive faster than the hold time the
+ * lock's busyUntil races ahead of now and the wait grows without bound — the
+ * serialization bottleneck. Utilization is a leaky integrator of held time for
+ * a smooth live gauge; wait is an EWMA of the delay each acquisition incurs.
+ */
+class LockRuntime {
+  busyUntil = 0;
+  private load = 0;
+  private lastDecay = 0;
+  waitEwma = 0;
+  acqCount = 0;
+
+  private decayTo(now: number): void {
+    if (now > this.lastDecay) {
+      this.load *= Math.exp(-(now - this.lastDecay) / LOCK_UTIL_TAU_MS);
+      this.lastDecay = now;
+    }
+  }
+
+  /** Record an acquisition that held the lock for holdMs and delayed its op by delayMs. */
+  record(now: number, delayMs: number, holdMs: number): void {
+    this.decayTo(now);
+    this.load += holdMs;
+    this.waitEwma = this.waitEwma * 0.8 + delayMs * 0.2;
+    this.acqCount++;
+  }
+
+  /** Smoothed utilization (0..>1); ≥1 means the lock is saturated. */
+  utilization(now: number): number {
+    this.decayTo(now);
+    return this.load / LOCK_UTIL_TAU_MS;
   }
 }
 
@@ -337,6 +382,8 @@ export class Simulation {
    */
   private connRateTokens = 0;
   private connRateLastRefill = 0;
+  /** Per-lock contention state, keyed by lock id (created on first acquisition). */
+  private lockRuntimes = new Map<string, LockRuntime>();
 
   // Pulse state
   pulseFactor = 1;
@@ -412,11 +459,14 @@ export class Simulation {
       this.metrics.log(this.now, 'info', 'Traffic pulse ended');
       this.rescheduleArrivals();
     }
+    const locks = this.lockGauges();
     this.metrics.advance(this.now, {
       connections: this.fabricConnCount,
       queueDepth: this.totalDsQueueDepth(),
       cpu: this.cpu.utilization(),
       handshakesActive: this.handshakesActive,
+      lockUtilization: locks.util,
+      lockWaitMs: locks.waitMs,
     });
     this.detectConditions();
   }
@@ -743,6 +793,100 @@ export class Simulation {
     this.startAttempt(client, req);
   }
 
+  // -- Fabric: locks (serialization points) ------------------------------------
+
+  /**
+   * Effective hold time for one acquisition, in sim ms. The configured hold is
+   * microseconds at the *representative* server QPS; the demo runs far slower,
+   * so we scale the hold by (representative QPS / configured offered load).
+   * A request-site lock then works out to utilization = repQPS × holdTime, and
+   * raising offered load or pulsing scales the pressure on top of that.
+   */
+  private effectiveHoldMs(lock: LockConfig): number {
+    const c = this.cfg.clients;
+    const baselineQps = Math.max(1, c.count * c.requestRatePerSec);
+    const scale = this.cfg.fabric.lockRepThroughputQps / baselineQps;
+    return (lock.holdTimeUs / 1000) * scale;
+  }
+
+  /**
+   * Acquire every enabled lock at `site`, in order, then run `onDone`. Each lock
+   * is a FIFO single server: an acquisition waits behind the current holder,
+   * then holds for its effective time. The total wait+hold is added to the
+   * operation's latency (it consumes no CPU — the lock is an orthogonal
+   * serialization resource). Sub-millisecond delays are applied as zero (they're
+   * negligible at this sim's clock) but still recorded, so utilization tracks
+   * truthfully and the op is only actually delayed once contention reaches ~1ms.
+   */
+  private acquireLocks(site: LockSite, onDone: () => void): void {
+    const locks = this.cfg.fabric.locks;
+    let arrival = this.now;
+    let acquiredAny = false;
+    for (const lock of locks) {
+      if (!lock.enabled || lock.site !== site) continue;
+      acquiredAny = true;
+      const rt = this.lockFor(lock.id);
+      const holdMs = this.effectiveHoldMs(lock);
+      const serviceStart = Math.max(arrival, rt.busyUntil);
+      const cap = this.now + LOCK_MAX_BACKLOG_MS;
+      const serviceEnd = Math.max(serviceStart, Math.min(serviceStart + holdMs, cap));
+      rt.busyUntil = serviceEnd;
+      rt.record(this.now, serviceEnd - arrival, holdMs);
+      arrival = serviceEnd;
+    }
+    if (!acquiredAny) {
+      onDone();
+      return;
+    }
+    const delay = arrival - this.now;
+    if (delay >= SLICE_MS) {
+      this.queue.schedule(this.now + delay, onDone);
+    } else {
+      onDone();
+    }
+  }
+
+  private lockFor(id: string): LockRuntime {
+    let rt = this.lockRuntimes.get(id);
+    if (!rt) {
+      rt = new LockRuntime();
+      this.lockRuntimes.set(id, rt);
+    }
+    return rt;
+  }
+
+  /** Peak utilization and wait across enabled locks (for the metrics gauges). */
+  private lockGauges(): { util: number; waitMs: number } {
+    let util = 0;
+    let waitMs = 0;
+    for (const lock of this.cfg.fabric.locks) {
+      if (!lock.enabled) continue;
+      const rt = this.lockRuntimes.get(lock.id);
+      if (!rt) continue;
+      util = Math.max(util, rt.utilization(this.now));
+      waitMs = Math.max(waitMs, rt.waitEwma);
+    }
+    return { util, waitMs };
+  }
+
+  /** Live per-lock contention state for the renderer (enabled locks only). */
+  lockViews(): LockView[] {
+    const views: LockView[] = [];
+    for (const lock of this.cfg.fabric.locks) {
+      if (!lock.enabled) continue;
+      const rt = this.lockRuntimes.get(lock.id);
+      views.push({
+        name: lock.name,
+        site: lock.site,
+        holdTimeUs: lock.holdTimeUs,
+        utilization: rt ? rt.utilization(this.now) : 0,
+        waitMs: rt ? rt.waitEwma : 0,
+        acquisitions: rt ? rt.acqCount : 0,
+      });
+    }
+    return views;
+  }
+
   // -- Fabric: inbound connections & TLS ---------------------------------------
 
   /**
@@ -790,21 +934,27 @@ export class Simulation {
       this.shedConnection(client, conn, 'connection limit exceeded');
       return;
     }
-    this.acceptCount(conn);
-    conn.resumed = this.rng.chance(f.tlsResumptionRate);
-    if (this.handshakesActive < f.tlsHandshakeConcurrency) {
-      this.startHandshake(client, conn);
-    } else if (f.tlsPermitWaitMs > 0) {
-      // No TLS queue — the connection may wait a bounded time for a permit,
-      // after which it is shed with an RST.
-      const waiter: PermitWaiter = { conn, expiry: null as unknown as ScheduledEvent };
-      waiter.expiry = this.queue.schedule(this.now + f.tlsPermitWaitMs, () =>
-        this.onPermitExpiry(client, waiter),
-      );
-      this.permitWaiters.push(waiter);
-    } else {
-      this.shedTls(client, conn);
-    }
+    // The max-connections counter is shared state: take its lock (e.g. an
+    // Arc<Mutex<usize>>) before admitting. Under load this serialization, not
+    // the CPU, can become the wall.
+    this.acquireLocks('accept', () => {
+      if (conn.abandoned || conn.state === 'closing') return;
+      this.acceptCount(conn);
+      conn.resumed = this.rng.chance(f.tlsResumptionRate);
+      if (this.handshakesActive < f.tlsHandshakeConcurrency) {
+        this.startHandshake(client, conn);
+      } else if (f.tlsPermitWaitMs > 0) {
+        // No TLS queue — the connection may wait a bounded time for a permit,
+        // after which it is shed with an RST.
+        const waiter: PermitWaiter = { conn, expiry: null as unknown as ScheduledEvent };
+        waiter.expiry = this.queue.schedule(this.now + f.tlsPermitWaitMs, () =>
+          this.onPermitExpiry(client, waiter),
+        );
+        this.permitWaiters.push(waiter);
+      } else {
+        this.shedTls(client, conn);
+      }
+    });
   }
 
   /** The permit never came: shed the connection. */
@@ -894,15 +1044,19 @@ export class Simulation {
       }
       this.grantPermits();
     };
-    this.cpu.add(f.tlsHandshakeCpuMs * fraction, f.tlsCpuCost * fraction, () => {
-      if (conn.state === 'closing' || startedAbandoned || conn.abandoned) {
-        // No one is on the other end; skip the wire phase and free the permit.
-        finish();
-        return;
-      }
-      const c = this.cfg.clients;
-      const rtts = conn.resumed ? HANDSHAKE_RTTS_RESUMED : HANDSHAKE_RTTS_FULL;
-      this.queue.schedule(this.now + rtts * c.rttMs + c.tlsClientDelayMs, finish);
+    // A handshake-site lock (e.g. a shared TLS session cache) is taken before
+    // the crypto; its wait holds the permit but burns no CPU.
+    this.acquireLocks('handshake', () => {
+      this.cpu.add(f.tlsHandshakeCpuMs * fraction, f.tlsCpuCost * fraction, () => {
+        if (conn.state === 'closing' || startedAbandoned || conn.abandoned) {
+          // No one is on the other end; skip the wire phase and free the permit.
+          finish();
+          return;
+        }
+        const c = this.cfg.clients;
+        const rtts = conn.resumed ? HANDSHAKE_RTTS_RESUMED : HANDSHAKE_RTTS_FULL;
+        this.queue.schedule(this.now + rtts * c.rttMs + c.tlsClientDelayMs, finish);
+      });
     });
   }
 
@@ -934,13 +1088,21 @@ export class Simulation {
     const a = req.attempt;
     const f = this.cfg.fabric;
     this.fabricInFlight++;
-    req.setPhase('processingAtFabric', this.now, this.now + f.processingMs * this.cpu.slowdownFactor());
-    this.cpu.add(f.processingMs, f.processingMs, () => {
+    // Any per-request lock (shared router/state) is taken first: its wait adds
+    // to request latency without loading the CPU. Then the CPU processing runs.
+    this.acquireLocks('request', () => {
       if (req.attempt !== a || req.fate) {
-        this.fabricInFlight--; // processed a request whose client already left
+        this.fabricInFlight--; // client gave up while the request waited on the lock
         return;
       }
-      this.routeToDownstream(req);
+      req.setPhase('processingAtFabric', this.now, this.now + f.processingMs * this.cpu.slowdownFactor());
+      this.cpu.add(f.processingMs, f.processingMs, () => {
+        if (req.attempt !== a || req.fate) {
+          this.fabricInFlight--; // processed a request whose client already left
+          return;
+        }
+        this.routeToDownstream(req);
+      });
     });
   }
 
@@ -1153,6 +1315,15 @@ export class Simulation {
       }
     } else {
       this.cpuSaturatedSince = null;
+    }
+    // A lock at/over capacity is a bottleneck even while the CPU has headroom.
+    if (b.lockUtilization >= 0.95) {
+      this.throttledLog(
+        'lock',
+        5000,
+        'critical',
+        `Lock contention saturated (${Math.round(b.lockUtilization * 100)}% busy, ~${b.lockWaitMs.toFixed(1)}ms wait) — CPU is not the limit`,
+      );
     }
     // A storm = clients failing fast (timeouts/rejections) while TLS pressure
     // is high. Late in a storm handshakes barely *start* (everything is

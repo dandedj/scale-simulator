@@ -12,8 +12,12 @@
 
 import { PRESETS } from '../engine/presets';
 import type { Simulation } from '../engine/simulation';
-import type { SimulationConfig } from '../engine/types';
+import type { LockConfig, LockSite, SimulationConfig } from '../engine/types';
 import { Legend } from './legend';
+
+const LOCK_SITES: LockSite[] = ['accept', 'request', 'handshake'];
+/** Monotonic id source for user-added locks (config-only; never touches engine RNG). */
+let lockSeq = 0;
 
 export const PANE_TAGS = ['A', 'B'] as const;
 
@@ -289,6 +293,14 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
           expect: 'Larger burst tolerates brief reconnect bunches (warm-up, a short blip) without shedding; smaller burst clamps sooner and harder. Too large and a real storm slips through before throttling engages.',
         },
       },
+      {
+        label: 'Representative QPS', min: 10_000, max: 1_000_000, step: 10_000, get: (c) => c.fabric.lockRepThroughputQps, set: (c, v) => (c.fabric.lockRepThroughputQps = v), format: (v) => (v >= 1e6 ? `${(v / 1e6).toFixed(2)}M/s` : `${Math.round(v / 1000)}k/s`),
+        info: {
+          what: 'The real per-server request throughput this demo stands in for — only used to scale lock contention (see Locks below).',
+          how: 'A µs-scale lock is invisible at the demo’s actual event rate, so lock pressure is scaled up to this QPS. A request-site lock’s utilization works out to (this QPS × its hold time); raising offered load or a pulse scales it further. Has no effect unless at least one lock is enabled.',
+          expect: 'This is the “vertical scale” dial: raise it and a fixed-hold lock climbs toward 100% utilization and its wait time explodes, while the CPU stays flat. Drop it and the same lock becomes negligible.',
+        },
+      },
     ],
     toggles: [
       {
@@ -413,6 +425,7 @@ export class ControlPanel {
   private refreshers: Array<() => void> = [];
   private logList!: HTMLElement;
   private totalsEl!: HTMLElement;
+  private locksListEl!: HTMLElement;
   private lastTotalsHtml = '';
   /** Lifetime-event counters, one per pane. */
   private renderedEvents: number[] = [];
@@ -660,7 +673,148 @@ export class ControlPanel {
       }
       section.appendChild(details);
     }
+    this.buildLocksGroup(section);
     this.side.appendChild(section);
+  }
+
+  /**
+   * The Locks group: a dynamic list of serialization points. Unlike the fixed
+   * knob groups, locks can be added and removed, so the list DOM is rebuilt
+   * from the active pane's config whenever it changes (and on preset / pane
+   * switches, via the refresher — which never fires mid-keystroke).
+   */
+  private buildLocksGroup(section: HTMLElement): void {
+    const details = document.createElement('details');
+    details.className = 'knob-group';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Locks (contention)';
+    details.appendChild(summary);
+    details.appendChild(
+      el(
+        'p',
+        'locks-intro',
+        'Serialization points (mutexes / Arc<Mutex>) the fabric holds around shared state. Each adds wait — not CPU. Hold time is per-acquisition microseconds, scaled by Representative QPS above.',
+      ),
+    );
+    this.locksListEl = el('div', 'locks-list');
+    details.appendChild(this.locksListEl);
+    const addBtn = el('button', 'btn add-lock', '＋ add lock') as HTMLButtonElement;
+    addBtn.type = 'button';
+    addBtn.addEventListener('click', () => this.addLock());
+    details.appendChild(addBtn);
+    this.refreshers.push(() => this.rebuildLockList());
+    this.rebuildLockList();
+    section.appendChild(details);
+  }
+
+  private rebuildLockList(): void {
+    const list = this.locksListEl;
+    list.replaceChildren();
+    const locks = this.cfgFor('sim').fabric.locks;
+    if (locks.length === 0) {
+      list.appendChild(el('p', 'locks-empty', 'No locks. Add one to model a mutex bottleneck.'));
+      return;
+    }
+    locks.forEach((lock, i) => list.appendChild(this.buildLockRow(lock, i)));
+  }
+
+  private buildLockRow(lock: LockConfig, index: number): HTMLElement {
+    const row = el('div', 'lock-row');
+
+    const enable = document.createElement('input');
+    enable.type = 'checkbox';
+    enable.className = 'lock-enable';
+    enable.checked = lock.enabled;
+    enable.title = 'Enable this lock';
+    enable.addEventListener('change', () => this.editLock(index, (l) => (l.enabled = enable.checked)));
+    row.appendChild(enable);
+
+    const name = document.createElement('input');
+    name.type = 'text';
+    name.className = 'lock-name';
+    name.value = lock.name;
+    name.spellcheck = false;
+    name.addEventListener('input', () => this.editLock(index, (l) => (l.name = name.value)));
+    row.appendChild(name);
+
+    const site = document.createElement('select');
+    site.className = 'lock-site';
+    site.title = 'Where the lock is taken';
+    for (const s of LOCK_SITES) {
+      const opt = document.createElement('option');
+      opt.value = s;
+      opt.textContent = s;
+      if (s === lock.site) opt.selected = true;
+      site.appendChild(opt);
+    }
+    site.addEventListener('change', () => this.editLock(index, (l) => (l.site = site.value as LockSite)));
+    row.appendChild(site);
+
+    const holdWrap = el('label', 'lock-hold-wrap');
+    const hold = document.createElement('input');
+    hold.type = 'number';
+    hold.className = 'lock-hold';
+    hold.min = '0.1';
+    hold.max = '1000';
+    hold.step = '0.1';
+    hold.value = String(lock.holdTimeUs);
+    hold.title = 'Hold time per acquisition (microseconds)';
+    hold.addEventListener('input', () => {
+      const v = parseFloat(hold.value);
+      if (Number.isFinite(v) && v > 0) this.editLock(index, (l) => (l.holdTimeUs = v));
+    });
+    holdWrap.appendChild(hold);
+    holdWrap.appendChild(el('span', 'lock-unit', 'µs'));
+    row.appendChild(holdWrap);
+
+    const remove = el('button', 'lock-remove', '✕') as HTMLButtonElement;
+    remove.type = 'button';
+    remove.title = 'Remove lock';
+    remove.addEventListener('click', () => this.removeLock(index));
+    row.appendChild(remove);
+
+    return row;
+  }
+
+  /** Locks edit the active pane only (sim scope), like client-behavior knobs. */
+  private activeLocks(): { locks: LockConfig[]; target: number } | null {
+    const sims = this.hooks.getSims();
+    if (sims.length === 0) return null;
+    const target = Math.min(this.activePane, sims.length - 1);
+    return { locks: sims[target].cfg.fabric.locks, target };
+  }
+
+  private editLock(index: number, mutate: (l: LockConfig) => void): void {
+    const ctx = this.activeLocks();
+    if (!ctx || !ctx.locks[index]) return;
+    mutate(ctx.locks[index]);
+    this.hooks.configChanged('plain', ctx.target);
+    this.markCustom('sim');
+  }
+
+  private addLock(): void {
+    const ctx = this.activeLocks();
+    if (!ctx) return;
+    lockSeq += 1;
+    ctx.locks.push({
+      id: `lock-${lockSeq}`,
+      name: `lock ${ctx.locks.length + 1}`,
+      site: 'request',
+      holdTimeUs: 2,
+      enabled: true,
+    });
+    this.hooks.configChanged('plain', ctx.target);
+    this.markCustom('sim');
+    this.rebuildLockList();
+  }
+
+  private removeLock(index: number): void {
+    const ctx = this.activeLocks();
+    if (!ctx || index < 0 || index >= ctx.locks.length) return;
+    ctx.locks.splice(index, 1);
+    this.hooks.configChanged('plain', ctx.target);
+    this.markCustom('sim');
+    this.rebuildLockList();
   }
 
   /**

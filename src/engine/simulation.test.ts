@@ -411,3 +411,97 @@ describe('connection-rate shedding (accept-rate limiter)', () => {
     expect(acceptedPerSec).toBeLessThan(40 * 1.5);
   });
 });
+
+describe('lock contention (serialization bottleneck)', () => {
+  // Enable the seeded per-request router lock (2µs) and run healthy at the
+  // given representative server QPS. Returns lock + CPU + goodput observations.
+  function runWithRouterLock(repQps: number, enabled: boolean) {
+    const sim = newSim('healthy', (cfg) => {
+      const router = cfg.fabric.locks.find((l) => l.id === 'router')!;
+      router.enabled = enabled;
+      router.holdTimeUs = 2;
+      cfg.fabric.lockRepThroughputQps = repQps;
+    });
+    let cpuMean = 0;
+    let samples = 0;
+    const STEP = 2;
+    for (let t = 0; t < 30_000; t += STEP) {
+      sim.step(STEP);
+      if (t >= 10_000) {
+        cpuMean += Math.min(2, sim.cpu.utilization());
+        samples++;
+      }
+    }
+    let utilMean = 0;
+    let waitPeak = 0;
+    let n = 0;
+    for (const b of sim.metrics.buckets) {
+      if (b.time < 10_000) continue;
+      utilMean += b.lockUtilization;
+      waitPeak = Math.max(waitPeak, b.lockWaitMs);
+      n++;
+    }
+    return {
+      utilMean: utilMean / n,
+      waitPeak,
+      cpuMean: cpuMean / samples,
+      success: statsBetween(sim, 10_000, 30_000).successRate,
+    };
+  }
+
+  it('disabled locks have no effect (default presets)', () => {
+    const sim = newSim('healthy');
+    run(sim, 20_000);
+    for (const b of sim.metrics.buckets) expect(b.lockUtilization).toBe(0);
+  });
+
+  it('a lightly-loaded µs lock is nearly invisible', () => {
+    // At a modest representative QPS a 2µs lock is far from saturated and costs
+    // almost nothing — like the real lock at low traffic.
+    const m = runWithRouterLock(50_000, true);
+    expect(m.utilMean).toBeLessThan(0.3);
+    expect(m.success).toBeGreaterThan(0.95);
+  });
+
+  it('scaling representative throughput drives the same lock to saturation', () => {
+    // "Vertical scaling": the lock's hold time is fixed, but pushing more QPS
+    // through it raises utilization and the wait time climbs steeply.
+    const low = runWithRouterLock(50_000, true);
+    const high = runWithRouterLock(600_000, true);
+    expect(high.utilMean).toBeGreaterThan(1); // saturated
+    expect(low.utilMean).toBeLessThan(0.3); // not
+    expect(high.waitPeak).toBeGreaterThan(low.waitPeak * 20);
+    expect(high.waitPeak).toBeGreaterThan(100);
+  });
+
+  it('the lock — not the CPU — is the bottleneck', () => {
+    // Same load, same CPU budget. With the 2µs lock the goodput collapses;
+    // without it the identical workload is perfectly healthy and the CPU idles.
+    const withLock = runWithRouterLock(600_000, true);
+    const withoutLock = runWithRouterLock(600_000, false);
+    expect(withLock.utilMean).toBeGreaterThan(1); // the lock is pegged
+    expect(withLock.waitPeak).toBeGreaterThan(100); // ...adding big wait
+    expect(withLock.success).toBeLessThan(0.6); // ...and crushing goodput
+    // The very same workload without the lock stays healthy on idle CPU —
+    // proof the wall is lock wait, not compute.
+    expect(withoutLock.success).toBeGreaterThan(0.95);
+    expect(withoutLock.cpuMean).toBeLessThan(0.5);
+  });
+
+  it('an accept-site lock contends when connection churn spikes', () => {
+    // The Arc<Mutex> max-conns counter: quiet when pools stay warm, but a pulse
+    // that churns connections drives acquisitions through it.
+    const sim = newSim('storm-prone', (cfg) => {
+      const maxconn = cfg.fabric.locks.find((l) => l.id === 'maxconn')!;
+      maxconn.enabled = true;
+      maxconn.holdTimeUs = 5;
+      cfg.fabric.lockRepThroughputQps = 300_000;
+    });
+    run(sim, 15_000);
+    sim.triggerPulse(3, 5_000);
+    run(sim, 10_000);
+    let peak = 0;
+    for (const b of sim.metrics.buckets) if (b.time >= 15_000) peak = Math.max(peak, b.lockUtilization);
+    expect(peak).toBeGreaterThan(0.1);
+  });
+});

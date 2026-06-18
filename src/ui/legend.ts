@@ -155,6 +155,7 @@ const SECTIONS: LegendSection[] = [
       { swatch: gauge(SEMANTIC.cpuOk, 0.4), label: 'Connection gauge', detail: 'Held connections vs the connection limit. Beyond the limit: shed·conn (RST).' },
       { swatch: ring(SEMANTIC.tlsPulse, 5), label: 'TLS permits', detail: 'Each slot is one concurrent handshake. “+N permit wait” connections are waiting; past the permit wait they are shed·tls (RST). There is no TLS queue.' },
       { swatch: dot(SEMANTIC.success, 3.5), label: 'PACE / RATE chips', detail: 'Footer chips: ●/○ show whether TLS error pacing and accept-rate shedding are on. With RATE on, the fabric throttles new connections at TCP accept (token bucket: rate + burst).' },
+      { swatch: gauge(SEMANTIC.retry, 0.85), label: 'Lock contention', detail: 'Per enabled lock (right of the fabric): a utilization bar (green→red, hatched when saturated) and the wait it adds. A lock pegged at 100% while the CPU column stays low means the bottleneck is serialization, not compute.' },
       { swatch: gauge(SEMANTIC.cpuBad, 0.95), label: 'CPU column', detail: 'Demanded work vs capacity. Hatching above = overload; “×N slow” = every in-flight operation stretched by contention.' },
       { swatch: gauge(SEMANTIC.shed, 0.6), label: 'Downstream queues', detail: 'Requests waiting for a fabric→downstream connection, colored by age (blue→red).' },
       { swatch: graveyardSwatch(), label: 'Graveyard', detail: 'Failures pile up below the fabric and slowly settle downward as they fade. Squares are request fates: red timeouts, orange rejections, yellow errors.' },

@@ -49,6 +49,16 @@ function base(): SimulationConfig {
       connRateShedEnabled: false,
       connRateLimitPerSec: 40,
       connRateBurst: 30,
+      lockRepThroughputQps: 50_000,
+      // Example locks, disabled by default (no effect until enabled): the
+      // Arc<Mutex<usize>> max-connections counter, a per-request router lock,
+      // and a TLS session-cache lock. Enable one and raise the representative
+      // QPS to watch a µs-scale lock become the bottleneck while CPU stays idle.
+      locks: [
+        { id: 'maxconn', name: 'max-conns counter (Arc<Mutex>)', site: 'accept', holdTimeUs: 2, enabled: false },
+        { id: 'router', name: 'request router state', site: 'request', holdTimeUs: 1, enabled: false },
+        { id: 'sessioncache', name: 'TLS session cache', site: 'handshake', holdTimeUs: 5, enabled: false },
+      ],
     },
     downstreamPool: {
       poolSizePerDownstream: 10,

@@ -116,6 +116,35 @@ export interface FabricConfig {
   connRateLimitPerSec: number;
   /** Burst capacity (tokens): how many new connections are absorbed at once before the rate throttles. */
   connRateBurst: number;
+
+  /**
+   * Locks: serialization points (mutexes, Arc<Mutex<…>>) the fabric takes
+   * around shared state. Each is a single-server FIFO with a hold time; under
+   * contention, waiting on the lock — not the CPU — becomes the bottleneck.
+   */
+  locks: LockConfig[];
+  /**
+   * Representative per-server request throughput (QPS) the demo stands in for.
+   * A µs-scale lock is invisible at the demo's actual event rate, so lock
+   * pressure is scaled up to this rate: a request-site lock's utilization works
+   * out to repQPS × holdTime. Raise it to model vertically scaling the server.
+   */
+  lockRepThroughputQps: number;
+}
+
+/** Where in the fabric a lock is acquired. */
+export type LockSite = 'accept' | 'request' | 'handshake';
+
+export interface LockConfig {
+  /** Stable identifier (runtime contention state is keyed on this). */
+  id: string;
+  /** Display name, e.g. "max-conns counter (Arc<Mutex>)". */
+  name: string;
+  /** Operation that takes the lock: every connection accept, request, or handshake. */
+  site: LockSite;
+  /** Time the critical section is held per acquisition, microseconds. */
+  holdTimeUs: number;
+  enabled: boolean;
 }
 
 export interface DownstreamPoolConfig {
@@ -198,6 +227,18 @@ export interface FabricView {
   slowdownFactor: number;
 }
 
+/** Live contention state for one enabled lock (renderer-facing). */
+export interface LockView {
+  name: string;
+  site: LockSite;
+  holdTimeUs: number;
+  /** Smoothed utilization (0..>1); ≥1 means saturated. */
+  utilization: number;
+  /** Recent mean delay (wait + hold) each acquisition incurs, ms. */
+  waitMs: number;
+  acquisitions: number;
+}
+
 // ---------------------------------------------------------------------------
 // Metrics
 // ---------------------------------------------------------------------------
@@ -229,6 +270,10 @@ export interface MetricsBucket {
   fabricQueueDepth: number;
   cpuUtilization: number;
   handshakesActive: number;
+  /** Utilization of the busiest enabled lock (0..>1), sampled at bucket close. */
+  lockUtilization: number;
+  /** Mean wait that lock contention added to operations this bucket (ms). */
+  lockWaitMs: number;
 }
 
 export interface SimEventLog {
