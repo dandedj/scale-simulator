@@ -13,6 +13,7 @@
 import { PRESETS } from '../engine/presets';
 import type { Simulation } from '../engine/simulation';
 import type { LockConfig, LockSite, SimulationConfig } from '../engine/types';
+import { compareSuccessRates } from '../stats';
 import { Legend } from './legend';
 
 const LOCK_SITES: LockSite[] = ['accept', 'request', 'handshake'];
@@ -1003,7 +1004,50 @@ function totalsHtmlCompare(sims: Simulation[]): string {
       .join('');
     return `<div class="cmp-row"><label>${m.key}</label>${cells}</div>`;
   }).join('');
-  return head + rows;
+  return head + rows + significanceHtml(sims);
+}
+
+/**
+ * Goodput significance for the first two sims: is the success-rate gap real, or
+ * noise? Two-proportion z-test on arrivals (trials) vs successes. Only the first
+ * two panes are compared (comparison mode runs exactly two).
+ */
+function significanceHtml(sims: Simulation[]): string {
+  if (sims.length < 2) return '';
+  const a = sims[0].metrics.totals;
+  const b = sims[1].metrics.totals;
+  const r = compareSuccessRates(a.arrivals, a.successes, b.arrivals, b.successes);
+  const sign = r.deltaPp >= 0 ? '+' : '−';
+  const delta = `${sign}${Math.abs(r.deltaPp).toFixed(1)}pp`;
+  let cls: string;
+  let verdict: string;
+  if (!r.enough) {
+    cls = 'sig-wait';
+    verdict = 'gathering data…';
+  } else if (r.confidence >= 0.95) {
+    cls = 'sig-strong';
+    verdict = `significant (${Math.round(r.confidence * 100)}%) · SIM ${r.better} better`;
+  } else if (r.confidence > 0) {
+    cls = 'sig-some';
+    verdict = `weak (90%) · SIM ${r.better} leads`;
+  } else {
+    cls = 'sig-none';
+    verdict = 'not significant — likely noise';
+  }
+  const stats = r.enough ? `z=${r.z.toFixed(2)} · p=${fmtP(r.pValue)}` : `n=${a.arrivals}/${b.arrivals}`;
+  return (
+    `<div class="cmp-sig ${cls}">` +
+    `<div class="cmp-sig-head"><label>Δ goodput (B−A)</label><b>${delta}</b></div>` +
+    `<div class="cmp-sig-verdict">${verdict}</div>` +
+    `<div class="cmp-sig-stats">${stats}</div>` +
+    `<div class="cmp-sig-note">assumes independent requests; correlated storm failures inflate confidence</div>` +
+    `</div>`
+  );
+}
+
+function fmtP(p: number): string {
+  if (p < 0.001) return '<0.001';
+  return p.toFixed(3);
 }
 
 function el(tag: string, className: string, text?: string): HTMLElement {

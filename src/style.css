@@ -934,6 +934,80 @@ input[type='range']::-moz-range-thumb {
   border-bottom: 1px solid var(--border);
 }
 
+/* A/B significance callout (spans the whole totals grid). */
+.totals-cmp .cmp-sig {
+  grid-column: 1 / -1;
+  margin-top: 9px;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 5px;
+  background: var(--panel-raised);
+}
+
+.cmp-sig-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.totals-cmp .cmp-sig-head label {
+  font-size: 9px;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  border: none;
+  padding: 0;
+}
+
+.cmp-sig-head b {
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.cmp-sig-verdict {
+  font-size: 11.5px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.cmp-sig-stats {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  margin-top: 1px;
+}
+
+.cmp-sig-note {
+  font-size: 8.5px;
+  color: var(--text-faint);
+  line-height: 1.35;
+  margin-top: 5px;
+}
+
+.cmp-sig.sig-strong {
+  border-left-color: var(--info);
+}
+.sig-strong .cmp-sig-verdict {
+  color: var(--info);
+}
+.cmp-sig.sig-some {
+  border-left-color: var(--warn);
+}
+.sig-some .cmp-sig-verdict {
+  color: var(--warn);
+}
+.cmp-sig.sig-none,
+.cmp-sig.sig-wait {
+  border-left-color: var(--border);
+}
+.sig-none .cmp-sig-verdict,
+.sig-wait .cmp-sig-verdict {
+  color: var(--text-dim);
+}
+
 /* Event log */
 
 .eventlog-section {
