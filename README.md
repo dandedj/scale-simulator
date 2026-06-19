@@ -89,19 +89,29 @@ cache) with locks. Add them in the **Locks** group: each lock has a name, a
 max-connections counter; `request` — every request; `handshake` — every
 handshake), a **hold time** in microseconds, and an enable toggle.
 
+Hold-time reference (measured on Graviton3 / c7g): a lock-free atomic
+(`fetch_add`, e.g. an `Arc<AtomicUsize>`) is ~0.005µs (5ns); an uncontended
+`Arc<Mutex>` lock+unlock is ~0.025µs (25ns); a contended lock that spins or
+parks runs ~1–5µs. The seeded example locks use these values. Note that at
+25ns a per-connection counter is essentially free even at 500k conn/s — the
+interesting regime is a coarser or contended lock, or a fine lock at very high
+representative throughput.
+
 Each lock is a single-server FIFO: an acquisition waits behind the current
 holder, then holds for its hold time. That wait is added to the operation's
 latency but **costs no CPU** — the lock is a serialization resource orthogonal
 to the compute model. Its ceiling is `1 / holdTime` acquisitions per second no
 matter how many cores you add (Amdahl / USL); past that, the queue — and the
-wait — grow without bound.
+wait — grow without bound (a 25ns lock tops out near 40M/s, a 2µs lock at
+500k/s).
 
-**The scale bridge.** A 2µs lock is invisible at the demo's actual event rate;
-it only bottlenecks near a real server's throughput. So lock pressure is scaled
-to a **Representative QPS** — the real per-server request rate the demo stands
-in for. A request-site lock's utilization then works out to
-`Representative QPS × hold time` (so 500k/s × 2µs = 100%), and raising offered
-load or firing a pulse scales it further. Treat Representative QPS as the
+**The scale bridge.** A nanosecond-scale lock is invisible at the demo's actual
+event rate; it only bottlenecks near a real server's throughput. So lock
+pressure is scaled to a **Representative QPS** — the real per-server request
+rate the demo stands in for. A request-site lock's utilization then works out to
+`Representative QPS × hold time` (so 500k/s × 2µs = 100%, or 500k/s × 25ns =
+1.25%), and raising offered load or firing a pulse scales it further. Treat
+Representative QPS as the
 **vertical-scale dial**: crank it and a fixed-hold lock climbs to 100%
 utilization and its wait time explodes — **while the CPU stays flat**. That is
 the whole point: past a certain scale the limit isn't compute, it's the time

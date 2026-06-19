@@ -758,11 +758,13 @@ export class ControlPanel {
     const hold = document.createElement('input');
     hold.type = 'number';
     hold.className = 'lock-hold';
-    hold.min = '0.1';
+    hold.min = '0.005';
     hold.max = '1000';
-    hold.step = '0.1';
+    hold.step = '0.005';
     hold.value = String(lock.holdTimeUs);
-    hold.title = 'Hold time per acquisition (microseconds)';
+    hold.title =
+      'Hold time per acquisition (µs). Reference (Graviton3/c7g): atomic ≈0.005µs, ' +
+      'uncontended Arc<Mutex> ≈0.025µs, contended/parking ≈1–5µs.';
     hold.addEventListener('input', () => {
       const v = parseFloat(hold.value);
       if (Number.isFinite(v) && v > 0) this.editLock(index, (l) => (l.holdTimeUs = v));

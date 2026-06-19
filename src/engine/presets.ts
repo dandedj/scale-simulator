@@ -53,11 +53,13 @@ function base(): SimulationConfig {
       // Example locks, disabled by default (no effect until enabled): the
       // Arc<Mutex<usize>> max-connections counter, a per-request router lock,
       // and a TLS session-cache lock. Enable one and raise the representative
-      // QPS to watch a µs-scale lock become the bottleneck while CPU stays idle.
+      // QPS to watch the lock become the bottleneck while CPU stays idle. Hold
+      // times are calibrated for Graviton3 (c7g): an uncontended Arc<Mutex>
+      // lock+unlock is ~25ns, a coarser/contended lock runs into the µs.
       locks: [
-        { id: 'maxconn', name: 'max-conns counter (Arc<Mutex>)', site: 'accept', holdTimeUs: 2, enabled: false },
-        { id: 'router', name: 'request router state', site: 'request', holdTimeUs: 1, enabled: false },
-        { id: 'sessioncache', name: 'TLS session cache', site: 'handshake', holdTimeUs: 5, enabled: false },
+        { id: 'maxconn', name: 'max-conns counter (Arc<Mutex>)', site: 'accept', holdTimeUs: 0.025, enabled: false },
+        { id: 'router', name: 'request router state', site: 'request', holdTimeUs: 0.05, enabled: false },
+        { id: 'sessioncache', name: 'TLS session cache', site: 'handshake', holdTimeUs: 1, enabled: false },
       ],
     },
     downstreamPool: {
