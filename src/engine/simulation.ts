@@ -70,6 +70,15 @@ const OUTBOUND_TLS_CPU_FACTOR = 0.5;
  * pacing the storm instead of cutting it instantly.
  */
 const TLS_ERROR_PACING_HOLD_CPU_PER_MS = 0.02;
+/**
+ * Idle drain throughput of the fabric's accept() loop (connections/sec). The
+ * effective rate is this divided by the CPU slowdown factor — a saturated
+ * fabric (workers grinding TLS crypto) loops back to accept() slowly, so the
+ * kernel accept queue backs up. Sized so the queue stays empty at demo load
+ * (~12–20 accepts/s) but cannot keep up with a storm flood (200–350/s) once
+ * the slowdown climbs into the tens.
+ */
+const ACCEPT_DRAIN_PER_SEC = 1000;
 /** Cap on how far a saturated lock's backlog runs ahead of now (ms). */
 const LOCK_MAX_BACKLOG_MS = 2000;
 /** Time constant for the smoothed lock-utilization gauge (ms). */
@@ -204,6 +213,8 @@ export class ConnSim {
   resumed = false;
   /** Currently held against the fabric's connection limit. */
   counted = false;
+  /** EMFILE has already been counted for this connection (avoids per-tick double counting). */
+  emfileLogged = false;
   clientId: number;
   downstreamId: number;
 
@@ -382,6 +393,14 @@ export class Simulation {
    */
   private connRateTokens = 0;
   private connRateLastRefill = 0;
+  /**
+   * Kernel accept queue: connections whose TCP 3-way handshake completed and
+   * that are waiting for the fabric to accept() them. Bounded by
+   * acceptQueueDepth; drained by the accept pump. Empty (unused) when the accept
+   * queue is not modeled.
+   */
+  acceptQueue: { client: ClientSim; conn: ConnSim }[] = [];
+  private acceptPumpScheduled = false;
   /** Per-lock contention state, keyed by lock id (created on first acquisition). */
   private lockRuntimes = new Map<string, LockRuntime>();
 
@@ -660,7 +679,7 @@ export class Simulation {
       this.onConnectTimeout(client, conn),
     );
     // The SYN reaches the fabric after one network hop.
-    this.queue.schedule(this.now + this.clientHopMs(), () => this.fabricAccept(client, conn));
+    this.queue.schedule(this.now + this.clientHopMs(), () => this.fabricSynArrives(client, conn));
   }
 
   private onConnectTimeout(client: ClientSim, conn: ConnSim): void {
@@ -917,7 +936,126 @@ export class Simulation {
     }
   }
 
-  private fabricAccept(client: ClientSim, conn: ConnSim): void {
+  /**
+   * Live sockets the fabric holds against the file-descriptor ceiling: every
+   * client-facing connection counted against the connection limit, plus every
+   * fabric→downstream pool connection. FDs are a single shared budget, which is
+   * the lesson — raising the connection limit alone just moves the wall here.
+   */
+  private fdInUse(): number {
+    let ds = 0;
+    for (const d of this.downstreams) ds += d.conns.length;
+    return this.fabricConnCount + ds;
+  }
+
+  private hasFreeFd(): boolean {
+    const f = this.cfg.fabric;
+    return !f.fdLimitEnabled || this.fdInUse() < f.maxFileDescriptors;
+  }
+
+  /**
+   * The SYN's TCP 3-way handshake has completed at the fabric. With the kernel
+   * accept queue modeled, the connection waits there (bounded by the depth) for
+   * the fabric to accept() it; otherwise it is admitted immediately, the way the
+   * model behaved before this layer existed.
+   */
+  private fabricSynArrives(client: ClientSim, conn: ConnSim): void {
+    if (conn.abandoned || conn.state === 'closing') return;
+    const f = this.cfg.fabric;
+    if (!f.acceptQueueEnabled) {
+      // No kernel-queue modeling: the FD check (if any) happens at accept().
+      if (!this.hasFreeFd()) {
+        this.emfileDrop(conn);
+        return;
+      }
+      this.admitConnection(client, conn);
+      return;
+    }
+    if (this.acceptQueue.length >= f.acceptQueueDepth) {
+      // Accept queue full → overflow. Silent drop (the client waits out a TCP
+      // SYN retransmit, ~1s, usually past its own deadline) or an immediate RST
+      // when abort-on-overflow is set (fast, clean failure the client can retry).
+      this.metrics.countAcceptQueueDrop();
+      this.throttledLog(
+        'acceptq',
+        2000,
+        'warn',
+        f.acceptQueueAbortOnOverflow
+          ? 'Accept queue full — RST (tcp_abort_on_overflow)'
+          : 'Accept queue full — dropping connection (client will SYN-retransmit)',
+      );
+      if (f.acceptQueueAbortOnOverflow) {
+        this.shedConnection(client, conn, 'accept queue overflow');
+      }
+      // Silent drop: do nothing — the connect timeout reaps the stalled attempt.
+      return;
+    }
+    this.acceptQueue.push({ client, conn });
+    this.scheduleAcceptPump();
+  }
+
+  /**
+   * Schedule the next accept-loop tick. The interval is the idle per-connection
+   * service time stretched by the current CPU slowdown, so the drain rate falls
+   * as the fabric saturates and the queue backs up.
+   */
+  private scheduleAcceptPump(): void {
+    if (this.acceptPumpScheduled || this.acceptQueue.length === 0) return;
+    this.acceptPumpScheduled = true;
+    const intervalMs = (1000 / ACCEPT_DRAIN_PER_SEC) * this.cpu.slowdownFactor();
+    this.queue.schedule(this.now + Math.max(0.05, intervalMs), () => this.pumpAccept());
+  }
+
+  /**
+   * Accept one completed connection off the kernel accept queue and accept() it,
+   * then reschedule. EMFILE (the FD ceiling) jams the loop: the head stays
+   * queued and newcomers overflow until a descriptor frees.
+   */
+  private pumpAccept(): void {
+    this.acceptPumpScheduled = false;
+    // Drop connections the client already abandoned (or that were torn down)
+    // while they sat in the queue — they held a slot until the loop reached them.
+    while (this.acceptQueue.length > 0) {
+      const head = this.acceptQueue[0].conn;
+      if (head.abandoned || head.state === 'closing') this.acceptQueue.shift();
+      else break;
+    }
+    if (this.acceptQueue.length === 0) return;
+    if (!this.hasFreeFd()) {
+      const head = this.acceptQueue[0].conn;
+      if (!head.emfileLogged) {
+        head.emfileLogged = true;
+        this.metrics.countEmfile();
+      }
+      this.throttledLog(
+        'emfile',
+        2000,
+        'critical',
+        'accept() failing: EMFILE — file-descriptor ceiling reached, accept queue jamming',
+      );
+      this.scheduleAcceptPump();
+      return;
+    }
+    const { client, conn } = this.acceptQueue.shift()!;
+    this.admitConnection(client, conn);
+    this.scheduleAcceptPump();
+  }
+
+  /** accept() returned EMFILE: the connection cannot be taken; it withers on the client's deadline. */
+  private emfileDrop(conn: ConnSim): void {
+    if (!conn.emfileLogged) {
+      conn.emfileLogged = true;
+      this.metrics.countEmfile();
+    }
+    this.throttledLog(
+      'emfile',
+      2000,
+      'critical',
+      'accept() failing: EMFILE — file-descriptor ceiling reached',
+    );
+  }
+
+  private admitConnection(client: ClientSim, conn: ConnSim): void {
     if (conn.abandoned || conn.state === 'closing') return;
     const f = this.cfg.fabric;
     // Accept-rate shedding: bounce excess new connections at TCP accept, before
@@ -1124,7 +1262,10 @@ export class Simulation {
       this.forwardToDownstream(req, ds, idle, deadline);
       return;
     }
-    if (ds.conns.filter((c) => c.state !== 'closing').length < p.poolSizePerDownstream) {
+    // A fabric→downstream connection also costs a file descriptor. Under the FD
+    // ceiling, when the budget is exhausted no new outbound socket can open; the
+    // request waits in the queue and expires on the downstream timeout.
+    if (ds.conns.filter((c) => c.state !== 'closing').length < p.poolSizePerDownstream && this.hasFreeFd()) {
       this.openDownstreamConn(ds);
     }
     // The downstream deadline covers queue wait + wire time: a request that
@@ -1289,6 +1430,12 @@ export class Simulation {
       inFlight: this.fabricInFlight,
       cpuUtilization: this.cpu.utilization(),
       slowdownFactor: this.cpu.slowdownFactor(),
+      acceptQueueLen: this.acceptQueue.length,
+      acceptQueueDepth: this.cfg.fabric.acceptQueueDepth,
+      acceptQueueEnabled: this.cfg.fabric.acceptQueueEnabled,
+      fdInUse: this.fdInUse(),
+      fdLimit: this.cfg.fabric.maxFileDescriptors,
+      fdLimitEnabled: this.cfg.fabric.fdLimitEnabled,
     };
   }
 

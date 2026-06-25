@@ -412,6 +412,96 @@ describe('connection-rate shedding (accept-rate limiter)', () => {
   });
 });
 
+describe('kernel limits (accept queue + file descriptors)', () => {
+  it('are inert by default — no accept-queue drops or EMFILE even in a storm', () => {
+    const sim = newSim('storm-prone');
+    run(sim, 15_000);
+    sim.triggerPulse(3, 5_000);
+    run(sim, 25_000);
+    expect(sim.metrics.totals.acceptQueueDrops).toBe(0);
+    expect(sim.metrics.totals.emfileDrops).toBe(0);
+    // The default storm still collapses — the new layers changed nothing.
+    expect(statsBetween(sim, 30_000, 45_000).successRate).toBeLessThan(0.05);
+  });
+
+  it('the accept queue never overflows under healthy load (default depth)', () => {
+    const sim = newSim('healthy', (cfg) => {
+      cfg.fabric.acceptQueueEnabled = true; // default depth 32
+    });
+    run(sim, 60_000);
+    expect(sim.metrics.totals.acceptQueueDrops).toBe(0);
+    expect(statsBetween(sim, 5_000, 60_000).successRate).toBeGreaterThan(0.95);
+  });
+
+  it('the accept queue overflows when a storm starves the accept loop', () => {
+    // Under storm-prone's post-pulse collapse the CPU saturates, the accept
+    // loop drains slowly, and the kernel backlog fills past its depth.
+    const sim = newSim('storm-prone', (cfg) => {
+      cfg.fabric.acceptQueueEnabled = true; // default depth 32
+    });
+    run(sim, 15_000);
+    sim.triggerPulse(3, 5_000);
+    run(sim, 20_000);
+    expect(sim.metrics.totals.acceptQueueDrops).toBeGreaterThan(0);
+  });
+
+  it('overflow with abort-on-overflow still drops, and the queue drains clean when traffic stops', () => {
+    const sim = newSim('storm-prone', (cfg) => {
+      cfg.fabric.acceptQueueEnabled = true;
+      cfg.fabric.acceptQueueAbortOnOverflow = true;
+    });
+    run(sim, 15_000);
+    sim.triggerPulse(3, 5_000);
+    run(sim, 15_000);
+    expect(sim.metrics.totals.acceptQueueDrops).toBeGreaterThan(0);
+    // Stop offered load: the accept queue must empty (no leaked slots).
+    sim.cfg.clients.requestRatePerSec = 0;
+    sim.cfg.clients.maxRetries = 0;
+    sim.rescheduleArrivals();
+    run(sim, 20_000);
+    expect(sim.acceptQueue.length).toBe(0);
+    expect(sim.fabricInFlight).toBe(0);
+  });
+
+  it('the FD ceiling caps live sockets and fails by EMFILE, not a clean RST', () => {
+    // A storm wants ~98 live sockets; the ceiling holds it below that and the
+    // overflow is EMFILE (a withered connection), not a shed RST.
+    const fdLimit = 64;
+    const sim = newSim('storm-prone', (cfg) => {
+      cfg.fabric.fdLimitEnabled = true;
+      cfg.fabric.maxFileDescriptors = fdLimit;
+    });
+    const STEP = 2;
+    const liveSockets = () => {
+      let ds = 0;
+      for (const d of sim.downstreams) ds += d.conns.length;
+      return sim.fabricConnCount + ds;
+    };
+    for (let t = 0; t < 15_000; t += STEP) {
+      sim.step(STEP);
+      expect(liveSockets()).toBeLessThanOrEqual(fdLimit);
+    }
+    sim.triggerPulse(3, 5_000);
+    for (let t = 0; t < 15_000; t += STEP) {
+      sim.step(STEP);
+      // The shared FD budget (client-facing + downstream pool) never breaches.
+      expect(liveSockets()).toBeLessThanOrEqual(fdLimit);
+    }
+    expect(sim.metrics.totals.emfileDrops).toBeGreaterThan(0);
+    // EMFILE is a dirty failure: no clean RST shed comes from the FD ceiling.
+    expect(sim.metrics.totals.shedConnLimit).toBe(0);
+  });
+
+  it('a healthy fabric never hits the default FD ceiling', () => {
+    const sim = newSim('healthy', (cfg) => {
+      cfg.fabric.fdLimitEnabled = true; // default 80, healthy holds ~70 sockets
+    });
+    run(sim, 30_000);
+    expect(sim.metrics.totals.emfileDrops).toBe(0);
+    expect(statsBetween(sim, 5_000, 30_000).successRate).toBeGreaterThan(0.95);
+  });
+});
+
 describe('lock contention (serialization bottleneck)', () => {
   // Enable the seeded per-request router lock (2µs) and run healthy at the
   // given representative server QPS. Returns lock + CPU + goodput observations.

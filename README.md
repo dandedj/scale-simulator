@@ -65,6 +65,8 @@ CPU contention stretches everything → more timeouts. The control mechanisms:
 |---|---|
 | TLS permits + permit wait | At most N handshakes run concurrently. A connection without a permit waits up to the permit wait time, then is **shed with an RST** (the connection is invalidated). There is no TLS queue — only this bounded wait. |
 | Connection limit | Beyond the cap, new connections are **shed with an RST** before any TLS work happens. |
+| TCP accept queue (somaxconn) | The kernel `listen()` backlog: completed TCP handshakes wait here for the fabric to `accept()` them — the kernel queue *ahead of, and separate from,* the TLS permit wait. Its drain rate falls as the CPU saturates (workers busy in TLS crypto), so a storm backs it up. On overflow a new connection is **dropped silently** — the client waits out a multi-second TCP SYN retransmit, usually past its own deadline — or, with `tcp_abort_on_overflow`, gets an immediate **RST**. Off by default. |
+| File-descriptor ceiling (RLIMIT_NOFILE) | Every live socket (client-facing connections plus the downstream pool) costs one descriptor, a single shared budget. At the ceiling `accept()` and outbound `connect()` fail with **EMFILE**: the connection can't be taken and withers on the client's deadline — a dirtier failure than a clean RST. Raising the connection limit without raising this ceiling just relocates the wall. Off by default. |
 | Accept-rate shedding | A per-server, in-memory **token bucket** at TCP accept: new connections refill it at the accept-rate limit (with a burst allowance), and when it runs dry, connections are **shed with an RST** at accept — before the connection-limit check and before any TLS work. Unlike the connection limit (a cap on *concurrent* connections) or the TLS permit cap (a cap on *concurrent* handshakes), this caps the *rate* of new connections, throttling handshake demand at the source. The cheapest rejection there is, and the most direct defense against a connection storm. |
 | TLS error pacing | When a connection is shed at TLS admission, the RST is held for the pacing delay (typically 0–5ms, up to 100ms) before being sent, so shed clients don't learn — and reconnect — in lockstep. The held connection stays live for the delay and carries a small trickle of fabric CPU, so a long hold under a heavy shed is not free. |
 | TLS session resumption | A configurable share of handshakes resume a prior session, skipping most of the asymmetric crypto. |
@@ -74,7 +76,14 @@ CPU contention stretches everything → more timeouts. The control mechanisms:
 **"Shed" here means connection-level rejection**, and the simulator counts
 the causes separately: `shed·tls` (TLS permits stayed occupied past the
 wait), `shed·conn` (connection limit exceeded), and `shed·rate` (accept-rate
-limit exceeded — bounced at TCP accept before any TLS work).
+limit exceeded — bounced at TCP accept before any TLS work). Two kernel-level
+failures are counted apart, as *drops* rather than sheds, because they don't
+end in a clean RST the client can act on: `drop·acceptq` (the accept queue
+overflowed — a silent drop the client only discovers on a SYN retransmit) and
+`emfile` (the file-descriptor ceiling was hit, so `accept()` failed and the
+connection withered on the client's deadline). The lesson both reinforce: a
+storm that the application would shed cheaply at the door instead hits a
+*kernel* wall, where the failure is slower and dirtier.
 
 Faithfully modeled wasted work: the fabric completes handshakes for clients
 that already gave up, downstreams finish responses the fabric already timed
@@ -246,3 +255,14 @@ to stay animatable while preserving the ratios that drive the physics:
   has a shorter effective deadline and is more likely to time out."
 - HAProxy `maxsslconn`/`maxsslrate` and tarpit — the production analogs of the
   handshake cap and TLS error pacing.
+- Linux kernel networking (`man tcp`, `net.core.somaxconn`,
+  `net.ipv4.tcp_abort_on_overflow`) and the "two queues" model (SYN queue +
+  accept queue) — the kernel accept backlog ahead of the application and its
+  silent-drop / RST overflow behavior. `somaxconn` defaults to 4096 (128 before
+  kernel 5.4); overflow drops the completed connection unless
+  `tcp_abort_on_overflow` is set, which sends an RST instead.
+- `RLIMIT_NOFILE` / `fs.nr_open` (`man getrlimit`, `man accept` → EMFILE) — the
+  per-process file-descriptor ceiling (soft default 1024, bounded by
+  `fs.nr_open` = 1,048,576); every socket costs a descriptor and `accept()`
+  returns EMFILE at the ceiling. Demo numbers are scaled down (the demo's pools
+  cap live sockets near 100), keeping the dynamics, not the absolute limits.

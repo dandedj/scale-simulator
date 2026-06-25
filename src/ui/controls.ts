@@ -295,6 +295,22 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
         },
       },
       {
+        label: 'Accept queue (somaxconn)', min: 16, max: 1024, step: 16, get: (c) => c.fabric.acceptQueueDepth, set: (c, v) => (c.fabric.acceptQueueDepth = v),
+        info: {
+          what: 'Depth of the kernel accept queue (the listen backlog, min(listen backlog, net.core.somaxconn)).',
+          how: 'Completed TCP handshakes wait here for the fabric to accept() them — the kernel queue ahead of, and separate from, the TLS permit wait. The fabric drains it at ~1000/s at idle, but that rate is divided by the CPU slowdown, so a saturated fabric (workers busy in TLS crypto) drains slowly and the queue fills. When full, a new connection overflows. No effect unless the Accept queue toggle is on. Linux defaults somaxconn to 4096 (128 before kernel 5.4); the 32 here is demo-scaled — the demo’s small pools cap accept-queue pile-up at ~57 under a storm and ~1 when healthy, so 32 sits cleanly between them.',
+          expect: 'A deeper queue absorbs longer accept stalls before dropping, but every queued connection is already burning the client’s deadline. A shallow queue overflows sooner. Either way, raising it does not add accept throughput — under a storm it just defers the drop.',
+        },
+      },
+      {
+        label: 'File-descriptor limit', min: 32, max: 2048, step: 16, get: (c) => c.fabric.maxFileDescriptors, set: (c, v) => (c.fabric.maxFileDescriptors = v),
+        info: {
+          what: 'File-descriptor ceiling (RLIMIT_NOFILE): the cap on live sockets the fabric process can hold.',
+          how: 'Every live socket costs one descriptor — client-facing connections plus the fabric→downstream pool, one shared budget. At the ceiling both accept() and an outbound connect() fail with EMFILE: the connection cannot be taken (it withers on the client’s deadline, no clean RST) and new pool sockets cannot open. No effect unless the File-descriptor ceiling toggle is on. The real soft default is 1024; at this demo scale the fabric holds ~70 sockets when healthy and ~98 under a raised-limit storm, so 80 sits between the two.',
+          expect: 'Set it above the working socket count and it never bites. Raise the connection limit (or pool sizes) past it and EMFILE caps you anyway — proof that the FD ceiling, not your connection limit, is the real wall. The EMFILE failure is dirtier than a shed: clients time out instead of getting a fast RST.',
+        },
+      },
+      {
         label: 'Representative QPS', min: 10_000, max: 1_000_000, step: 10_000, get: (c) => c.fabric.lockRepThroughputQps, set: (c, v) => (c.fabric.lockRepThroughputQps = v), format: (v) => (v >= 1e6 ? `${(v / 1e6).toFixed(2)}M/s` : `${Math.round(v / 1000)}k/s`),
         info: {
           what: 'The real per-server request throughput this demo stands in for — only used to scale lock contention (see Locks below).',
@@ -318,6 +334,30 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
           what: 'Whether the fabric sheds new connections by rate at TCP accept, before any TLS work.',
           how: 'On → a per-server token bucket (accept rate limit + burst above) bounces new connections with an RST once their rate exceeds the limit, before the connection-limit check and before any handshake. Off → every connection reaches the connection-limit and TLS-permit checks as usual.',
           expect: 'Unlike the static connection limit (a cap on concurrent connections) or the TLS permit cap (a cap on concurrent handshakes), this caps the rate of new connections — throttling handshake demand at the source. It is the cheapest rejection and the most direct defense against a connection storm. Turn it on over Storm-prone and watch the collapse not happen.',
+        },
+      },
+      {
+        label: 'Accept queue (kernel backlog)', get: (c) => c.fabric.acceptQueueEnabled, set: (c, v) => (c.fabric.acceptQueueEnabled = v),
+        info: {
+          what: 'Whether the kernel TCP accept queue (the listen backlog) is modeled ahead of the application.',
+          how: 'On → completed TCP handshakes queue (up to the depth above) for the fabric to accept(), and the drain rate falls as the CPU saturates; overflow drops or RSTs the connection. Off → connections are admitted the instant the SYN arrives, with no kernel queue. This is the kernel layer beneath the app — distinct from the TLS permit wait, which still applies after accept().',
+          expect: 'On, a storm that pegs the CPU starves the accept loop, so the queue fills and overflows — a wall beneath the connection limit and TLS permits. With abort-on-overflow off, overflow is a silent drop and clients hang until their deadline; the queue depth and the slowdown decide when it tips.',
+        },
+      },
+      {
+        label: 'Abort on overflow (RST)', get: (c) => c.fabric.acceptQueueAbortOnOverflow, set: (c, v) => (c.fabric.acceptQueueAbortOnOverflow = v),
+        info: {
+          what: 'Accept-queue overflow behavior (net.ipv4.tcp_abort_on_overflow).',
+          how: 'On → an overflowing connection gets an immediate RST, so the client learns one hop later and retries fast. Off (the Linux default) → the connection is dropped silently and the client must wait out a TCP SYN retransmit (~1s), usually longer than its own deadline. No effect unless the Accept queue toggle is on.',
+          expect: 'On converts a slow, invisible stall into a fast clean failure — the same “shed cheaply beats drop silently” lesson as accept-rate shedding, one layer down. Off, overflow drops pile up as connect timeouts and feed the retry loop.',
+        },
+      },
+      {
+        label: 'File-descriptor ceiling', get: (c) => c.fabric.fdLimitEnabled, set: (c, v) => (c.fabric.fdLimitEnabled = v),
+        info: {
+          what: 'Whether a file-descriptor ceiling (RLIMIT_NOFILE) caps the fabric’s live sockets.',
+          how: 'On → client-facing connections plus the downstream pool draw from one descriptor budget (the limit above); at the ceiling accept() returns EMFILE and the connection cannot be taken. Off → sockets are unbounded by FDs (only the connection limit applies).',
+          expect: 'On over a raised-limit preset, EMFILE caps connections below the connection limit — the FD ceiling, not your tuned limit, becomes the wall, and it fails by client timeout rather than a clean RST. The classic cost of raising one limit without raising the kernel limit underneath it.',
         },
       },
     ],
@@ -417,6 +457,8 @@ const TOTAL_METRICS: Array<{ key: string; color: string; value(t: Totals): strin
   { key: 'error', color: 'var(--err)', value: (t) => fmtCount(t.errors) },
   { key: 'shed·tls', color: 'var(--warn)', value: (t) => fmtCount(t.shedTls) },
   { key: 'shed·conn', color: 'var(--warn)', value: (t) => fmtCount(t.shedConnLimit) },
+  { key: 'drop·acceptq', color: 'var(--warn)', value: (t) => fmtCount(t.acceptQueueDrops) },
+  { key: 'emfile', color: 'var(--bad)', value: (t) => fmtCount(t.emfileDrops) },
   { key: 'retries', color: 'var(--retry)', value: (t) => fmtCount(t.retries) },
   { key: 'resumed TLS', color: 'var(--tls)', value: (t) => fmtCount(t.resumedHandshakes) },
   { key: 'wasted TLS', color: 'var(--bad)', value: (t) => fmtCount(t.wastedHandshakes) },

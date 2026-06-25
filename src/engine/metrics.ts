@@ -22,6 +22,8 @@ export class MetricsCollector {
     shedTls: 0,
     shedConnLimit: 0,
     shedConnRate: 0,
+    acceptQueueDrops: 0,
+    emfileDrops: 0,
     errors: 0,
     rejected: 0,
     retries: 0,
@@ -105,6 +107,14 @@ export class MetricsCollector {
     this.current.shedConnRate++;
     this.totals.shedConnRate++;
   }
+  countAcceptQueueDrop(): void {
+    this.current.acceptQueueDrops++;
+    this.totals.acceptQueueDrops++;
+  }
+  countEmfile(): void {
+    this.current.emfileDrops++;
+    this.totals.emfileDrops++;
+  }
   countError(): void {
     this.current.errors++;
     this.totals.errors++;
@@ -163,6 +173,8 @@ export class MetricsCollector {
       shedTls: 0,
       shedConnLimit: 0,
       shedConnRate: 0,
+      acceptQueueDrops: 0,
+      emfileDrops: 0,
       errors: 0,
       rejected: 0,
       retries: 0,

@@ -118,6 +118,36 @@ export interface FabricConfig {
   connRateBurst: number;
 
   /**
+   * TCP accept queue (the kernel listen backlog, sized by min(listen backlog,
+   * net.core.somaxconn)). Connections whose TCP 3-way handshake has completed
+   * wait here for the fabric to call accept() — the KERNEL queue ahead of the
+   * application, distinct from and before the TLS permit wait. Off by default:
+   * the model admits on SYN arrival as before. On, the queue drains at a rate
+   * that falls as the CPU saturates (the worker loop is starved while it grinds
+   * TLS crypto), so a storm backs it up until it overflows.
+   */
+  acceptQueueEnabled: boolean;
+  /** Accept-queue depth (somaxconn). When full, newly completed connections overflow. */
+  acceptQueueDepth: number;
+  /**
+   * Overflow behavior (net.ipv4.tcp_abort_on_overflow). false (the Linux
+   * default): an overflowing connection is dropped silently and the client must
+   * wait out a TCP SYN retransmit (~1s) — usually past its own deadline. true:
+   * the fabric sends an RST at once, so the client fails fast and retries.
+   */
+  acceptQueueAbortOnOverflow: boolean;
+
+  /**
+   * File-descriptor ceiling (RLIMIT_NOFILE). Every live socket — client-facing
+   * connections plus the downstream pool — costs one descriptor. At the ceiling
+   * accept() fails with EMFILE: the connection cannot be taken, so it withers on
+   * the client's deadline (a dirtier failure than a clean RST shed). Raising the
+   * connection limit without raising this just relocates the wall. Off by default.
+   */
+  fdLimitEnabled: boolean;
+  maxFileDescriptors: number;
+
+  /**
    * Locks: serialization points (mutexes, Arc<Mutex<…>>) the fabric takes
    * around shared state. Each is a single-server FIFO with a hold time; under
    * contention, waiting on the lock — not the CPU — becomes the bottleneck.
@@ -225,6 +255,14 @@ export interface FabricView {
   cpuUtilization: number;
   /** Effective slowdown multiplier applied to all service times. */
   slowdownFactor: number;
+  /** Completed connections waiting in the kernel accept queue (0 when disabled). */
+  acceptQueueLen: number;
+  acceptQueueDepth: number;
+  acceptQueueEnabled: boolean;
+  /** Live sockets held against the FD ceiling (client-facing conns + downstream pool). */
+  fdInUse: number;
+  fdLimit: number;
+  fdLimitEnabled: boolean;
 }
 
 /** Live contention state for one enabled lock (renderer-facing). */
@@ -256,6 +294,10 @@ export interface MetricsBucket {
   shedConnLimit: number;
   /** Connections shed at TCP accept because the new-connection rate limit was exceeded (RST). */
   shedConnRate: number;
+  /** Completed connections dropped at the kernel accept queue because it was full. */
+  acceptQueueDrops: number;
+  /** accept() calls that failed with EMFILE (file-descriptor ceiling reached). */
+  emfileDrops: number;
   errors: number;
   rejected: number;
   retries: number;

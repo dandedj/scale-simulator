@@ -298,7 +298,10 @@ export class Renderer {
     ctx.fillRect(gx, f.y + 30, gw * connRatio, 7);
     ctx.font = '500 10px "IBM Plex Mono", monospace';
     ctx.fillStyle = SURFACE.textDim;
-    ctx.fillText(`conns ${view.connectionCount}/${view.maxConnections}`, gx, f.y + 50);
+    let connsLabel = `conns ${view.connectionCount}/${view.maxConnections}`;
+    if (view.acceptQueueEnabled) connsLabel += ` · aq ${view.acceptQueueLen}/${view.acceptQueueDepth}`;
+    ctx.fillStyle = view.acceptQueueEnabled && view.acceptQueueLen >= view.acceptQueueDepth ? SEMANTIC.shed : SURFACE.textDim;
+    ctx.fillText(connsLabel, gx, f.y + 50);
     if (view.permitWaiting > 0) {
       ctx.fillStyle = SEMANTIC.shed;
       ctx.textAlign = 'right';
@@ -371,15 +374,20 @@ export class Renderer {
 
     this.drawLocks(sim, f);
 
-    // Footer: in-flight, lifetime shed counters, pacing chip.
+    // Footer: in-flight (+ FD usage), lifetime shed/drop counters, pacing chip.
     ctx.font = '500 10px "IBM Plex Mono", monospace';
     ctx.fillStyle = SURFACE.textDim;
-    ctx.fillText(`in-flight ${view.inFlight}`, f.x + 12, f.y + f.h - 12);
+    let footLabel = `in-flight ${view.inFlight}`;
+    if (view.fdLimitEnabled) footLabel += ` · fd ${view.fdInUse}/${view.fdLimit}`;
+    ctx.fillStyle = view.fdLimitEnabled && view.fdInUse >= view.fdLimit ? SEMANTIC.cpuBad : SURFACE.textDim;
+    ctx.fillText(footLabel, f.x + 12, f.y + f.h - 12);
     const t = sim.metrics.totals;
-    if (t.shedTls + t.shedConnLimit + t.shedConnRate > 0) {
+    if (t.shedTls + t.shedConnLimit + t.shedConnRate + t.acceptQueueDrops + t.emfileDrops > 0) {
       ctx.fillStyle = SEMANTIC.shed;
       const rate = sim.cfg.fabric.connRateShedEnabled ? ` · rate ${t.shedConnRate}` : '';
-      ctx.fillText(`shed tls ${t.shedTls} · conn ${t.shedConnLimit}${rate}`, f.x + 12, f.y + f.h - 25);
+      const aq = t.acceptQueueDrops > 0 ? ` · aq ${t.acceptQueueDrops}` : '';
+      const emf = t.emfileDrops > 0 ? ` · emfile ${t.emfileDrops}` : '';
+      ctx.fillText(`shed tls ${t.shedTls} · conn ${t.shedConnLimit}${rate}${aq}${emf}`, f.x + 12, f.y + f.h - 25);
     }
     const pacingOn = sim.cfg.fabric.tlsErrorPacingEnabled;
     const rateOn = sim.cfg.fabric.connRateShedEnabled;

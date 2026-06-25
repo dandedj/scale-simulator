@@ -49,6 +49,19 @@ function base(): SimulationConfig {
       connRateShedEnabled: false,
       connRateLimitPerSec: 40,
       connRateBurst: 30,
+      // Kernel limits, modeled off by default so every preset is behaviorally
+      // unchanged. The values are demo-scaled the way the accept-rate limiter is
+      // (the demo's pool sizes cap live sockets at ~70–98, far below real Linux
+      // numbers): the real somaxconn is 4096 (128 before kernel 5.4) and the
+      // RLIMIT_NOFILE soft default is 1024, but here a depth of 32 sits between
+      // healthy accept-queue occupancy (~1) and a storm's pile-up (~57), and an
+      // FD ceiling of 80 sits between healthy live sockets (~70) and a storm's
+      // (~98). So either one bites only when enabled over a raised-limit storm.
+      acceptQueueEnabled: false,
+      acceptQueueDepth: 32,
+      acceptQueueAbortOnOverflow: false,
+      fdLimitEnabled: false,
+      maxFileDescriptors: 80,
       lockRepThroughputQps: 50_000,
       // Example locks, disabled by default (no effect until enabled): the
       // Arc<Mutex<usize>> max-connections counter, a per-request router lock,
