@@ -44,7 +44,11 @@ function base(): SimulationConfig {
       processingMs: 4,
       cpuCapacity: 3000,
       tlsCpuCost: 60,
-      tlsErrorPacingEnabled: true,
+      // TLS error pacing is off by default: pacing de-synchronizes reconnect
+      // waves after a TLS shed, but at this demo scale it has little effect on
+      // the storm, so it stays an opt-in knob rather than a preset protection.
+      // The delay is the value used when the toggle is turned on.
+      tlsErrorPacingEnabled: false,
       tlsErrorPacingDelayMs: 2,
       connRateShedEnabled: false,
       connRateLimitPerSec: 40,
@@ -102,7 +106,7 @@ export const PRESETS: Preset[] = [
     id: 'storm-prone',
     name: 'Storm-prone',
     description:
-      'Raised limits: 16x the TLS permits, the permit wait maxed out, 3 un-jittered retries, pacing off. Stable at baseline — try a traffic pulse and watch what happens after it ends.',
+      'Raised limits: 16x the TLS permits, the permit wait maxed out, 3 un-jittered retries. Stable at baseline — try a traffic pulse and watch what happens after it ends.',
     config: (() => {
       const c = base();
       c.clients.clientTimeoutMs = 250;
@@ -112,7 +116,6 @@ export const PRESETS: Preset[] = [
       c.fabric.maxConnections = 300;
       c.fabric.tlsHandshakeConcurrency = 64;
       c.fabric.tlsPermitWaitMs = 5;
-      c.fabric.tlsErrorPacingEnabled = false;
       return c;
     })(),
   },
@@ -147,7 +150,6 @@ export const PRESETS: Preset[] = [
       c.fabric.maxConnections = 500;
       c.fabric.tlsHandshakeConcurrency = 128;
       c.fabric.tlsPermitWaitMs = 5;
-      c.fabric.tlsErrorPacingEnabled = false;
       c.downstreamPool.poolSizePerDownstream = 12;
       c.downstreamPool.requestTimeoutMs = 180;
       c.downstreams.responseTimeMedianMs = 140;
