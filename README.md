@@ -218,6 +218,10 @@ beyond noise," not precise p-values.
   shed·tls) vs the permit count, fabric CPU demand vs the capacity line,
   lock contention vs saturation, connections vs limit (+ shed·conn and
   downstream queue depth), and amplification.
+- **◈ SYSTEM** (header): the System Overview dialog — the full connection and
+  request pipeline in the order the engine applies each gate, with live
+  setting values, the shared-CPU coupling, the shed/drop/fail taxonomy, and
+  the explicit modeling assumptions. **? LEGEND** explains every glyph.
 
 ## Extending it
 

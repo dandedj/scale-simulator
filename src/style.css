@@ -1152,6 +1152,326 @@ input[type='range']::-moz-range-thumb {
   font-weight: 600;
 }
 
+/* ---------- System overview dialog ---------- */
+
+#overview-dialog {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0;
+  max-width: 1180px;
+  width: calc(100vw - 64px);
+  max-height: calc(100vh - 64px);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
+}
+
+#overview-dialog::backdrop {
+  background: rgba(6, 7, 9, 0.7);
+  backdrop-filter: blur(2px);
+}
+
+.ov-body {
+  overflow-y: auto;
+  max-height: calc(100vh - 128px);
+  padding: 14px 20px 22px;
+}
+
+.ov-intro {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  margin: 0 0 16px;
+}
+
+.ov-intro b {
+  color: var(--text);
+}
+
+.ov-flow {
+  max-width: 780px;
+  margin: 0 auto;
+}
+
+.ov-lane {
+  border-left: 3px solid var(--border);
+  padding: 2px 0 4px 13px;
+}
+
+.ov-lane-head {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--text);
+  margin: 5px 0 3px;
+}
+
+.ov-lane-blurb {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin: 0 0 6px;
+}
+
+.ov-lane-net {
+  border-left-color: var(--text-faint);
+}
+.ov-lane-kernel {
+  border-left-color: var(--info);
+}
+.ov-lane-admit {
+  border-left-color: var(--warn);
+}
+.ov-lane-tls {
+  border-left-color: var(--tls);
+}
+.ov-lane-req {
+  border-left-color: var(--ok);
+}
+
+.ov-arrow {
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1;
+  margin: 1px 0;
+}
+
+.ov-gate {
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+  margin: 6px 0;
+}
+
+.ov-gate-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ov-n {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--canvas);
+  background: var(--text-dim);
+  border-radius: 50%;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ov-title {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.ov-chip {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.ov-on {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.ov-off {
+  color: var(--text-faint);
+}
+
+.ov-val {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--info);
+}
+
+.ov-gate-how {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin-top: 5px;
+}
+
+.ov-outcome {
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  margin-top: 6px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+}
+
+.ov-out-tag {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  margin-right: 6px;
+  border: 1px solid currentColor;
+}
+
+.ov-rst,
+.ov-drop {
+  border-left-color: var(--warn);
+}
+.ov-rst .ov-out-tag,
+.ov-drop .ov-out-tag {
+  color: var(--warn);
+}
+.ov-emfile {
+  border-left-color: var(--bad);
+}
+.ov-emfile .ov-out-tag {
+  color: var(--bad);
+}
+.ov-wait {
+  border-left-color: var(--retry);
+}
+.ov-wait .ov-out-tag {
+  color: var(--retry);
+}
+.ov-pass {
+  border-left-color: var(--ok);
+}
+.ov-pass .ov-out-tag {
+  color: var(--ok);
+}
+
+.ov-deadline {
+  border: 1px dashed var(--bad);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-top: 4px;
+  background: rgba(255, 110, 64, 0.05);
+}
+
+.ov-deadline .ov-lane-head {
+  color: var(--bad);
+}
+
+/* Side panels below the pipeline */
+.ov-panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  margin-top: 22px;
+}
+
+.ov-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px 12px;
+  background: var(--canvas);
+}
+
+.ov-panel h3 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--info);
+  margin: 2px 0 8px;
+}
+
+.ov-panel p {
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.ov-panel-sub {
+  margin-bottom: 8px !important;
+  font-style: italic;
+}
+
+.ov-engine {
+  grid-column: 1 / -1;
+  background: var(--panel-raised);
+  border-color: var(--warn);
+}
+
+.ov-engine h3 {
+  color: var(--warn);
+}
+
+.ov-fail {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.ov-fail-row {
+  display: grid;
+  grid-template-columns: 88px 70px 1fr;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.ov-tag {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.ov-tag.ov-rst,
+.ov-tag.ov-drop,
+.ov-tag.ov-reject {
+  color: var(--warn);
+}
+.ov-tag.ov-emfile,
+.ov-tag.ov-timeout {
+  color: var(--bad);
+}
+.ov-tag.ov-error {
+  color: var(--err);
+}
+
+.ov-fail-level {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-faint);
+}
+
+.ov-fail-cause {
+  color: var(--text-dim);
+}
+
+.ov-assume {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.ov-assume li {
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
 /* ---------- Locks (contention) ---------- */
 .locks-intro,
 .locks-empty {

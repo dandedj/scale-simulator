@@ -15,6 +15,7 @@ import type { Simulation } from '../engine/simulation';
 import type { LockConfig, LockSite, SimulationConfig } from '../engine/types';
 import { compareMeans, compareQuantiles, compareSuccessRates, type ABQuantile } from '../stats';
 import { Legend } from './legend';
+import { SystemOverview } from './overview';
 
 const LOCK_SITES: LockSite[] = ['accept', 'request', 'handshake'];
 /** Monotonic id source for user-added locks (config-only; never touches engine RNG). */
@@ -559,6 +560,7 @@ export class ControlPanel {
     this.compareBtn.addEventListener('click', () => this.hooks.setCompare(!this.hooks.isCompare()));
     wrap.appendChild(this.compareBtn);
 
+    new SystemOverview(wrap, () => this.cfgFor('sim'));
     new Legend(wrap);
 
     this.header.appendChild(wrap);
