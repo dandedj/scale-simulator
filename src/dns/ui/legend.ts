@@ -36,7 +36,19 @@ function band(color: string): string {
 function pinnedTile(): string {
   return svg(
     `<rect x="3" y="4" width="${S - 6}" height="${S - 8}" rx="3" fill="${alpha(SEMANTIC.success, 0.85)}"/>` +
-      `<rect x="3" y="4" width="7" height="3" fill="rgba(0,0,0,0.55)"/>`,
+      `<text x="6" y="15" font-size="9">📌</text>`,
+  );
+}
+
+function dotsRow(): string {
+  const cols = [SEMANTIC.success, SEMANTIC.success, SEMANTIC.error, SEMANTIC.success];
+  return svg(cols.map((col, i) => `<circle cx="${4 + i * 5}" cy="${c}" r="2.2" fill="${col}"/>`).join(''));
+}
+
+function ttlFlash(): string {
+  return svg(
+    `<rect x="6" y="7" width="${S - 12}" height="${S - 14}" rx="2" fill="${alpha(SEMANTIC.success, 0.3)}"/>` +
+      `<rect x="2.5" y="3.5" width="${S - 5}" height="${S - 7}" rx="4" fill="none" stroke="${SEMANTIC.tlsPulse}" stroke-width="1.5"/>`,
   );
 }
 
@@ -72,11 +84,12 @@ const SECTIONS: Section[] = [
   {
     title: 'Clients & flow',
     entries: [
-      { swatch: tile(alpha(SEMANTIC.success, 0.85), SEMANTIC.success), label: 'Cohort — fill = availability', detail: 'Each tile is a population sharing one cached resolution; fill = the availability it experiences (served ÷ offered). Clients are NOT health-checked — only servers are — so this is an outcome, not a status. Green ≈ 100%.' },
-      { swatch: tile(alpha(SEMANTIC.timeout, 0.85), SEMANTIC.timeout), label: 'Cohort — losing', detail: 'Amber/red fill: the cohort’s cached IPs are dead or saturated and it can’t place all its traffic.' },
-      { swatch: tile(alpha(SEMANTIC.success, 0.6), SEMANTIC.error, 3), label: 'Stale ring (pointing at a dead IP)', detail: 'Yellow ring: this cohort still has a removed/dead IP cached and keeps aiming traffic at it (wasted connects), even if RST re-picks keep it served. Lights up after a kill until the cohort re-resolves — pinned cohorts keep it forever.' },
-      { swatch: pinnedTile(), label: 'Pinned cohort', detail: 'A notch marks a connection-/JVM-pinned cohort that ignores TTL — it can only fail over via an RST re-pick, never via DNS.' },
-      { swatch: band(SEMANTIC.success), label: 'TRAFFIC pipe', detail: 'The labeled pipe in the gap is the traffic clients send to the servers (arrow points to the fleet). Its colored layers are the outcome split — served (green), shed/RST (amber), stale→dead IP (yellow), unavailable (red).' },
+      { swatch: tile(alpha(SEMANTIC.success, 0.2), SEMANTIC.success), label: 'Cohort tile', detail: 'Each tile is a population sharing one cached resolution. It shows the cohort id, its availability % (served ÷ offered, colored), its offered rate, and a TTL countdown (↻ Ns to its next re-resolve). Clients are NOT health-checked — availability is an outcome, not a status. Hover for full detail.' },
+      { swatch: dotsRow(), label: 'Connection pool dots', detail: 'Top-right of a cohort tile: one dot per cached IP — the servers that cohort is connected to — colored by each server’s health (green up, amber draining, red dead). Hover lists the full pool.' },
+      { swatch: ttlFlash(), label: 'TTL re-resolve flash', detail: 'A cyan ring pulses on a cohort each time its TTL expires and it re-resolves DNS — so you can see lookups rippling across the population.' },
+      { swatch: tile(alpha(SEMANTIC.success, 0.2), SEMANTIC.error, 3), label: 'Stale ring + link', detail: 'Yellow ring: the cohort still caches a removed/dead IP and keeps aiming at it (wasted connects), even if RST re-picks keep it served. A red line runs from the cohort to that dead server’s tile — showing exactly which clients are stuck on it until they re-resolve (pinned cohorts never do).' },
+      { swatch: pinnedTile(), label: 'Pinned cohort', detail: 'A 📌 marks a connection-/JVM-pinned cohort that ignores TTL — it can only fail over via an RST re-pick, never via DNS.' },
+      { swatch: band(SEMANTIC.success), label: 'TRAFFIC pipe', detail: 'The labeled, flowing pipe in the gap is the traffic clients send to the servers (arrow points to the fleet). Its colored layers are the outcome split — served (green), shed/RST (amber), stale→dead IP (yellow), unavailable (red).' },
     ],
   },
   {

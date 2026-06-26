@@ -207,8 +207,12 @@ export interface DnsClientView {
   id: number;
   offeredRate: number;
   cachedSet: number[];
+  /** Cached IPs that are currently down (dead) — the cohort is still aiming at them. */
+  staleIds: number[];
   pinned: boolean;
   msUntilReResolve: number;
+  /** Sim time of this cohort's last re-resolution (for the lookup flash). */
+  lastResolvedAt: number;
   servedRate: number;
   shedRate: number;
   staleRate: number;

@@ -83,6 +83,8 @@ class ClientCohort {
   ttlMult: number;
   cachedSet: number[] = [];
   reResolveEvent: ScheduledEvent | null = null;
+  /** Sim time of the last re-resolution (drives the lookup flash); negative = never. */
+  lastResolvedAt = -1e9;
   // Runtime, refreshed each rebalance:
   offeredRate = 0;
   servedRate = 0;
@@ -489,6 +491,7 @@ export class DnsSimulation {
   /** A cohort re-resolves: copy the current record set, re-arm its TTL. */
   private resolveCohort(c: ClientCohort): void {
     c.cachedSet = this.pickRecords();
+    c.lastResolvedAt = this.now;
     this.metrics.countReResolve();
     const d = this.cfg.dns;
     const ttl = d.ttlMs * c.ttlMult;
@@ -752,12 +755,15 @@ export class DnsSimulation {
   }
 
   clientViews(): DnsClientView[] {
+    const down = new Set(this.servers.filter((s) => s.state === 'down').map((s) => s.id));
     return this.cohorts.map((c) => ({
       id: c.id,
       offeredRate: c.offeredRate,
       cachedSet: c.cachedSet.slice(),
+      staleIds: c.cachedSet.filter((id) => down.has(id)),
       pinned: c.pinned,
       msUntilReResolve: c.reResolveEvent ? Math.max(0, c.reResolveEvent.time - this.now) : 0,
+      lastResolvedAt: c.lastResolvedAt,
       servedRate: c.servedRate,
       shedRate: 0,
       staleRate: c.staleRate,

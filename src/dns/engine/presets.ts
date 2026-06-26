@@ -21,7 +21,7 @@ export function baseConfig(): DnsSimulationConfig {
     seed: 1337,
     slaTarget: 0.99,
     clients: {
-      cohorts: 30,
+      cohorts: 12,
       heterogeneity: 0.2,
       pinnedFraction: 0.15,
       rstReResolve: false,
