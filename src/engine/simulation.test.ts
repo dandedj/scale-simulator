@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { presetById, cloneConfig } from './presets';
+import { baseConfig, presetById, cloneConfig } from './presets';
 import { Simulation } from './simulation';
 import type { SimulationConfig } from './types';
 
@@ -65,73 +65,118 @@ function newSim(presetId: string, mutate?: (cfg: SimulationConfig) => void): Sim
   return new Simulation(cfg);
 }
 
-describe('healthy preset', () => {
-  it('stays healthy over 60s: >95% success, negligible churn', () => {
-    const sim = newSim('healthy');
-    run(sim, 60_000);
-    const s = statsBetween(sim, 5_000, 60_000);
-    expect(s.successRate).toBeGreaterThan(0.95);
-    expect(s.timeouts / s.arrivals).toBeLessThan(0.02);
-    expect(s.shedTls + s.shedConnLimit).toBe(0);
-    // Steady-state handshakes only replace the ~1% of conns lost to timeouts.
-    expect(s.handshakesStarted / s.arrivals).toBeLessThan(0.05);
-  });
+/**
+ * A simulation on the plain baseline (gentle clients, modest fabric, every
+ * optional protection off). The mechanism tests build on this rather than a
+ * scenario so they exercise one feature against a calm, known substrate.
+ */
+function baseSim(mutate?: (cfg: SimulationConfig) => void): Simulation {
+  const cfg = baseConfig();
+  if (mutate) mutate(cfg);
+  return new Simulation(cfg);
+}
 
-  it('absorbs a 3x pulse and recovers', () => {
-    const sim = newSim('healthy');
+// The scenarios share one fixed (aggressive) client profile and vary ONLY the
+// fabric, so each test below isolates how that fabric configuration responds to
+// the same traffic and the same 3x pulse. These are the preset-tuning harness:
+// if a scenario stops demonstrating its lesson, its test fails.
+
+describe('scenario: Wide open (unbounded)', () => {
+  it('is stable at baseline but a pulse ignites a persistent storm', () => {
+    const sim = newSim('unbounded');
     run(sim, 15_000);
-    sim.triggerPulse(3, 5_000);
-    run(sim, 5_000); // pulse window
-    run(sim, 10_000); // recovery window
-    const recovery = statsBetween(sim, 25_000, 30_000);
-    expect(recovery.successRate).toBeGreaterThan(0.9);
-  });
-});
-
-describe('storm-prone preset (metastability)', () => {
-  it('is stable-looking at baseline', () => {
-    const sim = newSim('storm-prone');
-    run(sim, 20_000);
-    const s = statsBetween(sim, 5_000, 20_000);
-    expect(s.successRate).toBeGreaterThan(0.85);
-  });
-
-  it('a pulse ignites a storm that persists after the trigger is gone', () => {
-    const sim = newSim('storm-prone');
-    run(sim, 15_000);
+    expect(statsBetween(sim, 5_000, 15_000).successRate).toBeGreaterThan(0.85);
     sim.triggerPulse(3, 5_000);
     run(sim, 5_000); // pulse: 15s..20s
     run(sim, 25_000); // long after the pulse: 20s..45s
-    // The metastable signature: organic load is back to baseline but the
-    // sustaining effect (retries + handshake CPU) keeps goodput collapsed.
-    // The single client timeout traps connection rebuilds too, so at storm
-    // CPU no handshake finishes inside the deadline — goodput goes to a
-    // hard zero, not a trickle.
+    // Metastable collapse: organic load is back to baseline but the retry +
+    // handshake-CPU feedback loop keeps goodput at a hard zero (the single
+    // client deadline traps connection rebuilds, so none finish at storm CPU).
     const after = statsBetween(sim, 30_000, 45_000);
     expect(after.successRate).toBeLessThan(0.05);
     expect(after.handshakesStarted).toBeGreaterThan(after.arrivals * 0.3);
   });
 });
 
-describe('protected preset', () => {
-  it('same aggressive clients + same pulse, but recovers quickly', () => {
-    const sim = newSim('protected');
+describe('scenario: Shed early (early-shed)', () => {
+  it('sheds the flood at the door and recovers after the pulse', () => {
+    const sim = newSim('early-shed');
     run(sim, 15_000);
     sim.triggerPulse(3, 5_000);
     run(sim, 5_000); // pulse: 15s..20s
     run(sim, 10_000); // recovery: 20s..30s
-    const recovery = statsBetween(sim, 25_000, 30_000);
-    expect(recovery.successRate).toBeGreaterThan(0.85);
-    // During the pulse the fabric shed connection attempts (RST) rather
-    // than letting handshake demand melt the CPU.
+    // It rejected connection attempts (RST) instead of melting the CPU...
     const pulse = statsBetween(sim, 15_000, 20_000);
     expect(pulse.shedTls + pulse.shedConnLimit).toBeGreaterThan(0);
+    // ...and goodput comes back — the same clients/pulse that storm Wide open.
+    expect(statsBetween(sim, 25_000, 30_000).successRate).toBeGreaterThan(0.85);
+  });
+});
+
+describe('scenario: Rate limited (rate-limited)', () => {
+  it('caps new connections at accept, so the flood that storms Wide open does not', () => {
+    const sim = newSim('rate-limited');
+    run(sim, 15_000);
+    sim.triggerPulse(3, 5_000);
+    run(sim, 30_000);
+    expect(sim.metrics.totals.shedConnRate).toBeGreaterThan(0); // the limiter fired
+    expect(statsBetween(sim, 30_000, 45_000).successRate).toBeGreaterThan(0.85); // goodput survives
+  });
+});
+
+describe('scenario: Kernel limited (kernel-bound)', () => {
+  it('drops connections at the kernel (accept queue / FD ceiling) under a pulse', () => {
+    const sim = newSim('kernel-bound');
+    run(sim, 15_000);
+    sim.triggerPulse(3, 5_000);
+    run(sim, 15_000);
+    const t = sim.metrics.totals;
+    expect(t.acceptQueueDrops + t.emfileDrops).toBeGreaterThan(0);
+  });
+});
+
+describe('scenario: Lock contention (lock-bound)', () => {
+  it('saturates the request lock and inflates latency while the CPU stays idle', () => {
+    // A steady-state bottleneck (no pulse needed): the request lock is past its
+    // ceiling at baseline traffic, so it adds real wait — yet the CPU is idle,
+    // proof the wall is serialization, not compute.
+    const sim = newSim('lock-bound');
+    const STEP = 2;
+    let cpuSum = 0;
+    let samples = 0;
+    for (let t = 0; t < 30_000; t += STEP) {
+      sim.step(STEP);
+      if (t >= 10_000) {
+        cpuSum += Math.min(2, sim.cpu.utilization());
+        samples++;
+      }
+    }
+    let lockPeak = 0;
+    let waitPeak = 0;
+    for (const b of sim.metrics.buckets) {
+      if (b.time < 10_000) continue;
+      lockPeak = Math.max(lockPeak, b.lockUtilization);
+      waitPeak = Math.max(waitPeak, b.lockWaitMs);
+    }
+    expect(lockPeak).toBeGreaterThan(1); // the lock is saturated...
+    expect(waitPeak).toBeGreaterThan(10); // ...adding real latency...
+    expect(cpuSum / samples).toBeLessThan(0.5); // ...while compute sits idle
+  });
+});
+
+describe('scenario: Well tuned (well-tuned)', () => {
+  it('absorbs the pulse with little collapse and recovers fast', () => {
+    const sim = newSim('well-tuned');
+    run(sim, 15_000);
+    sim.triggerPulse(3, 5_000);
+    run(sim, 10_000); // recovery: 20s..30s
+    expect(statsBetween(sim, 25_000, 30_000).successRate).toBeGreaterThan(0.85);
   });
 });
 
 describe('client circuit breaker', () => {
   it('trips on a failing fabric path and recovers after it heals', () => {
-    const sim = newSim('healthy', (cfg) => {
+    const sim = baseSim((cfg) => {
       cfg.clients.circuitBreakerEnabled = true;
       cfg.downstreams.errorRate = 1.0; // every downstream answer is an error
     });
@@ -150,7 +195,7 @@ describe('client circuit breaker', () => {
 
 describe('downstream selection', () => {
   it('re-spreads across all downstreams after a stall clears (random IP selection)', () => {
-    const sim = newSim('healthy');
+    const sim = baseSim();
     run(sim, 10_000);
     sim.cfg.downstreams.responseTimeMedianMs = 600; // every downstream stalls
     run(sim, 6_000);
@@ -187,7 +232,7 @@ describe('TLS handshake wire vs CPU split', () => {
    * Measures mean handshake duration and fabric CPU work per handshake.
    */
   function handshakeProfile(rttMs: number, tlsClientDelayMs: number) {
-    const sim = newSim('healthy', (cfg) => {
+    const sim = baseSim((cfg) => {
       cfg.clients.count = 1;
       cfg.clients.requestRatePerSec = 4;
       cfg.clients.poolSize = 1;
@@ -236,10 +281,10 @@ describe('TLS handshake wire vs CPU split', () => {
 
 describe('TLS resumption', () => {
   it('flags handshakes as resumed according to the configured rate', () => {
-    const all = newSim('healthy', (cfg) => {
+    const all = baseSim((cfg) => {
       cfg.fabric.tlsResumptionRate = 1;
     });
-    const none = newSim('healthy', (cfg) => {
+    const none = baseSim((cfg) => {
       cfg.fabric.tlsResumptionRate = 0;
     });
     for (const sim of [all, none]) {
@@ -253,19 +298,10 @@ describe('TLS resumption', () => {
   });
 });
 
-describe('overwhelmed preset', () => {
-  it('goodput collapses and stays collapsed', () => {
-    const sim = newSim('overwhelmed');
-    run(sim, 30_000);
-    const s = statsBetween(sim, 10_000, 30_000);
-    expect(s.successRate).toBeLessThan(0.3);
-  });
-});
-
 describe('engine invariants', () => {
   it('is deterministic for a given seed', () => {
-    const a = newSim('storm-prone');
-    const b = newSim('storm-prone');
+    const a = newSim('unbounded');
+    const b = newSim('unbounded');
     run(a, 20_000);
     run(b, 20_000);
     expect(a.metrics.totals).toEqual(b.metrics.totals);
@@ -274,8 +310,8 @@ describe('engine invariants', () => {
   });
 
   it('different seeds diverge', () => {
-    const a = newSim('healthy');
-    const b = newSim('healthy', (cfg) => {
+    const a = baseSim();
+    const b = baseSim((cfg) => {
       cfg.seed = 42;
     });
     run(a, 10_000);
@@ -284,7 +320,7 @@ describe('engine invariants', () => {
   });
 
   it('drains cleanly when traffic stops (no leaked accounting)', () => {
-    const sim = newSim('storm-prone');
+    const sim = newSim('unbounded');
     run(sim, 20_000);
     sim.cfg.clients.requestRatePerSec = 0;
     sim.cfg.clients.maxRetries = 0;
@@ -313,7 +349,7 @@ describe('engine invariants', () => {
   });
 
   it('counters never go negative under storm churn', () => {
-    const sim = newSim('overwhelmed');
+    const sim = newSim('unbounded');
     const STEP = 2;
     for (let t = 0; t < 30_000; t += STEP) {
       sim.step(STEP);
@@ -324,7 +360,7 @@ describe('engine invariants', () => {
   });
 
   it('respects the TLS handshake concurrency limit', () => {
-    const sim = newSim('storm-prone');
+    const sim = newSim('unbounded');
     sim.cfg.fabric.tlsHandshakeConcurrency = 4;
     const STEP = 2;
     for (let t = 0; t < 30_000; t += STEP) {
@@ -334,7 +370,7 @@ describe('engine invariants', () => {
   });
 
   it('live entity-count changes apply without breaking accounting', () => {
-    const sim = newSim('healthy');
+    const sim = baseSim();
     run(sim, 5_000);
     sim.cfg.clients.count = 9;
     sim.cfg.downstreams.count = 5;
@@ -363,7 +399,7 @@ describe('connection-rate shedding (accept-rate limiter)', () => {
   };
 
   it('never fires under healthy load and leaves goodput untouched', () => {
-    const sim = newSim('healthy', enableLimiter);
+    const sim = baseSim(enableLimiter);
     run(sim, 60_000);
     expect(sim.metrics.totals.shedConnRate).toBe(0);
     const s = statsBetween(sim, 5_000, 60_000);
@@ -371,7 +407,7 @@ describe('connection-rate shedding (accept-rate limiter)', () => {
   });
 
   it('does not throttle a healthy 3x pulse (accept rate stays under the limit)', () => {
-    const sim = newSim('healthy', enableLimiter);
+    const sim = baseSim(enableLimiter);
     run(sim, 15_000);
     sim.triggerPulse(3, 5_000);
     run(sim, 15_000);
@@ -381,7 +417,7 @@ describe('connection-rate shedding (accept-rate limiter)', () => {
 
   it('alone prevents the storm-prone metastable collapse', () => {
     // Baseline: storm-prone collapses to ~zero goodput long after the pulse.
-    const off = newSim('storm-prone');
+    const off = newSim('unbounded');
     run(off, 15_000);
     off.triggerPulse(3, 5_000);
     run(off, 30_000);
@@ -390,7 +426,7 @@ describe('connection-rate shedding (accept-rate limiter)', () => {
     // Same preset and pulse, with only the accept-rate limiter added: the
     // fabric sheds the connection flood at accept and goodput survives —
     // something the static connection limit and TLS permit cap could not do.
-    const on = newSim('storm-prone', enableLimiter);
+    const on = newSim('unbounded', enableLimiter);
     run(on, 15_000);
     on.triggerPulse(3, 5_000);
     run(on, 30_000);
@@ -399,7 +435,7 @@ describe('connection-rate shedding (accept-rate limiter)', () => {
   });
 
   it('caps the sustained accept rate near the configured limit under a storm', () => {
-    const sim = newSim('storm-prone', enableLimiter);
+    const sim = newSim('unbounded', enableLimiter);
     run(sim, 10_000);
     sim.triggerPulse(3, 5_000);
     run(sim, 20_000);
@@ -414,7 +450,7 @@ describe('connection-rate shedding (accept-rate limiter)', () => {
 
 describe('kernel limits (accept queue + file descriptors)', () => {
   it('are inert by default — no accept-queue drops or EMFILE even in a storm', () => {
-    const sim = newSim('storm-prone');
+    const sim = newSim('unbounded');
     run(sim, 15_000);
     sim.triggerPulse(3, 5_000);
     run(sim, 25_000);
@@ -425,7 +461,7 @@ describe('kernel limits (accept queue + file descriptors)', () => {
   });
 
   it('the accept queue never overflows under healthy load (default depth)', () => {
-    const sim = newSim('healthy', (cfg) => {
+    const sim = baseSim((cfg) => {
       cfg.fabric.acceptQueueEnabled = true; // default depth 32
     });
     run(sim, 60_000);
@@ -436,7 +472,7 @@ describe('kernel limits (accept queue + file descriptors)', () => {
   it('the accept queue overflows when a storm starves the accept loop', () => {
     // Under storm-prone's post-pulse collapse the CPU saturates, the accept
     // loop drains slowly, and the kernel backlog fills past its depth.
-    const sim = newSim('storm-prone', (cfg) => {
+    const sim = newSim('unbounded', (cfg) => {
       cfg.fabric.acceptQueueEnabled = true; // default depth 32
     });
     run(sim, 15_000);
@@ -446,7 +482,7 @@ describe('kernel limits (accept queue + file descriptors)', () => {
   });
 
   it('overflow with abort-on-overflow still drops, and the queue drains clean when traffic stops', () => {
-    const sim = newSim('storm-prone', (cfg) => {
+    const sim = newSim('unbounded', (cfg) => {
       cfg.fabric.acceptQueueEnabled = true;
       cfg.fabric.acceptQueueAbortOnOverflow = true;
     });
@@ -467,7 +503,7 @@ describe('kernel limits (accept queue + file descriptors)', () => {
     // A storm wants ~98 live sockets; the ceiling holds it below that and the
     // overflow is EMFILE (a withered connection), not a shed RST.
     const fdLimit = 64;
-    const sim = newSim('storm-prone', (cfg) => {
+    const sim = newSim('unbounded', (cfg) => {
       cfg.fabric.fdLimitEnabled = true;
       cfg.fabric.maxFileDescriptors = fdLimit;
     });
@@ -493,7 +529,7 @@ describe('kernel limits (accept queue + file descriptors)', () => {
   });
 
   it('a healthy fabric never hits the default FD ceiling', () => {
-    const sim = newSim('healthy', (cfg) => {
+    const sim = baseSim((cfg) => {
       cfg.fabric.fdLimitEnabled = true; // default 80, healthy holds ~70 sockets
     });
     run(sim, 30_000);
@@ -506,7 +542,7 @@ describe('lock contention (serialization bottleneck)', () => {
   // Enable the seeded per-request router lock (2µs) and run healthy at the
   // given representative server QPS. Returns lock + CPU + goodput observations.
   function runWithRouterLock(repQps: number, enabled: boolean) {
-    const sim = newSim('healthy', (cfg) => {
+    const sim = baseSim((cfg) => {
       const router = cfg.fabric.locks.find((l) => l.id === 'router')!;
       router.enabled = enabled;
       router.holdTimeUs = 2;
@@ -540,7 +576,7 @@ describe('lock contention (serialization bottleneck)', () => {
   }
 
   it('disabled locks have no effect (default presets)', () => {
-    const sim = newSim('healthy');
+    const sim = baseSim();
     run(sim, 20_000);
     for (const b of sim.metrics.buckets) expect(b.lockUtilization).toBe(0);
   });
@@ -581,7 +617,7 @@ describe('lock contention (serialization bottleneck)', () => {
   it('an accept-site lock contends when connection churn spikes', () => {
     // The Arc<Mutex> max-conns counter: quiet when pools stay warm, but a pulse
     // that churns connections drives acquisitions through it.
-    const sim = newSim('storm-prone', (cfg) => {
+    const sim = newSim('unbounded', (cfg) => {
       const maxconn = cfg.fabric.locks.find((l) => l.id === 'maxconn')!;
       maxconn.enabled = true;
       maxconn.holdTimeUs = 5;

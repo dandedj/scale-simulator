@@ -129,19 +129,37 @@ while **FABRIC CPU %** sits low.
 
 ## Scenarios
 
-- **Healthy** — conservative limits, protections on, mostly-resumed
-  handshakes. Pulse it and watch the response.
-- **Storm-prone** — raised limits: 16× the TLS permits, the permit wait maxed
-  out, 3 un-jittered retries. Stable at baseline;
-  after a 3× pulse the storm **persists once the pulse ends** (a metastable
-  failure — the trigger is gone, the retry/handshake feedback loop sustains
-  the overload).
-- **Protected** — the counterpart to Storm-prone: identical client settings
-  (3 un-jittered retries, tight timeouts), with the fabric's limits and
-  protections enabled, so the pair isolates the fabric-side differences
-  under the same pulse.
-- **Overwhelmed** — offered load beyond capacity, no protections: goodput → ~0
-  and stays there until traffic is removed.
+Each scenario is a **RTB Fabric configuration** — they vary only the fabric, not
+the load. Traffic is yours to drive: the Traffic knobs (client count and rate)
+and the **◉ PULSE** button. Five of the six share one fixed, deliberately
+aggressive client profile (a generous pool, a tight deadline, three un-jittered
+retries, no client breaker), so switching scenarios changes *only* the fabric
+and the same pulse exposes how each configuration responds. They are calm at
+baseline; the pulse is what reveals the difference.
+
+- **Wide open** — few limits: a high connection cap, 16× the TLS permits, the
+  permit wait maxed out, no rate or kernel limits. Pulse it and the storm
+  **persists once the pulse ends** — a metastable failure where the
+  retry/handshake feedback loop sustains the overload after the trigger is gone.
+- **Shed early** — a tight connection cap and few TLS permits: the fabric sheds
+  connections cheaply at the door (RST) before the CPU can melt. The same
+  clients and pulse that storm *Wide open* are held off by rejecting the flood.
+- **Rate limited** — loose static caps, but a per-server token bucket throttles
+  the *rate* of new connections at TCP accept (`shed·rate`). Handshake demand is
+  capped at the source, so the flood never forms — a different defense than
+  concurrent caps.
+- **Kernel limited** — high app limits, but the OS limits bite first: a shallow
+  accept queue (`somaxconn`) and a file-descriptor ceiling. Connections drop at
+  the kernel (`drop·acceptq`, `emfile`) before they reach TLS — a dirtier
+  failure than a clean RST.
+- **Lock contention** — a shared mutex on the request path, scaled to a high
+  per-server throughput: the **LOCK CONTENTION** chart pegs red and latency
+  climbs while the CPU column stays low — the wall is contention, not compute.
+  (Deliberately uses calmer clients so the lock itself is the bottleneck, not a
+  reconnect storm it would otherwise ignite.)
+- **Well tuned** — balanced limits, high TLS resumption (cheap reconnects), and
+  an accept-rate backstop: it absorbs the surge with little shedding and recovers
+  fast. The reference — layered, modest protections instead of one big limit.
 
 Every run is deterministic for a given seed: a demo replays identically.
 
@@ -155,11 +173,12 @@ behavior (timeout, RTT, retries, jitter, breakers) and the RTB Fabric,
 downstream-pool, and downstream knobs are per-sim, selected with the
 SIM A / SIM B tabs in the Tuning panel. A scenario button applies the whole
 preset — clients included — to its sim, propagating only the traffic shape
-to both. Storm-prone and Protected share identical client settings by
-construction, so that pair isolates the fabric-side differences under the
-same pulse; per-sim client knobs also allow client-side A/B experiments
-(e.g. jittered vs un-jittered retries) against the same fabric tuning.
-Run totals and the event log report both sims side by side.
+to both. Because the scenarios share one fixed client profile (Lock contention
+aside), picking a different scenario per pane isolates the fabric-side
+difference under the same pulse — e.g. *Wide open* vs *Rate limited*, or
+*Shed early* vs *Kernel limited*. Per-sim client knobs also allow client-side
+A/B experiments (e.g. jittered vs un-jittered retries) against the same fabric
+tuning. Run totals and the event log report both sims side by side.
 
 **Is the difference real?** Under the totals, three A/B significance callouts
 answer whether the gap is signal or noise — goodput, mean latency, and the tail:

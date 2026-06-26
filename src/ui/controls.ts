@@ -296,7 +296,7 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
         },
       },
       {
-        label: 'Accept queue (somaxconn)', min: 16, max: 1024, step: 16, get: (c) => c.fabric.acceptQueueDepth, set: (c, v) => (c.fabric.acceptQueueDepth = v),
+        label: 'Accept queue (somaxconn)', min: 4, max: 1024, step: 4, get: (c) => c.fabric.acceptQueueDepth, set: (c, v) => (c.fabric.acceptQueueDepth = v),
         info: {
           what: 'Depth of the kernel accept queue (the listen backlog, min(listen backlog, net.core.somaxconn)).',
           how: 'Completed TCP handshakes wait here for the fabric to accept() them — the kernel queue ahead of, and separate from, the TLS permit wait. The fabric drains it at ~1000/s at idle, but that rate is divided by the CPU slowdown, so a saturated fabric (workers busy in TLS crypto) drains slowly and the queue fills. When full, a new connection overflows. No effect unless the Accept queue toggle is on. Linux defaults somaxconn to 4096 (128 before kernel 5.4); the 32 here is demo-scaled — the demo’s small pools cap accept-queue pile-up at ~57 under a storm and ~1 when healthy, so 32 sits cleanly between them.',
@@ -334,7 +334,7 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
         info: {
           what: 'Whether the fabric sheds new connections by rate at TCP accept, before any TLS work.',
           how: 'On → a per-server token bucket (accept rate limit + burst above) bounces new connections with an RST once their rate exceeds the limit, before the connection-limit check and before any handshake. Off → every connection reaches the connection-limit and TLS-permit checks as usual.',
-          expect: 'Unlike the static connection limit (a cap on concurrent connections) or the TLS permit cap (a cap on concurrent handshakes), this caps the rate of new connections — throttling handshake demand at the source. It is the cheapest rejection and the most direct defense against a connection storm. Turn it on over Storm-prone and watch the collapse not happen.',
+          expect: 'Unlike the static connection limit (a cap on concurrent connections) or the TLS permit cap (a cap on concurrent handshakes), this caps the rate of new connections — throttling handshake demand at the source. It is the cheapest rejection and the most direct defense against a connection storm. Turn it on over Wide open and watch the collapse not happen (the Rate limited scenario is exactly this).',
         },
       },
       {

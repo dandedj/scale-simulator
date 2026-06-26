@@ -540,17 +540,23 @@ main {
   margin-bottom: 4px;
 }
 
-.preset-card[data-preset='healthy'] .preset-name {
-  color: var(--ok);
+.preset-card[data-preset='unbounded'] .preset-name {
+  color: var(--bad);
 }
-.preset-card[data-preset='storm-prone'] .preset-name {
-  color: var(--warn);
+.preset-card[data-preset='early-shed'] .preset-name {
+  color: var(--tls);
 }
-.preset-card[data-preset='protected'] .preset-name {
+.preset-card[data-preset='rate-limited'] .preset-name {
   color: var(--info);
 }
-.preset-card[data-preset='overwhelmed'] .preset-name {
-  color: var(--bad);
+.preset-card[data-preset='kernel-bound'] .preset-name {
+  color: var(--warn);
+}
+.preset-card[data-preset='lock-bound'] .preset-name {
+  color: var(--retry);
+}
+.preset-card[data-preset='well-tuned'] .preset-name {
+  color: var(--ok);
 }
 
 .preset-desc {

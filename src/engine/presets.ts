@@ -12,11 +12,22 @@
  *   - Pool size ≈ 2x Little's law (rate x latency).
  *   - TLS permits ≈ what the CPU can finish before clients hang up; waiters
  *     are shed with an RST after the permit wait.
+ *
+ * Scenarios vary ONLY the RTB Fabric configuration. Every scenario shares one
+ * fixed, deliberately aggressive client profile (SCENARIO_CLIENTS) — identical
+ * traffic shape and client behavior — so switching scenarios isolates the
+ * fabric-side differences. Traffic volume is the operator's to drive, with the
+ * Traffic knobs and the pulse button.
  */
 
 import type { Preset, SimulationConfig } from './types';
 
-function base(): SimulationConfig {
+/**
+ * The plain baseline: gentle, well-behaved clients on a modest fabric with
+ * every optional protection off. Exported as the canonical substrate the
+ * mechanism tests build on; also the starting point each scenario overrides.
+ */
+export function baseConfig(): SimulationConfig {
   return {
     seed: 1337,
     clients: {
@@ -53,7 +64,7 @@ function base(): SimulationConfig {
       connRateShedEnabled: false,
       connRateLimitPerSec: 40,
       connRateBurst: 30,
-      // Kernel limits, modeled off by default so every preset is behaviorally
+      // Kernel limits, modeled off by default so the baseline is behaviorally
       // unchanged. The values are demo-scaled the way the accept-rate limiter is
       // (the demo's pool sizes cap live sockets at ~70–98, far below real Linux
       // numbers): the real somaxconn is 4096 (128 before kernel 5.4) and the
@@ -94,69 +105,117 @@ function base(): SimulationConfig {
   };
 }
 
+/**
+ * The fixed client profile every scenario shares: deliberately aggressive —
+ * a generous pool, a tight deadline, three un-jittered retries, no client
+ * breaker — so a cohort that times out comes back in a synchronized wall. It
+ * is calm at baseline (warm pools, few handshakes) and only bites under a
+ * surge, which is exactly what makes the fabric-side differences legible. Held
+ * identical across scenarios so the only variable is the fabric.
+ */
+const SCENARIO_CLIENTS: Partial<SimulationConfig['clients']> = {
+  poolSize: 12,
+  clientTimeoutMs: 250,
+  maxRetries: 3,
+  retryJitter: false,
+};
+
+/** Build a scenario: the base config with the shared clients, then fabric tuning. */
+function scenario(tune: (c: SimulationConfig) => void): SimulationConfig {
+  const c = baseConfig();
+  Object.assign(c.clients, SCENARIO_CLIENTS);
+  tune(c);
+  return c;
+}
+
 export const PRESETS: Preset[] = [
   {
-    id: 'healthy',
-    name: 'Healthy',
+    id: 'unbounded',
+    name: 'Wide open',
     description:
-      'Conservative limits, protections on. Connections stay warm, handshakes are rare and mostly resumed. Try a pulse and watch the response.',
-    config: base(),
-  },
-  {
-    id: 'storm-prone',
-    name: 'Storm-prone',
-    description:
-      'Raised limits: 16x the TLS permits, the permit wait maxed out, 3 un-jittered retries. Stable at baseline — try a traffic pulse and watch what happens after it ends.',
-    config: (() => {
-      const c = base();
-      c.clients.clientTimeoutMs = 250;
-      c.clients.poolSize = 12;
-      c.clients.maxRetries = 3;
-      c.clients.retryJitter = false;
+      'Few limits: a high connection cap, 16× the TLS permits, the permit wait maxed out, no rate or kernel limits. Stable at baseline — pulse it and watch the storm persist after the surge ends.',
+    config: scenario((c) => {
       c.fabric.maxConnections = 300;
       c.fabric.tlsHandshakeConcurrency = 64;
       c.fabric.tlsPermitWaitMs = 5;
-      return c;
-    })(),
+    }),
   },
   {
-    id: 'protected',
-    name: 'Protected',
+    id: 'early-shed',
+    name: 'Shed early',
     description:
-      'Identical client settings to Storm-prone (3 un-jittered retries, tight timeouts), with the fabric limits and protections enabled. Compare the two under the same pulse.',
-    config: (() => {
-      const c = base();
-      c.clients.clientTimeoutMs = 250;
-      c.clients.poolSize = 12;
-      c.clients.maxRetries = 3;
-      c.clients.retryJitter = false;
-      return c;
-    })(),
+      'Tight connection cap and few TLS permits: the fabric sheds connections cheaply at the door (RST) before the CPU can melt. Pulse it — it stays up by rejecting the flood instead of trying to serve it.',
+    config: scenario((c) => {
+      c.fabric.maxConnections = 96;
+      c.fabric.tlsHandshakeConcurrency = 4;
+      c.fabric.tlsPermitWaitMs = 2;
+    }),
   },
   {
-    id: 'overwhelmed',
-    name: 'Overwhelmed',
+    id: 'rate-limited',
+    name: 'Rate limited',
     description:
-      'Offered load beyond capacity, slow erroring downstreams, timeouts tighter than typical latency, no protections. Observe goodput once the system saturates.',
-    config: (() => {
-      const c = base();
-      c.clients.count = 8;
-      c.clients.requestRatePerSec = 35;
-      c.clients.poolSize = 12;
-      c.clients.clientTimeoutMs = 200;
-      c.clients.maxRetries = 3;
-      c.clients.retryBackoffBaseMs = 20;
-      c.clients.retryJitter = false;
-      c.fabric.maxConnections = 500;
-      c.fabric.tlsHandshakeConcurrency = 128;
+      'Loose static caps, but a per-server token bucket throttles the rate of new connections at TCP accept (shed·rate). Pulse it — handshake demand is capped at the source, so the same flood that storms “Wide open” never forms.',
+    config: scenario((c) => {
+      c.fabric.maxConnections = 300;
+      c.fabric.tlsHandshakeConcurrency = 64;
       c.fabric.tlsPermitWaitMs = 5;
-      c.downstreamPool.poolSizePerDownstream = 12;
-      c.downstreamPool.requestTimeoutMs = 180;
-      c.downstreams.responseTimeMedianMs = 140;
-      c.downstreams.responseTimeSigma = 0.5;
-      c.downstreams.errorRate = 0.15;
+      c.fabric.connRateShedEnabled = true;
+      c.fabric.connRateLimitPerSec = 40;
+      c.fabric.connRateBurst = 30;
+    }),
+  },
+  {
+    id: 'kernel-bound',
+    name: 'Kernel limited',
+    description:
+      'High app limits, but the OS limits bite first: a shallow accept queue (somaxconn) and a file-descriptor ceiling. Pulse it — connections drop at the kernel (drop·acceptq, emfile) before they ever reach TLS, a dirtier failure than a clean RST.',
+    config: scenario((c) => {
+      c.fabric.maxConnections = 300;
+      c.fabric.tlsHandshakeConcurrency = 64;
+      c.fabric.tlsPermitWaitMs = 5;
+      c.fabric.acceptQueueEnabled = true;
+      c.fabric.acceptQueueDepth = 16;
+      c.fabric.fdLimitEnabled = true;
+      c.fabric.maxFileDescriptors = 80;
+    }),
+  },
+  {
+    id: 'lock-bound',
+    name: 'Lock contention',
+    description:
+      'A serialization point — a shared mutex on the request path — scaled to a high per-server throughput. The LOCK CONTENTION chart pegs red and latency climbs while the CPU column stays low: the wall is contention, not compute. Holds at this load; pulse it to push the lock past saturation. Uses calmer clients than the other scenarios on purpose, so the bottleneck is the lock itself, not a reconnect storm it would otherwise ignite.',
+    config: (() => {
+      // Built on the gentle baseline clients (not SCENARIO_CLIENTS): a fully
+      // saturated request lock makes requests time out, and un-jittered
+      // aggressive retries would turn that into a handshake storm that also pegs
+      // the CPU — masking the very lesson (lock-bound, CPU idle). Jittered, few
+      // retries keeps the lock the sole, visible wall. The representative QPS is
+      // tuned to just past the lock's ceiling so it saturates and inflates
+      // latency while leaving compute idle (raising it further would tip into a
+      // churn storm that warms the CPU).
+      const c = baseConfig();
+      const router = c.fabric.locks.find((l) => l.id === 'router')!;
+      router.enabled = true;
+      router.holdTimeUs = 2;
+      c.fabric.lockRepThroughputQps = 400_000;
       return c;
     })(),
+  },
+  {
+    id: 'well-tuned',
+    name: 'Well tuned',
+    description:
+      'Balanced limits, high TLS resumption (cheap reconnects), and an accept-rate backstop. Pulse it — it absorbs the surge with little shedding and recovers fast. The reference: layered, modest protections instead of one big limit.',
+    config: scenario((c) => {
+      c.fabric.maxConnections = 150;
+      c.fabric.tlsHandshakeConcurrency = 16;
+      c.fabric.tlsPermitWaitMs = 2;
+      c.fabric.tlsResumptionRate = 0.85;
+      c.fabric.connRateShedEnabled = true;
+      c.fabric.connRateLimitPerSec = 60;
+      c.fabric.connRateBurst = 40;
+    }),
   },
 ];
 
