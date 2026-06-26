@@ -19,17 +19,10 @@
           <h1>RTB FABRIC</h1>
           <span class="brand-sub">connection storm simulator</span>
         </div>
+        <div id="mode-switch"></div>
         <div id="header-controls"></div>
         <div class="hud">
-          <div id="storm-badge" class="single-only">⚡ CONNECTION STORM</div>
-          <div class="hud-item single-only">
-            <span id="hud-success" class="amp-ok">100%</span>
-            <label>success rate</label>
-          </div>
-          <div class="hud-item single-only">
-            <span id="hud-amp" class="amp-ok">1.0</span>
-            <label>amplification</label>
-          </div>
+          <div id="hud-extra"></div>
           <div class="hud-item">
             <span id="hud-clock">0.0s</span>
             <label>sim time</label>
@@ -42,19 +35,6 @@
           <div id="start-gate">
             <button id="start-btn">▶ START</button>
             <div id="start-hint" class="start-hint">Pick a scenario and tune the knobs first — traffic flows when you start.</div>
-          </div>
-          <div id="compare-help" class="hidden">
-            <div class="help-card">
-              <h2>Comparison mode</h2>
-              <ul>
-                <li><b>Two sims, one clock.</b> SIM A (top) and SIM B (bottom) run in lockstep on the same virtual clock, each with its own charts and totals.</li>
-                <li><b>Shared traffic.</b> The Traffic knobs — client count and request rate — apply to both sims, so they always see the same offered load. Speed, pause, and reset are shared too.</li>
-                <li><b>Per-sim tuning.</b> The Clients, RTB Fabric, Downstream pools, and Downstreams groups edit one sim at a time — pick it with the SIM A / SIM B tabs in the Tuning panel. Client behavior (timeouts, retries, jitter, breakers) can differ between sims.</li>
-                <li><b>Scenarios.</b> A scenario button sets that sim's client, fabric &amp; downstream tuning; only the traffic shape applies to both. Storm-prone and Protected share identical client settings, isolating the fabric protections — compare them under the same pulse.</li>
-                <li><b>◉ PULSE surges both sims at once</b> — the same traffic spike, two responses.</li>
-              </ul>
-              <button id="help-dismiss" class="btn">GOT IT</button>
-            </div>
           </div>
         </div>
         <aside id="side"></aside>

@@ -1,13 +1,28 @@
-# RTB Fabric — Connection Storm Simulator
+# RTB Fabric Simulators
 
-An animated, browser-based discrete-event simulation of **TLS connection
-retry storms** in a high-throughput RTB proxy fabric. It models the full
-feedback loop — timeouts, connection teardown, TLS handshake cost, shared
-CPU — and lets you experiment live with limit settings and protection
-mechanisms (TLS handshake permits with a bounded wait, TLS error pacing,
-session resumption, and circuit breakers on both the clients and the
-fabric→downstream pools) to see how each changes the system's response to
-load surges.
+Two browser-based discrete-event simulations of RTB Fabric behavior under load,
+switched with the **mode toggle** in the header:
+
+- **Connection Storm** — TLS connection retry storms in a high-throughput RTB
+  proxy fabric: the feedback loop of timeouts, connection teardown, TLS
+  handshake cost, and shared CPU, with live limit and protection knobs.
+- **DNS Distribution** — DNS-based load distribution across many RTB Fabric
+  servers: Route53 advertising healthy IPs, clients caching resolutions for the
+  TTL, overloaded servers shedding with RSTs, and the lag between the fast (RST)
+  and slow (health + DNS + boot) control loops. See
+  [DNS load distribution](#dns-load-distribution) below.
+
+The connection-storm model is described first; the DNS model has its own section
+at the end. Both share the shell (one playback clock, the start gate, the
+comparison mode) and the engine primitives (event queue, seeded RNG, the strip
+charts).
+
+This connection-storm mode models the full feedback loop — timeouts, connection
+teardown, TLS handshake cost, shared CPU — and lets you experiment live with
+limit settings and protection mechanisms (TLS handshake permits with a bounded
+wait, TLS error pacing, session resumption, and circuit breakers on both the
+clients and the fabric→downstream pools) to see how each changes the system's
+response to load surges.
 
 ## Run it
 
@@ -245,8 +260,8 @@ beyond noise," not precise p-values.
 ## Extending it
 
 The engine (`src/engine/`) is renderer-agnostic; the renderer and charts only
-read public simulation state. To add a component (e.g., a DNS resolver, a
-sidecar rate limiter, session resumption, retry token buckets):
+read public simulation state. To add a component to the connection-storm model
+(e.g., a sidecar rate limiter, retry token buckets, a downstream breaker):
 
 1. Add config to `types.ts`, defaults to `presets.ts`.
 2. Model it in `simulation.ts` (schedule events via `queue`, CPU work via
@@ -289,3 +304,86 @@ to stay animatable while preserving the ratios that drive the physics:
   `fs.nr_open` = 1,048,576); every socket costs a descriptor and `accept()`
   returns EMFILE at the ceiling. Demo numbers are scaled down (the demo's pools
   cap live sockets near 100), keeping the dynamics, not the absolute limits.
+
+## DNS load distribution
+
+The second mode (header toggle → **DNS Distribution**) models how RTB Fabric
+spreads traffic across many servers with Route53, and the lag between the
+controls that move that traffic. It is a separate model with its own engine,
+renderer, charts, and scenarios under `src/dns/`.
+
+### The model
+
+Topology: **many client cohorts → Route53 record set → many RTB Fabric servers →
+bidders** (bidders are drawn but do not influence the model). It is a *fluid*
+model: traffic is carried as piecewise-constant rates (requests/sec), not
+per-request entities, so it stays correct and cheap at fleet scale under heavy
+time compression. Discrete events fire only when the rate field changes — TTL
+re-resolves, DNS publishes, health checks, server boots, traffic ticks.
+
+Two control loops at very different timescales decide where traffic lands, and
+the separation is the whole point:
+
+1. **Fast loop (ms–~1s).** An overloaded server sheds with an RST; the client
+   immediately reconnects to *another IP already in its cached set*. A request to
+   a removed/dead IP is refused and also re-picks. This smooths hot spots — but
+   only within the capacity a client already holds (advertised **and** cached
+   right now). Modeled as a water-filling fixed point solved inside each
+   rebalance.
+2. **Slow loop (minutes).** Health detection (check interval × consecutive-fail
+   threshold) **+** the DNS publish interval **+** per-client TTL expiry **+**
+   server boot/warm-up. This is the only loop that grows the healthy-and-cached
+   capacity.
+
+So **TTL is a failover lever** (how fast clients leave a dead IP), **not a
+scale-out lever** (how fast new capacity absorbs a surge). When offered load
+exceeds total fleet capacity, no distribution scheme keeps 100% — it only
+decides where the loss lands. Health checks detect *liveness, not load* by
+default, so an overwhelmed-but-up server keeps passing checks (which is why the
+RST loop exists); Route53 *fails open* when every server is unhealthy, returning
+all records rather than an empty answer.
+
+Resolver layering is collapsed into a per-cohort effective TTL with a
+pinned/TTL-ignoring tail (connection- or JVM-pinned clients that only fail over
+via an RST re-pick). A DNS answer is a random subset (multivalue, default 8) of
+the advertised healthy IPs. The **? LEGEND** and **◈ SYSTEM** dialogs spell out
+every encoding and the full list of modeling assumptions.
+
+### Primary metric
+
+**Availability = served ÷ offered**, shown as a time series (the dip and its
+recovery curve), not just a scalar — adtech tolerates a brief dip if cost and
+performance are good. Run totals also report **lost-impression-seconds**
+(the area of the dip, the cleanest scenario comparator) and a **cost axis**
+(served vs provisioned capacity-seconds), so the availability-vs-cost trade is
+legible.
+
+### Scenarios
+
+Each shares one offered-load shape so the difference is isolated; drive an event
+(**◉ PULSE**, **✕ KILL SERVER**, **＋ ADD SERVERS**, or a ramp shape) to reveal it:
+
+- **Steady state** — the balanced reference; pulse past total capacity to see
+  irreducible loss.
+- **No RST shedding** — the fast loop off: hot spots fail instead of
+  redistributing (the central scenario, vs Steady).
+- **Long TTL / Short TTL** — kill a server and compare how long the dead-IP scar
+  lasts (failover speed vs re-resolution churn; pinned clients stick regardless).
+- **Reactive autoscale / Pre-provisioned headroom** — under the same surge,
+  reactive capacity arrives after the surge (boot ~5 min) while headroom absorbs
+  it instantly at higher steady-state cost.
+
+`npm test` covers the DNS engine too (`src/dns/engine/dnsSimulation.test.ts`):
+the timescale-separation invariant (a dead server's scar is bounded by TTL, not
+fixed by the fast loop), playback-speed determinism (identical availability at
+any step granularity), and that each scenario still demonstrates its lesson.
+
+### Grounding (DNS specifics)
+
+- Route53 health checks (~30s default cadence, 3 consecutive failures to mark
+  unhealthy → ~90s detection) and the *fail-open* behavior when all records are
+  unhealthy; multivalue-answer routing returns up to 8 records.
+- DNS TTL caching across recursive/stub resolvers and connection-/JVM-pinned
+  clients that hold a resolution far past the authoritative TTL.
+- Autoscaling lead time dominated by instance boot + warm-up, far longer than a
+  short traffic surge — the reactive-vs-headroom trade.

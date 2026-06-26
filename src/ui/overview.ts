@@ -212,6 +212,7 @@ export class SystemOverview {
   private dialog: HTMLDialogElement;
   private body: HTMLElement;
   private getCfg: () => SimulationConfig;
+  private btn!: HTMLButtonElement;
 
   constructor(header: HTMLElement, getCfg: () => SimulationConfig) {
     this.getCfg = getCfg;
@@ -238,12 +239,19 @@ export class SystemOverview {
       if (e.target === this.dialog) this.dialog.close();
     });
 
-    const btn = document.createElement('button');
-    btn.className = 'btn';
-    btn.textContent = '◈ SYSTEM';
-    btn.title = 'System overview — how the RTB Fabric processes connections and requests, and every setting';
-    btn.addEventListener('click', () => this.toggle());
-    header.appendChild(btn);
+    this.btn = document.createElement('button');
+    this.btn.className = 'btn';
+    this.btn.textContent = '◈ SYSTEM';
+    this.btn.title = 'System overview — how the RTB Fabric processes connections and requests, and every setting';
+    this.btn.addEventListener('click', () => this.toggle());
+    header.appendChild(this.btn);
+  }
+
+  /** Remove the dialog (appended to body) and trigger button. */
+  destroy(): void {
+    if (this.dialog.open) this.dialog.close();
+    this.dialog.remove();
+    this.btn.remove();
   }
 
   private toggle(): void {

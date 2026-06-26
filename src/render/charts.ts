@@ -9,24 +9,12 @@
 import { BUCKET_MS, HISTORY_MS, percentile } from '../engine/metrics';
 import type { Simulation } from '../engine/simulation';
 import type { MetricsBucket } from '../engine/types';
-import { SEMANTIC, SURFACE, withAlpha } from './colors';
+import { SEMANTIC } from './colors';
+import { drawChart, type StripChartDef } from './stripChart';
 
 const PER_SEC = 1000 / BUCKET_MS;
 
-interface Series {
-  label: string;
-  color: string;
-  fill?: boolean;
-  value(b: MetricsBucket, sim: Simulation): number;
-}
-
-interface ChartDef {
-  title: string;
-  series: Series[];
-  /** Dashed reference line (e.g., a limit or timeout). */
-  threshold?(sim: Simulation): { value: number; label: string } | null;
-  yMax?(sim: Simulation, dataMax: number): number;
-}
+type ChartDef = StripChartDef<MetricsBucket, Simulation>;
 
 const CHARTS: ChartDef[] = [
   {
@@ -149,104 +137,7 @@ export class ChartRail {
     const windowStart = Math.max(0, sim.now - HISTORY_MS);
     for (const { def, ctx, w, h } of this.charts) {
       if (w === 0) continue;
-      ctx.clearRect(0, 0, w, h);
-
-      const plotX = 6;
-      const plotY = 16;
-      const plotW = w - 12;
-      const plotH = h - 24;
-
-      // Title + legend
-      ctx.font = '600 9px "IBM Plex Mono", monospace';
-      ctx.fillStyle = SURFACE.textDim;
-      ctx.fillText(def.title, plotX, 10);
-      let lx = plotX + ctx.measureText(def.title).width + 10;
-      for (const s of def.series) {
-        ctx.fillStyle = s.color;
-        ctx.fillText(s.label, lx, 10);
-        lx += ctx.measureText(s.label).width + 8;
-      }
-
-      // Determine y scale
-      let dataMax = 1e-6;
-      for (const b of buckets) {
-        if (b.time < windowStart) continue;
-        for (const s of def.series) dataMax = Math.max(dataMax, s.value(b, sim));
-      }
-      const yMax = def.yMax ? def.yMax(sim, dataMax) : dataMax * 1.15;
-
-      // Gridlines (baseline + midpoint) + threshold
-      ctx.strokeStyle = SURFACE.grid;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(plotX, plotY + plotH);
-      ctx.lineTo(plotX + plotW, plotY + plotH);
-      ctx.moveTo(plotX, plotY + plotH / 2);
-      ctx.lineTo(plotX + plotW, plotY + plotH / 2);
-      ctx.stroke();
-      const thr = def.threshold?.(sim);
-      if (thr && thr.value <= yMax) {
-        const ty = plotY + plotH - (thr.value / yMax) * plotH;
-        ctx.strokeStyle = withAlpha(SEMANTIC.timeout, 0.55);
-        ctx.setLineDash([4, 4]);
-        ctx.beginPath();
-        ctx.moveTo(plotX, ty);
-        ctx.lineTo(plotX + plotW, ty);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        // Name the reference line; flip below it when it hugs the top edge.
-        ctx.font = '600 8px "IBM Plex Mono", monospace';
-        ctx.fillStyle = withAlpha(SEMANTIC.timeout, 0.85);
-        ctx.textAlign = 'right';
-        ctx.fillText(thr.label, plotX + plotW - 2, ty < plotY + 12 ? ty + 9 : ty - 3);
-        ctx.textAlign = 'left';
-      }
-
-      // Series
-      const xFor = (time: number) => plotX + ((time - windowStart) / HISTORY_MS) * plotW;
-      const yFor = (v: number) => plotY + plotH - (Math.min(v, yMax) / yMax) * plotH;
-      for (const s of def.series) {
-        ctx.strokeStyle = s.color;
-        ctx.lineWidth = 1.4;
-        ctx.beginPath();
-        let started = false;
-        let lastX = plotX;
-        for (const b of buckets) {
-          if (b.time < windowStart) continue;
-          const x = xFor(b.time);
-          const y = yFor(s.value(b, sim));
-          if (!started) {
-            ctx.moveTo(x, y);
-            started = true;
-          } else {
-            ctx.lineTo(x, y);
-          }
-          lastX = x;
-        }
-        ctx.stroke();
-        if (s.fill && started) {
-          ctx.lineTo(lastX, plotY + plotH);
-          ctx.lineTo(plotX, plotY + plotH);
-          ctx.closePath();
-          ctx.fillStyle = withAlpha(s.color, 0.13);
-          ctx.fill();
-        }
-      }
-
-      // Y-axis values (drawn last so they stay legible over the series);
-      // the bottom gridline is 0.
-      ctx.font = '500 8px "IBM Plex Mono", monospace';
-      ctx.fillStyle = SURFACE.textFaint;
-      ctx.fillText(fmtAxis(yMax), plotX + 2, plotY + 8);
-      ctx.fillText(fmtAxis(yMax / 2), plotX + 2, plotY + plotH / 2 - 3);
+      drawChart(ctx, w, h, def, buckets, windowStart, HISTORY_MS, sim);
     }
   }
-}
-
-/** Compact axis value: units live in the chart title. */
-function fmtAxis(v: number): string {
-  if (v >= 10_000) return `${Math.round(v / 1000)}k`;
-  if (v >= 1_000) return `${(v / 1000).toFixed(1)}k`;
-  if (v >= 10) return String(Math.round(v));
-  return v % 1 === 0 ? String(v) : v.toFixed(1);
 }

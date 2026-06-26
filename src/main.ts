@@ -1,4 +1,4 @@
 import './style.css';
-import { App } from './app';
+import { Shell } from './shell';
 
-new App();
+new Shell();

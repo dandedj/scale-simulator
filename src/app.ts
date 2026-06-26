@@ -1,11 +1,15 @@
 /**
- * Composition root: owns the simulation panes (one in single mode, two
- * stacked in comparison mode), the rAF driver with time dilation, and wires
- * renderers, charts, HUD, and the control panel together. In comparison
- * mode both sims step the same virtual clock each frame, so a pulse hits
- * them simultaneously and their charts stay aligned.
+ * The connection-storm experience: owns the simulation panes (one in single
+ * mode, two stacked in comparison mode), the renderers, charts, HUD chips, and
+ * the control panel. In comparison mode both sims step the same virtual clock
+ * each frame, so a pulse hits them simultaneously and their charts stay aligned.
+ *
+ * The requestAnimationFrame loop, time-dilation clock, pause/start-gate, and
+ * mode switch live in the Shell (shell.ts); this class implements the
+ * Experience interface the shell drives.
  */
 
+import type { Experience, ExperienceHosts, PlaybackController } from './experience';
 import { cloneConfig, presetById, PRESETS } from './engine/presets';
 import { Simulation } from './engine/simulation';
 import type { SimulationConfig } from './engine/types';
@@ -15,13 +19,24 @@ import { ControlPanel, PANE_TAGS } from './ui/controls';
 
 /** Default playback: 10x slow motion — a 150ms request takes 1.5s on screen. */
 const DEFAULT_TIME_SCALE = 0.1;
-/** Ignore wall-time gaps bigger than this (background tab, debugger). */
-const MAX_FRAME_WALL_MS = 100;
 /** Cap sim advancement per frame so a speed spike can't freeze the page. */
 const MAX_SIM_MS_PER_FRAME = 250;
 
 const SINGLE_HINT = 'Pick a scenario and tune the knobs first — traffic flows when you start.';
 const COMPARE_HINT = 'Tune each sim — A above, B below — then start. Both run on the same clock and traffic.';
+
+const COMPARE_HELP_HTML = `
+  <div class="help-card">
+    <h2>Comparison mode</h2>
+    <ul>
+      <li><b>Two sims, one clock.</b> SIM A (top) and SIM B (bottom) run in lockstep on the same virtual clock, each with its own charts and totals.</li>
+      <li><b>Shared traffic.</b> The Traffic knobs — client count and request rate — apply to both sims, so they always see the same offered load. Speed, pause, and reset are shared too.</li>
+      <li><b>Per-sim tuning.</b> The Clients, RTB Fabric, Downstream pools, and Downstreams groups edit one sim at a time — pick it with the SIM A / SIM B tabs in the Tuning panel. Client behavior (timeouts, retries, jitter, breakers) can differ between sims.</li>
+      <li><b>Scenarios.</b> A scenario button sets that sim's client, fabric &amp; downstream tuning; only the traffic shape applies to both. Storm-prone and Protected share identical client settings, isolating the fabric protections — compare them under the same pulse.</li>
+      <li><b>◉ PULSE surges both sims at once</b> — the same traffic spike, two responses.</li>
+    </ul>
+    <button id="help-dismiss" class="btn">GOT IT</button>
+  </div>`;
 
 interface PaneStats {
   storm: HTMLElement;
@@ -37,82 +52,121 @@ interface Pane {
   stats: PaneStats | null;
 }
 
-export class App {
+export class StormExperience implements Experience {
+  readonly maxSimStepMs = MAX_SIM_MS_PER_FRAME;
+
   private panes: Pane[] = [];
   private compare = false;
   private controls!: ControlPanel;
-  private timeScale = DEFAULT_TIME_SCALE;
-  /** Starts paused behind the start gate so settings can be tuned first. */
-  private paused = true;
-  /** True until the current run is started for the first time. */
-  private gateArmed = true;
-  private pausedByVisibility = false;
-  private lastWall = 0;
+  private playback!: PlaybackController;
+  private hosts!: ExperienceHosts;
 
   private appEl = document.getElementById('app')!;
-  private panesHost = document.getElementById('panes')!;
-  private startGate = document.getElementById('start-gate')!;
-  private startHint = document.getElementById('start-hint')!;
-  private helpEl = document.getElementById('compare-help')!;
-  private hudClock = document.getElementById('hud-clock')!;
-  private hudAmp = document.getElementById('hud-amp')!;
-  private hudSuccess = document.getElementById('hud-success')!;
-  private stormBadge = document.getElementById('storm-badge')!;
+  private panesHost!: HTMLElement;
+  private helpEl!: HTMLElement;
+  private hudAmp!: HTMLElement;
+  private hudSuccess!: HTMLElement;
+  private stormBadge!: HTMLElement;
 
-  constructor() {
+  mount(hosts: ExperienceHosts, playback: PlaybackController): void {
+    this.hosts = hosts;
+    this.playback = playback;
+    this.panesHost = hosts.stage;
+    // Set the mode's default speed before building controls so the speed slider
+    // initializes from it (the shell's scale carries over from the prior mode).
+    this.playback.setTimeScale(DEFAULT_TIME_SCALE);
+
+    this.buildHud();
+    this.buildCompareHelp();
+
     this.buildPanes([cloneConfig(PRESETS[0].config)]);
-    document.getElementById('start-btn')!.addEventListener('click', () => this.setPaused(false));
-    document.getElementById('help-dismiss')!.addEventListener('click', () => this.helpEl.classList.add('hidden'));
 
-    this.controls = new ControlPanel(
-      document.getElementById('side')!,
-      document.getElementById('header-controls')!,
-      {
-        getSims: () => this.panes.map((p) => p.sim),
-        loadPreset: (id) => this.resetPanes([cloneConfig(presetById(id).config)]),
-        applyScenario: (pane, id) => this.applyScenario(pane, id),
-        reset: () => this.resetPanes(this.panes.map((p) => cloneConfig(p.sim.cfg))),
-        pulse: (factor, durationMs) => {
-          for (const p of this.panes) p.sim.triggerPulse(factor, durationMs);
-        },
-        setPaused: (p) => this.setPaused(p),
-        isPaused: () => this.paused,
-        setTimeScale: (s) => {
-          this.timeScale = s;
-        },
-        getTimeScale: () => this.timeScale,
-        configChanged: (kind, target) => {
-          const sims =
-            target === 'all' ? this.panes.map((p) => p.sim) : this.panes[target] ? [this.panes[target].sim] : [];
-          for (const sim of sims) {
-            if (kind === 'rate') sim.rescheduleArrivals();
-            if (kind === 'structure') sim.applyStructure();
-          }
-        },
-        setCompare: (on) => this.setCompare(on),
-        isCompare: () => this.compare,
-        showCompareHelp: () => this.helpEl.classList.remove('hidden'),
+    this.controls = new ControlPanel(hosts.side, hosts.header, {
+      getSims: () => this.panes.map((p) => p.sim),
+      loadPreset: (id) => this.resetPanes([cloneConfig(presetById(id).config)]),
+      applyScenario: (pane, id) => this.applyScenario(pane, id),
+      reset: () => this.resetPanes(this.panes.map((p) => cloneConfig(p.sim.cfg))),
+      pulse: (factor, durationMs) => {
+        for (const p of this.panes) p.sim.triggerPulse(factor, durationMs);
       },
-    );
-
-    window.addEventListener('resize', () => this.resizeAll());
-    document.addEventListener('visibilitychange', () => {
-      // Browsers throttle rAF in background tabs; auto-pause instead of
-      // letting the sim lurch when the tab returns.
-      if (document.hidden && !this.paused) {
-        this.paused = true;
-        this.pausedByVisibility = true;
-      } else if (!document.hidden && this.pausedByVisibility) {
-        this.paused = false;
-        this.pausedByVisibility = false;
-      }
+      setPaused: (p) => this.playback.setPaused(p),
+      isPaused: () => this.playback.isPaused(),
+      setTimeScale: (s) => this.playback.setTimeScale(s),
+      getTimeScale: () => this.playback.getTimeScale(),
+      configChanged: (kind, target) => {
+        const sims =
+          target === 'all' ? this.panes.map((p) => p.sim) : this.panes[target] ? [this.panes[target].sim] : [];
+        for (const sim of sims) {
+          if (kind === 'rate') sim.rescheduleArrivals();
+          if (kind === 'structure') sim.applyStructure();
+        }
+      },
+      setCompare: (on) => this.setCompare(on),
+      isCompare: () => this.compare,
+      showCompareHelp: () => this.helpEl.classList.remove('hidden'),
     });
 
-    requestAnimationFrame((t) => {
-      this.lastWall = t;
-      requestAnimationFrame(this.frame);
-    });
+    this.playback.setStartHint(SINGLE_HINT);
   }
+
+  unmount(): void {
+    this.controls.destroy();
+    this.appEl.classList.remove('compare');
+    this.helpEl.remove();
+    this.hosts.hud.replaceChildren();
+    this.hosts.header.replaceChildren();
+    this.hosts.side.replaceChildren();
+    this.hosts.stage.replaceChildren();
+  }
+
+  step(simDtMs: number): void {
+    for (const p of this.panes) p.sim.step(simDtMs);
+  }
+
+  render(): void {
+    for (const p of this.panes) {
+      p.renderer.draw(p.sim);
+      p.charts.draw(p.sim);
+    }
+    this.controls.update();
+    this.updateHud();
+  }
+
+  resize(): void {
+    this.resizeAll();
+  }
+
+  simTimeMs(): number {
+    return this.panes[0]?.sim.now ?? 0;
+  }
+
+  onResume(): void {
+    this.helpEl.classList.add('hidden');
+  }
+
+  // -- HUD + overlays the experience owns --------------------------------------
+
+  private buildHud(): void {
+    this.stormBadge = el('div', 'single-only', '⚡ CONNECTION STORM');
+    this.stormBadge.id = 'storm-badge';
+    const successItem = el('div', 'hud-item single-only');
+    this.hudSuccess = el('span', 'amp-ok', '100%');
+    successItem.append(this.hudSuccess, labelEl('success rate'));
+    const ampItem = el('div', 'hud-item single-only');
+    this.hudAmp = el('span', 'amp-ok', '1.0');
+    ampItem.append(this.hudAmp, labelEl('amplification'));
+    this.hosts.hud.append(this.stormBadge, successItem, ampItem);
+  }
+
+  private buildCompareHelp(): void {
+    this.helpEl = el('div', 'hidden');
+    this.helpEl.id = 'compare-help';
+    this.helpEl.innerHTML = COMPARE_HELP_HTML;
+    this.helpEl.querySelector('#help-dismiss')!.addEventListener('click', () => this.helpEl.classList.add('hidden'));
+    this.hosts.stageCol.appendChild(this.helpEl);
+  }
+
+  // -- Panes -------------------------------------------------------------------
 
   /** Tear down and rebuild the pane DOM: one cfg = single, two = compare. */
   private buildPanes(cfgs: SimulationConfig[]): void {
@@ -175,8 +229,7 @@ export class App {
     this.buildPanes(cfgs);
     this.controls?.resetLog();
     this.controls?.refreshKnobs();
-    this.gateArmed = true;
-    this.setPaused(true);
+    this.playback.rearmGate();
   }
 
   private setCompare(on: boolean): void {
@@ -187,7 +240,7 @@ export class App {
     this.resetPanes(on ? [cfgA, cloneConfig(cfgA)] : [cfgA]);
     this.controls.setCompareUI(on);
     this.helpEl.classList.toggle('hidden', !on);
-    this.startHint.textContent = on ? COMPARE_HINT : SINGLE_HINT;
+    this.playback.setStartHint(on ? COMPARE_HINT : SINGLE_HINT);
   }
 
   /**
@@ -212,44 +265,12 @@ export class App {
     this.resetPanes(cfgs);
   }
 
-  private setPaused(p: boolean): void {
-    this.paused = p;
-    this.pausedByVisibility = false;
-    if (!p) {
-      this.gateArmed = false;
-      this.helpEl.classList.add('hidden');
-    }
-    // The gate shows only for a fresh (never-started) run; mid-run pauses
-    // just freeze the scene.
-    this.startGate.classList.toggle('hidden', !(this.paused && this.gateArmed));
-  }
-
-  private frame = (wallNow: number): void => {
-    const wallDt = Math.min(MAX_FRAME_WALL_MS, wallNow - this.lastWall);
-    this.lastWall = wallNow;
-    if (!this.paused) {
-      const simDt = Math.min(MAX_SIM_MS_PER_FRAME, wallDt * this.timeScale);
-      for (const p of this.panes) p.sim.step(simDt);
-    }
-    for (const p of this.panes) {
-      p.renderer.draw(p.sim);
-      p.charts.draw(p.sim);
-    }
-    this.controls.update();
-    this.updateHud();
-    requestAnimationFrame(this.frame);
-  };
-
   private updateHud(): void {
-    const lead = this.panes[0].sim;
-    const clock = `${(lead.now / 1000).toFixed(1)}s`;
-    if (this.hudClock.textContent !== clock) this.hudClock.textContent = clock;
-
     if (!this.compare) {
-      const s = rollingStats(lead);
+      const s = rollingStats(this.panes[0].sim);
       setStat(this.hudAmp, s.ampText, s.ampCls);
       setStat(this.hudSuccess, s.rateText, s.rateCls);
-      this.stormBadge.classList.toggle('visible', lead.stormActive());
+      this.stormBadge.classList.toggle('visible', this.panes[0].sim.stormActive());
       return;
     }
     for (const p of this.panes) {
@@ -286,4 +307,17 @@ function rollingStats(sim: Simulation): { rateText: string; rateCls: string; amp
 function setStat(node: HTMLElement, text: string, cls: string): void {
   if (node.textContent !== text) node.textContent = text;
   if (node.className !== cls) node.className = cls;
+}
+
+function el(tag: string, className: string, text?: string): HTMLElement {
+  const node = document.createElement(tag);
+  node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function labelEl(text: string): HTMLElement {
+  const node = document.createElement('label');
+  node.textContent = text;
+  return node;
 }

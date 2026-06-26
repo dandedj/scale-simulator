@@ -486,6 +486,8 @@ export class ControlPanel {
   private side: HTMLElement;
   private header: HTMLElement;
   private hooks: ControlHooks;
+  private legend!: Legend;
+  private overview!: SystemOverview;
 
   constructor(side: HTMLElement, header: HTMLElement, hooks: ControlHooks) {
     this.side = side;
@@ -517,13 +519,9 @@ export class ControlPanel {
 
     this.pauseBtn = el('button', 'btn', '▶') as HTMLButtonElement;
     this.pauseBtn.title = 'Pause / resume (space)';
+    // Space-to-pause is registered once on the shell (it owns playback), so it
+    // survives mode switches and never leaks a per-mount listener.
     this.pauseBtn.addEventListener('click', () => this.hooks.setPaused(!this.hooks.isPaused()));
-    window.addEventListener('keydown', (e) => {
-      if (e.code === 'Space' && !(e.target instanceof HTMLInputElement)) {
-        e.preventDefault();
-        this.hooks.setPaused(!this.hooks.isPaused());
-      }
-    });
     wrap.appendChild(this.pauseBtn);
 
     // Speed: log slider mapping [0 .. 1] → 0.01x .. 2x sim-speed
@@ -560,10 +558,17 @@ export class ControlPanel {
     this.compareBtn.addEventListener('click', () => this.hooks.setCompare(!this.hooks.isCompare()));
     wrap.appendChild(this.compareBtn);
 
-    new SystemOverview(wrap, () => this.cfgFor('sim'));
-    new Legend(wrap);
+    this.overview = new SystemOverview(wrap, () => this.cfgFor('sim'));
+    this.legend = new Legend(wrap);
 
     this.header.appendChild(wrap);
+  }
+
+  /** Dispose modal dialogs appended to document.body (the header host's own
+   * buttons are dropped when the experience clears #header-controls). */
+  destroy(): void {
+    this.legend.destroy();
+    this.overview.destroy();
   }
 
   private miniSlider(min: number, max: number, step: number, value: number, onInput: (v: number) => void): HTMLInputElement {

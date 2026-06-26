@@ -186,6 +186,7 @@ const SECTIONS: LegendSection[] = [
 
 export class Legend {
   private dialog: HTMLDialogElement;
+  private btn!: HTMLButtonElement;
 
   constructor(header: HTMLElement) {
     this.dialog = document.createElement('dialog');
@@ -223,16 +224,23 @@ export class Legend {
       if (e.target === this.dialog) this.dialog.close();
     });
 
-    const btn = document.createElement('button');
-    btn.className = 'btn';
-    btn.textContent = '? LEGEND';
-    btn.title = 'What the colors, shapes, and gauges mean';
-    btn.addEventListener('click', () => this.toggle());
-    header.appendChild(btn);
+    this.btn = document.createElement('button');
+    this.btn.className = 'btn';
+    this.btn.textContent = '? LEGEND';
+    this.btn.title = 'What the colors, shapes, and gauges mean';
+    this.btn.addEventListener('click', () => this.toggle());
+    header.appendChild(this.btn);
   }
 
   toggle(): void {
     if (this.dialog.open) this.dialog.close();
     else this.dialog.showModal();
+  }
+
+  /** Remove the dialog (appended to body) and trigger button. */
+  destroy(): void {
+    if (this.dialog.open) this.dialog.close();
+    this.dialog.remove();
+    this.btn.remove();
   }
 }

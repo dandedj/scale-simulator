@@ -122,6 +122,31 @@ body {
   color: var(--info);
 }
 
+/* ---------- Mode switch (Connection Storm / DNS Distribution) ---------- */
+
+#mode-switch {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.mode-tab {
+  font-size: 12px;
+  padding: 6px 11px;
+  opacity: 0.7;
+}
+
+.mode-tab:hover {
+  opacity: 1;
+}
+
+.mode-tab.active {
+  opacity: 1;
+  background: var(--info);
+  color: #0a0b0e;
+  border-color: var(--info);
+}
+
 .btn-pulse {
   color: #0a0b0e;
   background: var(--warn);
@@ -150,6 +175,12 @@ body {
   display: flex;
   align-items: center;
   gap: 18px;
+}
+
+/* The experience fills #hud-extra with mode-specific chips; display:contents
+   keeps them as direct flex children of .hud (same spacing as static markup). */
+#hud-extra {
+  display: contents;
 }
 
 .hud-item {
@@ -1072,7 +1103,8 @@ input[type='range']::-moz-range-thumb {
 
 /* ---------- Legend dialog ---------- */
 
-#legend-dialog {
+#legend-dialog,
+.legend-dialog {
   background: var(--panel);
   color: var(--text);
   border: 1px solid var(--border);
@@ -1084,7 +1116,8 @@ input[type='range']::-moz-range-thumb {
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
 }
 
-#legend-dialog::backdrop {
+#legend-dialog::backdrop,
+.legend-dialog::backdrop {
   background: rgba(6, 7, 9, 0.7);
   backdrop-filter: blur(2px);
 }
@@ -1160,7 +1193,8 @@ input[type='range']::-moz-range-thumb {
 
 /* ---------- System overview dialog ---------- */
 
-#overview-dialog {
+#overview-dialog,
+.overview-dialog {
   background: var(--panel);
   color: var(--text);
   border: 1px solid var(--border);
@@ -1172,7 +1206,8 @@ input[type='range']::-moz-range-thumb {
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
 }
 
-#overview-dialog::backdrop {
+#overview-dialog::backdrop,
+.overview-dialog::backdrop {
   background: rgba(6, 7, 9, 0.7);
   backdrop-filter: blur(2px);
 }
@@ -1574,4 +1609,60 @@ input[type='range']::-moz-range-thumb {
   margin: 7px 11px;
   font-size: 11px;
   padding: 4px 9px;
+}
+
+/* ---------- DNS distribution mode ---------- */
+
+/* Traffic-shape segmented selector (a knob-row control). */
+.shape-seg {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.shape-btn {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 0;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    color 0.15s;
+}
+
+.shape-btn:hover {
+  border-color: var(--text-dim);
+}
+
+.shape-btn.active {
+  color: #0a0b0e;
+  background: var(--info);
+  border-color: var(--info);
+}
+
+/* Below-SLO HUD badge (the DNS analog of the storm badge). */
+#dns-degraded {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 1.5px;
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  border-radius: 5px;
+  padding: 5px 12px;
+  opacity: 0;
+  transition: opacity 0.25s;
+  animation: storm-pulse 0.9s ease-in-out infinite;
+  pointer-events: none;
+}
+
+#dns-degraded.visible {
+  opacity: 1;
 }
