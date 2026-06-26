@@ -170,67 +170,51 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
         },
       },
       {
-        label: 'Update interval', min: 5000, max: 300000, step: 5000, get: (c) => c.dns.updateIntervalMs, set: (c, v) => (c.dns.updateIntervalMs = v), format: mins,
+        label: 'Lambda interval', min: 5000, max: 300000, step: 5000, get: (c) => c.dns.updateIntervalMs, set: (c, v) => (c.dns.updateIntervalMs = v), format: mins,
         info: {
-          what: 'How often RTB Fabric pushes the health-derived record set to Route53.',
-          how: 'On each cycle the advertised set is recomputed from servers the health checker believes healthy.',
-          expect: 'One of three serial lags before a change reaches traffic: health detection + this interval + TTL. Shrinking it alone barely moves surge absorption.',
+          what: 'How often RTB Fabric’s publisher Lambda runs — it updates the Route53 record set with the IPs of the healthy servers.',
+          how: 'The zone is a private hosted zone (Route53 does not health-check it); each Lambda run evaluates server health and republishes the healthy set, failing open if none are healthy.',
+          expect: 'A serial lag before a change reaches traffic: this interval + TTL (+ boot, for new capacity). Shrinking it alone barely moves surge absorption — boot and TTL dominate.',
         },
       },
       {
         label: 'Propagation', min: 0, max: 30000, step: 1000, get: (c) => c.dns.propagationMs, set: (c, v) => (c.dns.propagationMs = v), format: secs,
         info: {
-          what: 'Extra delay before a pushed record set takes effect.',
-          how: 'Models authoritative + resolver propagation on top of the publish interval.',
+          what: 'Extra delay before a published record set takes effect.',
+          how: 'Models resolver propagation on top of the Lambda interval. RTB Fabric returns all healthy records to every client (no multivalue subset).',
           expect: 'Adds directly to how long a removed server keeps being handed out.',
-        },
-      },
-      {
-        label: 'Records returned', min: 1, max: 20, step: 1, get: (c) => c.dns.recordsReturned, set: (c, v) => (c.dns.recordsReturned = v),
-        info: {
-          what: 'How many IPs a single resolution returns (Route53 multivalue answers up to 8).',
-          how: 'Each cohort caches a random subset of the advertised set of this size; different cohorts see different IPs.',
-          expect: 'Small answers (8 of many) fill a new server slowly and spread load diffusely; “all IPs” is even but unrealistic at fleet scale.',
         },
       },
     ],
     toggles: [],
   },
   {
-    name: 'Health checks',
+    name: 'Server health (Lambda)',
     scope: 'sim',
     knobs: [
       {
-        label: 'Check interval', min: 5000, max: 60000, step: 1000, get: (c) => c.health.checkIntervalMs, set: (c, v) => (c.health.checkIntervalMs = v), format: secs,
+        label: 'Unhealthy after', min: 1, max: 10, step: 1, get: (c) => c.health.unhealthyThreshold, set: (c, v) => (c.health.unhealthyThreshold = v), format: (v) => `${v} runs`,
         info: {
-          what: 'Route53 health-check cadence.',
-          how: 'Detection latency ≈ interval × the consecutive-fail threshold below.',
-          expect: 'Faster checks detect a dead server sooner but flap a borderline one in and out, causing re-resolve churn.',
+          what: 'Consecutive Lambda runs a server is unhealthy before it is pulled from DNS.',
+          how: 'Detection lag ≈ this × the Lambda interval (e.g. 2 runs × 1 min = ~2 min). 1 = removed on the next run.',
+          expect: 'Higher tolerates blips but slows removal of a genuinely dead server; the dead IP keeps getting traffic until its caching cohorts re-resolve.',
         },
       },
       {
-        label: 'Unhealthy after', min: 1, max: 10, step: 1, get: (c) => c.health.unhealthyThreshold, set: (c, v) => (c.health.unhealthyThreshold = v), format: (v) => `${v}×`,
+        label: 'Healthy after', min: 1, max: 10, step: 1, get: (c) => c.health.healthyThreshold, set: (c, v) => (c.health.healthyThreshold = v), format: (v) => `${v} runs`,
         info: {
-          what: 'Consecutive failed checks before a server is marked unhealthy and pulled from DNS.',
-          how: 'With the interval, sets the detection lag (e.g. 10s × 3 = ~30s).',
-          expect: 'Higher tolerates blips but slows removal of a genuinely dead server.',
-        },
-      },
-      {
-        label: 'Healthy after', min: 1, max: 10, step: 1, get: (c) => c.health.healthyThreshold, set: (c, v) => (c.health.healthyThreshold = v), format: (v) => `${v}×`,
-        info: {
-          what: 'Consecutive passing checks before a server is (re)added to DNS.',
-          how: 'The grace a freshly booted server serves before being advertised — hysteresis against flapping.',
-          expect: 'Higher is steadier but delays new capacity entering rotation.',
+          what: 'Consecutive Lambda runs a server is healthy before it is (re)added to DNS.',
+          how: 'The grace a freshly booted server waits before being advertised — hysteresis against flapping.',
+          expect: 'Higher is steadier but delays new capacity entering rotation on top of boot + warm-up.',
         },
       },
     ],
     toggles: [
       {
-        label: 'Overload fails health', get: (c) => c.health.overloadFailsHealth, set: (c, v) => (c.health.overloadFailsHealth = v),
+        label: 'Overload marks unhealthy', get: (c) => c.health.overloadFailsHealth, set: (c, v) => (c.health.overloadFailsHealth = v),
         info: {
-          what: 'Whether an overloaded (RST-shedding) server fails its health check.',
-          how: 'Off (default, realistic): a TCP/HTTP check sees “accepting connections” and passes, so DNS does NOT remove an overwhelmed-but-up server — which is why the RST loop exists. On: a load-aware check pulls it.',
+          what: 'Whether the Lambda marks an overloaded (RST-shedding) server unhealthy.',
+          how: 'Off (default, realistic): a liveness check sees “accepting connections” and passes, so the Lambda does NOT pull an overwhelmed-but-up server — which is why the RST loop exists. On: a load-aware check pulls it.',
           expect: 'On can help DNS de-load a hot server, but risks flapping it in/out as load shifts; off leaves overload entirely to the fast RST loop.',
         },
       },

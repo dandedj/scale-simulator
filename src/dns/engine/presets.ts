@@ -7,11 +7,10 @@
  * when the operator drives an event: kill a server, ramp the traffic, or pulse.
  *
  * Defaults are demo-scaled but keep the ratios that matter: a server boots in
- * ~5 min, DNS publishes every ~1 min, health detection takes ~30s
- * (10s × 3 checks), and a cohort caches a resolution for ~1 min. The fleet
- * serves 30k req/s; the steady offer is 18k (60%) and a pulse/ramp peak of 45k
- * exceeds total capacity — so a big enough surge has irreducible loss no matter
- * how it is distributed.
+ * ~5 min, RTB Fabric's publisher Lambda updates the record set every ~1 min,
+ * and a cohort caches a resolution for ~1 min. The fleet serves 30k req/s; the
+ * steady offer is 18k (60%) and a pulse/ramp peak of 45k exceeds total capacity
+ * — so a big enough surge has irreducible loss no matter how it is distributed.
  */
 
 import type { DnsPreset, DnsSimulationConfig } from './types';
@@ -32,12 +31,10 @@ export function baseConfig(): DnsSimulationConfig {
       ttlJitter: 0.2,
       updateIntervalMs: 60_000,
       propagationMs: 0,
-      recordsReturned: 8,
     },
     health: {
-      checkIntervalMs: 10_000,
-      unhealthyThreshold: 3,
-      healthyThreshold: 3,
+      unhealthyThreshold: 1,
+      healthyThreshold: 1,
       overloadFailsHealth: false,
     },
     servers: {

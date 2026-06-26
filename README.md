@@ -319,7 +319,12 @@ bidders** (bidders are drawn but do not influence the model). It is a *fluid*
 model: traffic is carried as piecewise-constant rates (requests/sec), not
 per-request entities, so it stays correct and cheap at fleet scale under heavy
 time compression. Discrete events fire only when the rate field changes — TTL
-re-resolves, DNS publishes, health checks, server boots, traffic ticks.
+re-resolves, publisher-Lambda runs, server boots, traffic ticks.
+
+The zone is a **private hosted zone managed by RTB Fabric**, so Route53 does not
+health-check the servers. A **publisher Lambda runs every ~1 min**, evaluates
+which servers are healthy, and updates the record set — and it returns **all**
+healthy IPs to every client (no multivalue subset).
 
 Two control loops at very different timescales decide where traffic lands, and
 the separation is the whole point:
@@ -330,24 +335,22 @@ the separation is the whole point:
    only within the capacity a client already holds (advertised **and** cached
    right now). Modeled as a water-filling fixed point solved inside each
    rebalance.
-2. **Slow loop (minutes).** Health detection (check interval × consecutive-fail
-   threshold) **+** the DNS publish interval **+** per-client TTL expiry **+**
-   server boot/warm-up. This is the only loop that grows the healthy-and-cached
-   capacity.
+2. **Slow loop (minutes).** The publisher-Lambda interval (health is evaluated
+   per run, with run-count hysteresis) **+** per-client TTL expiry **+** server
+   boot/warm-up. This is the only loop that grows the healthy-and-cached capacity.
 
 So **TTL is a failover lever** (how fast clients leave a dead IP), **not a
 scale-out lever** (how fast new capacity absorbs a surge). When offered load
 exceeds total fleet capacity, no distribution scheme keeps 100% — it only
-decides where the loss lands. Health checks detect *liveness, not load* by
-default, so an overwhelmed-but-up server keeps passing checks (which is why the
-RST loop exists); Route53 *fails open* when every server is unhealthy, returning
-all records rather than an empty answer.
+decides where the loss lands. The Lambda's check detects *liveness, not load* by
+default, so an overwhelmed-but-up server stays advertised (which is why the RST
+loop exists); the Lambda *fails open* when no server is healthy, advertising all
+records rather than publishing an empty set.
 
 Resolver layering is collapsed into a per-cohort effective TTL with a
 pinned/TTL-ignoring tail (connection- or JVM-pinned clients that only fail over
-via an RST re-pick). A DNS answer is a random subset (multivalue, default 8) of
-the advertised healthy IPs. The **? LEGEND** and **◈ SYSTEM** dialogs spell out
-every encoding and the full list of modeling assumptions.
+via an RST re-pick). The **? LEGEND** and **◈ SYSTEM** dialogs spell out every
+encoding and the full list of modeling assumptions.
 
 ### Primary metric
 
@@ -380,9 +383,10 @@ any step granularity), and that each scenario still demonstrates its lesson.
 
 ### Grounding (DNS specifics)
 
-- Route53 health checks (~30s default cadence, 3 consecutive failures to mark
-  unhealthy → ~90s detection) and the *fail-open* behavior when all records are
-  unhealthy; multivalue-answer routing returns up to 8 records.
+- RTB Fabric's private hosted zone is managed by a publisher Lambda that runs
+  every ~1 min to update the record set with the healthy server IPs, returning
+  all of them to every client; it fails open (advertises all) when none are
+  healthy. Route53 itself does not health-check the servers.
 - DNS TTL caching across recursive/stub resolvers and connection-/JVM-pinned
   clients that hold a resolution far past the authoritative TTL.
 - Autoscaling lead time dominated by instance boot + warm-up, far longer than a

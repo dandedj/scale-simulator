@@ -49,22 +49,25 @@ export interface DnsControlConfig {
   updateIntervalMs: number;
   /** Extra delay before a pushed record set takes effect (propagation, ms). */
   propagationMs: number;
-  /** Records returned per resolution (Route53 multivalue answers up to 8). */
-  recordsReturned: number;
 }
 
+/**
+ * RTB Fabric health, evaluated by the publisher Lambda each run (the zone is a
+ * private hosted zone, so Route53 does not health-check the servers — RTB
+ * Fabric's Lambda monitors the fleet and manages the record set). Thresholds
+ * count consecutive Lambda runs, so detection latency ≈ threshold × the Lambda
+ * (DNS update) interval.
+ */
 export interface DnsHealthConfig {
-  /** Route53 health-check cadence (ms). */
-  checkIntervalMs: number;
-  /** Consecutive failed checks before a server is marked unhealthy. */
+  /** Consecutive Lambda runs a server is unhealthy before it is pulled from DNS. */
   unhealthyThreshold: number;
-  /** Consecutive passing checks before a server is (re)marked healthy. */
+  /** Consecutive Lambda runs a server is healthy before it is added to DNS. */
   healthyThreshold: number;
   /**
-   * Whether an overloaded (RST-shedding) server fails its health check. Off by
-   * default: real TCP/HTTP checks see "accepting connections" and pass, so DNS
-   * does NOT remove an overwhelmed-but-up server — which is exactly why the RST
-   * loop exists. On models a load-aware health check.
+   * Whether the Lambda marks an overloaded (RST-shedding) server unhealthy. Off
+   * by default: a liveness check sees "accepting connections" and passes, so an
+   * overwhelmed-but-up server stays advertised — which is exactly why the RST
+   * loop exists. On models a load-aware check.
    */
   overloadFailsHealth: boolean;
 }
@@ -186,10 +189,14 @@ export interface DnsControlView {
   advertisedCount: number;
   /** Total effective capacity of advertised servers, req/s. */
   advertisedCapacity: number;
-  /** Servers the health checker currently believes healthy. */
+  /** Servers the publisher Lambda currently believes healthy. */
   healthyKnownCount: number;
   totalServers: number;
-  /** Whether DNS is currently failing open (all candidates unhealthy). */
+  /**
+   * True when RTB Fabric's Lambda is failing open — advertising every server
+   * because none were found healthy, rather than publish an empty record set
+   * that would black-hole the zone.
+   */
   failOpen: boolean;
   msUntilUpdate: number;
   ttlMs: number;

@@ -86,12 +86,12 @@ describe('baseline invariants', () => {
 
 describe('the fast loop: RST shedding', () => {
   it('RST re-pick lifts availability over a hot fleet vs no shedding', () => {
-    // High, uneven load (small answer set + heterogeneity) just under total
-    // capacity so hot spots form with headroom elsewhere to re-pick into.
+    // Every client gets all records, so load splits evenly — but a wide capacity
+    // spread means low-capacity servers overload while others keep headroom.
+    // Offered sits under total capacity, so the RST loop can re-pick all of it.
     const tune = (c: DnsSimulationConfig) => {
-      c.traffic.baseRatePerSec = 28_000; // 28k of 30k total
-      c.dns.recordsReturned = 4;
-      c.clients.heterogeneity = 0.5;
+      c.traffic.baseRatePerSec = 26_000; // 26k of 30k total → aggregate headroom
+      c.servers.capacityJitter = 0.4; // wide spread → partial overload
       c.clients.pinnedFraction = 0;
     };
     const withRst = newSim(tune);
@@ -113,7 +113,7 @@ describe('the slow loop: TTL is a failover lever, not a fix', () => {
     const tune = (c: DnsSimulationConfig) => {
       c.servers.autoReplace = false; // isolate the staleness, no recovery
       c.clients.pinnedFraction = 0; // isolate TTL from pinned clients
-      c.dns.recordsReturned = 20; // every cohort caches the victim
+      // Every cohort caches the full record set, so all of them hold the victim.
     };
     const longTtl = newSim((c) => {
       tune(c);

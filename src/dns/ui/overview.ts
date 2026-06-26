@@ -21,8 +21,8 @@ const STAGES: Stage[] = [
   {
     n: '1',
     title: 'Client resolves Route 53',
-    value: (c) => `TTL ${secs(c.dns.ttlMs)} · ${c.dns.recordsReturned} records`,
-    how: 'A client cohort resolves the endpoint and caches a subset of the advertised IPs for the TTL. Different cohorts get different subsets (multivalue answers up to 8). Re-resolution is staggered/jittered across the population, and a pinned fraction never re-resolves at all.',
+    value: (c) => `TTL ${secs(c.dns.ttlMs)} · all healthy IPs`,
+    how: 'A client cohort resolves the endpoint and caches the record set for the TTL. RTB Fabric runs a private hosted zone and returns ALL advertised healthy IPs to every client (no multivalue subset). Re-resolution is staggered/jittered across the population, and a pinned fraction never re-resolves at all.',
   },
   {
     n: '2',
@@ -38,27 +38,21 @@ const STAGES: Stage[] = [
   },
   {
     n: '4',
-    title: 'Health check — the SLOW loop begins',
-    value: (c) => `${secs(c.health.checkIntervalMs)} × ${c.health.unhealthyThreshold} ≈ ${secs(c.health.checkIntervalMs * c.health.unhealthyThreshold)} detect`,
-    how: 'Route53 health checks detect LIVENESS, not load (by default an overloaded-but-up server keeps passing — which is why the RST loop exists). A server is marked unhealthy only after the consecutive-fail threshold.',
+    title: 'Publisher Lambda — the SLOW loop',
+    value: (c) => `every ${secs(c.dns.updateIntervalMs)}${c.dns.propagationMs ? ` + ${secs(c.dns.propagationMs)} prop` : ''}`,
+    how: 'The zone is private, so Route53 does NOT health-check the servers. RTB Fabric runs a Lambda every interval that evaluates server health (LIVENESS, not load — an overloaded-but-up server keeps passing, which is why the RST loop exists) and republishes the healthy IPs. If EVERY server is unhealthy the Lambda FAILS OPEN — advertising all records rather than an empty set. A client only sees the change when its TTL expires and it re-resolves.',
   },
   {
     n: '5',
-    title: 'RTB Fabric publishes the record set',
-    value: (c) => `every ${secs(c.dns.updateIntervalMs)}${c.dns.propagationMs ? ` + ${secs(c.dns.propagationMs)} prop` : ''}`,
-    how: 'On each cycle the advertised set is recomputed from servers believed healthy. If EVERY server is unhealthy, Route53 fails open — it returns all records rather than an empty answer. A client only sees the change when its TTL expires and it re-resolves.',
-  },
-  {
-    n: '6',
     title: 'Server lifecycle — down, replace, scale out',
     value: (c) => `boot ${secs(c.servers.bootMs)} · warm ${secs(c.servers.warmupMs)}`,
-    how: 'A killed server black-holes its cached traffic (graceful drain keeps serving it for the drain window). A replacement or scale-out server takes ~5 min to boot, then must pass health checks, be published, and be re-resolved before it carries load.',
+    how: 'A killed server black-holes its cached traffic (graceful drain keeps serving it for the drain window). A replacement or scale-out server takes ~5 min to boot, then must be picked up by the Lambda, published, and re-resolved before it carries load.',
   },
 ];
 
 const ENGINE = {
   title: 'Two loops, two timescales — the whole point',
-  body: 'The FAST loop (RST → re-pick within the cached set) reacts in milliseconds but can only move load among the IPs a client already holds. The SLOW loop — health detection + DNS publish interval + TTL expiry + server boot — is the only thing that grows the healthy-and-cached capacity, and it takes minutes. So TTL is a failover lever (how fast clients leave a dead IP), not a scale-out lever (how fast new capacity absorbs a surge). When offered load exceeds total fleet capacity, no distribution scheme keeps 100% — it only decides where the loss lands.',
+  body: 'The FAST loop (RST → re-pick within the cached set) reacts in milliseconds but can only move load among the IPs a client already holds. The SLOW loop — the publisher Lambda interval + TTL expiry + server boot — is the only thing that grows the healthy-and-cached capacity, and it takes minutes. So TTL is a failover lever (how fast clients leave a dead IP), not a scale-out lever (how fast new capacity absorbs a surge). When offered load exceeds total fleet capacity, no distribution scheme keeps 100% — it only decides where the loss lands.',
 };
 
 interface FailRow {
@@ -76,8 +70,8 @@ const FAILURES: FailRow[] = [
 const ASSUMPTIONS: string[] = [
   'Traffic is modeled as rates, not individual requests; the sub-second RST loop is solved to a fixed point each rebalance, while DNS / health / TTL / boot are explicit discrete events.',
   'Resolver layering is collapsed into a per-cohort effective TTL (the authoritative TTL as its floor) plus a pinned/TTL-ignoring tail (connection- or JVM-pinned clients).',
-  'Health checking is a detection latency (interval × consecutive-fail threshold) plus Route53 fail-open; the signal is liveness, not load (toggle to make overload fail health).',
-  'A DNS answer is a random subset (multivalue, default 8) of the advertised healthy IPs; weighted / latency / geo routing is out of scope.',
+  'The zone is a private hosted zone managed by an RTB Fabric publisher Lambda (run every interval) — Route53 does not health-check the servers. The Lambda evaluates liveness (not load, by default) with run-count hysteresis, and fails open (advertises all) when none are healthy.',
+  'RTB Fabric returns ALL advertised healthy IPs to every client — no multivalue subset, weighting, or latency/geo routing.',
   'Clients re-resolve on cache expiry; an RST re-picks within the cached set, and fresh IPs enter only on expiry (or the opt-in early re-resolve).',
   'Availability = served ÷ offered, counted after the within-cache fast loop. RSTs and re-resolves are internal, not offered/served events.',
   'Server capacity is a fixed work-rate with a warm-up ramp; the fleet is pre-warmed at t0 (cold start excluded). Bidders are represented but do not influence the model.',

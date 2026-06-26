@@ -107,6 +107,7 @@ export class DnsSimulation {
   cohorts: ClientCohort[] = [];
   /** The live Route53 record set clients resolve against. */
   advertised: number[] = [];
+  /** RTB Fabric's Lambda is failing open — advertising all servers (none healthy). */
   failOpen = false;
 
   // Traffic pulse (manual surge multiplier).
@@ -162,8 +163,7 @@ export class DnsSimulation {
     }
 
     this.scheduleTick();
-    this.scheduleHealthCheck();
-    this.scheduleDnsUpdate();
+    this.scheduleLambda();
     this.rebalance();
   }
 
@@ -410,20 +410,26 @@ export class DnsSimulation {
   private meanLoad = 0;
   private maxLoad = 0;
 
-  // -- The slow loop: health checks + DNS publish ------------------------------
+  // -- The slow loop: the RTB Fabric publisher Lambda --------------------------
 
-  private scheduleHealthCheck(): void {
-    this.queue.schedule(this.now + this.cfg.health.checkIntervalMs, () => {
-      this.runHealthCheck();
-      this.scheduleHealthCheck();
+  /**
+   * RTB Fabric runs a Lambda every updateIntervalMs (the private hosted zone is
+   * managed by RTB Fabric, not health-checked by Route53). Each run evaluates
+   * server health (with hysteresis, counted in runs) and publishes the healthy
+   * IPs to Route53. This is the slow control loop — minutes — that the fast RST
+   * loop covers for.
+   */
+  private scheduleLambda(): void {
+    this.queue.schedule(this.now + this.cfg.dns.updateIntervalMs, () => {
+      this.runLambda();
+      this.scheduleLambda();
     });
   }
 
-  private runHealthCheck(): void {
+  private runLambda(): void {
     const h = this.cfg.health;
     for (const s of this.servers) {
-      const fail = this.liveFail(s);
-      if (fail) {
+      if (this.liveFail(s)) {
         s.consecPasses = 0;
         s.consecFails++;
         if (s.consecFails >= h.unhealthyThreshold) s.healthCheckHealthy = false;
@@ -433,31 +439,25 @@ export class DnsSimulation {
         if (s.consecPasses >= h.healthyThreshold) s.healthCheckHealthy = true;
       }
     }
+    this.pushDnsUpdate();
   }
 
-  /** A health check "fails" for anything not cleanly serving; overload only counts if configured. */
+  /** A server fails the Lambda's check for anything not cleanly serving; overload only counts if configured. */
   private liveFail(s: FabricServer): boolean {
     if (s.state !== 'healthy') return true;
     if (this.cfg.health.overloadFailsHealth && s.overloaded) return true;
     return false;
   }
 
-  private scheduleDnsUpdate(): void {
-    this.queue.schedule(this.now + this.cfg.dns.updateIntervalMs, () => {
-      this.pushDnsUpdate();
-      this.scheduleDnsUpdate();
-    });
-  }
-
-  /** RTB Fabric publishes the health-derived record set (with propagation lag). */
+  /** Publish the healthy record set (with propagation lag); fail open if none. */
   private pushDnsUpdate(): void {
     const candidates = this.healthyCandidates();
+    const ids = candidates.length ? candidates : this.allServerIds();
+    const failOpen = candidates.length === 0;
     if (this.cfg.dns.propagationMs > 0) {
-      this.queue.schedule(this.now + this.cfg.dns.propagationMs, () =>
-        this.applyAdvertised(candidates.length ? candidates : this.allServerIds(), candidates.length === 0),
-      );
+      this.queue.schedule(this.now + this.cfg.dns.propagationMs, () => this.applyAdvertised(ids, failOpen));
     } else {
-      this.applyAdvertised(candidates.length ? candidates : this.allServerIds(), candidates.length === 0);
+      this.applyAdvertised(ids, failOpen);
     }
   }
 
@@ -470,14 +470,14 @@ export class DnsSimulation {
   }
 
   /**
-   * Swap the record set. When every candidate is unhealthy, Route53 fails OPEN —
-   * it returns all records rather than an empty answer, so clients keep trying
-   * (possibly dead) IPs instead of getting NXDOMAIN.
+   * Swap the record set. When the Lambda finds no healthy server it FAILS OPEN —
+   * advertising every record rather than publishing an empty set that would
+   * black-hole the zone, so clients keep trying (possibly dead) IPs.
    */
   private applyAdvertised(ids: number[], failOpen: boolean): void {
     this.advertised = ids.slice();
     if (failOpen && !this.failOpen) {
-      this.metrics.log(this.now, 'critical', 'DNS failing open: all servers unhealthy — advertising every record');
+      this.metrics.log(this.now, 'critical', 'Publisher Lambda failing open: no healthy servers — advertising every record');
     }
     this.failOpen = failOpen;
     const set = new Set(ids);
@@ -486,7 +486,7 @@ export class DnsSimulation {
 
   // -- Resolution + TTL --------------------------------------------------------
 
-  /** A cohort re-resolves: copy a fresh subset of the record set, re-arm TTL. */
+  /** A cohort re-resolves: copy the current record set, re-arm its TTL. */
   private resolveCohort(c: ClientCohort): void {
     c.cachedSet = this.pickRecords();
     this.metrics.countReResolve();
@@ -498,19 +498,10 @@ export class DnsSimulation {
     c.reResolveEvent = this.queue.schedule(this.now + wait, () => this.resolveCohort(c));
   }
 
-  /** Route53 multivalue answer: up to recordsReturned of the advertised set, rotated. */
+  /** RTB Fabric serves a private hosted zone and returns ALL advertised records
+   * to every client — no multivalue subset. */
   private pickRecords(): number[] {
-    const adv = this.advertised;
-    const n = this.cfg.dns.recordsReturned;
-    if (adv.length <= n) return adv.slice();
-    const pool = adv.slice();
-    for (let i = 0; i < n; i++) {
-      const j = i + Math.floor(this.rng.next() * (pool.length - i));
-      const t = pool[i];
-      pool[i] = pool[j];
-      pool[j] = t;
-    }
-    return pool.slice(0, n);
+    return this.advertised.slice();
   }
 
   // -- Lifecycle ---------------------------------------------------------------

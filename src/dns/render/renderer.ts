@@ -136,15 +136,15 @@ export class DnsRenderer {
       ctx.fillRect(cx, stripY, cw, h - (stripY - y) - 8);
     }
 
-    // Next-update countdown + fail-open flag (right aligned).
+    // Publisher-Lambda countdown + fail-open flag (right aligned).
     ctx.textAlign = 'right';
     ctx.font = '600 11px "IBM Plex Mono", monospace';
     if (v.failOpen) {
       ctx.fillStyle = SEMANTIC.timeout;
-      ctx.fillText('⚠ FAIL-OPEN (all unhealthy → all records served)', x + w - 12, y + 19);
+      ctx.fillText('⚠ LAMBDA FAIL-OPEN (no healthy servers → all records)', x + w - 12, y + 19);
     } else {
       ctx.fillStyle = SURFACE.textDim;
-      ctx.fillText(`next update ${(v.msUntilUpdate / 1000).toFixed(0)}s`, x + w - 12, y + 19);
+      ctx.fillText(`next Lambda ${(v.msUntilUpdate / 1000).toFixed(0)}s`, x + w - 12, y + 19);
     }
     ctx.textAlign = 'left';
   }
@@ -176,13 +176,30 @@ export class DnsRenderer {
       const cx = r.x + 8 + col * cellW;
       const cy = gridTop + row * cellH;
       const avail = c.offeredRate > 1e-6 ? c.servedRate / c.offeredRate : 1;
+      const staleFrac = c.offeredRate > 1e-6 ? c.staleRate / c.offeredRate : 0;
       const tileCol = avail >= 0.999 ? SEMANTIC.success : avail >= 0.9 ? SEMANTIC.shed : SEMANTIC.timeout;
+      const tx = cx + pad;
+      const ty = cy + pad;
+      const tw = Math.max(2, cellW - 2 * pad);
+      const th = Math.max(2, cellH - 2 * pad);
+      // Fill = availability the cohort experiences (served ÷ offered). Clients
+      // are not health-checked — only servers are — so this is an outcome, not a
+      // status.
       ctx.fillStyle = withAlpha(tileCol, 0.85);
-      ctx.fillRect(cx + pad, cy + pad, Math.max(2, cellW - 2 * pad), Math.max(2, cellH - 2 * pad));
+      ctx.fillRect(tx, ty, tw, th);
+      // Stale ring: this cohort still has a removed/dead IP cached and keeps
+      // aiming traffic at it (wasted connects), even if RST re-picks keep it
+      // served. The signature of TTL lag — lights up after a kill until the
+      // cohort re-resolves (pinned cohorts never do).
+      if (staleFrac > 0.01 && tw > 8 && th > 8) {
+        ctx.strokeStyle = withAlpha(SEMANTIC.error, Math.min(1, 0.5 + staleFrac));
+        ctx.lineWidth = 3;
+        ctx.strokeRect(tx + 1.5, ty + 1.5, tw - 3, th - 3);
+      }
       if (c.pinned) {
         // Pinned/JVM cohort: a small notch — it ignores TTL.
         ctx.fillStyle = withAlpha('#000000', 0.55);
-        ctx.fillRect(cx + pad, cy + pad, Math.max(2, (cellW - 2 * pad) * 0.32), 3);
+        ctx.fillRect(tx, ty, Math.max(2, tw * 0.32), 3);
       }
     }
   }
@@ -259,11 +276,11 @@ export class DnsRenderer {
       return;
     }
 
-    // Load gauge for serving (healthy/draining) servers.
+    // Load gauge (bottom) — how full the server is (can exceed 100% → overflow).
     const load = clamp01(s.load);
     const gx = x + 4;
     const gw = w - 8;
-    const gy = y + h - 7;
+    const gy = y + h - 6;
     ctx.fillStyle = SURFACE.panelRaised;
     ctx.fillRect(gx, gy, gw, 4);
     ctx.fillStyle = loadColor(s.load);
@@ -272,11 +289,26 @@ export class DnsRenderer {
       ctx.fillStyle = withAlpha(SEMANTIC.timeout, 0.6);
       ctx.fillRect(gx, gy - 2, gw, 1.5);
     }
-    ctx.font = '500 9px "IBM Plex Mono", monospace';
-    ctx.fillStyle = s.overloaded ? SEMANTIC.timeout : SURFACE.textDim;
+
     ctx.textAlign = 'left';
-    const label = s.state === 'draining' ? 'drain' : `${Math.round(s.load * 100)}%`;
-    ctx.fillText(label, x + 5, y + 13);
+    if (s.state === 'draining') {
+      ctx.font = '600 10px "IBM Plex Mono", monospace';
+      ctx.fillStyle = DRAIN_COLOR;
+      ctx.fillText('drain', x + 5, y + 14);
+      return;
+    }
+    // Per-server availability = served ÷ routed-here. 100% = serving everything
+    // it is handed; below 100% = shedding (the excess RSTs and re-picks
+    // elsewhere). Headlines the tile so shedding servers stand out.
+    const avail = serverAvailability(s);
+    ctx.font = '700 12px "IBM Plex Mono", monospace';
+    ctx.fillStyle = availColor(avail);
+    ctx.fillText(`${Math.round(avail * 100)}%`, x + 5, y + 15);
+    if (h > 42) {
+      ctx.font = '500 9px "IBM Plex Mono", monospace';
+      ctx.fillStyle = SURFACE.textDim;
+      ctx.fillText(`${Math.round(s.load * 100)}% load`, x + 5, y + 28);
+    }
   }
 
   private serverFill(s: DnsServerView): string {
@@ -288,7 +320,9 @@ export class DnsRenderer {
       case 'down':
         return DOWN_COLOR;
       case 'healthy':
-        return s.overloaded ? SEMANTIC.timeout : loadColor(s.load);
+        // Color by availability: green when serving all it is handed, amber/red
+        // when shedding — so overloaded servers read instantly.
+        return availColor(serverAvailability(s));
     }
   }
 
@@ -331,6 +365,12 @@ export class DnsRenderer {
 
   // -- Flow (clients → servers) -----------------------------------------------
 
+  /**
+   * The traffic the clients send to the servers, drawn as a labeled, directional
+   * pipe in the gap. The pipe is a constant-width "flow" whose colored layers
+   * show the outcome split (served / shed / stale→dead IP / unavailable), with
+   * an arrowhead pointing at the servers — so it reads as traffic, not a box.
+   */
   private drawFlow(
     sim: DnsSimulation,
     c: { x: number; y: number; w: number; h: number },
@@ -339,33 +379,45 @@ export class DnsRenderer {
     const ctx = this.ctx;
     const f = sim.flowView();
     const offered = f.offeredRate;
-    if (offered <= 1e-6) return;
-    const x0 = c.x + c.w;
-    const x1 = s.x;
-    const cy0 = c.y + c.h / 2;
-    const cy1 = s.y + s.h / 2;
-    const maxBand = Math.min(c.h, s.h) * 0.42;
-    const bands: { rate: number; color: string }[] = [
+    const x0 = c.x + c.w + 6;
+    const x1 = s.x - 4;
+    if (offered <= 1e-6 || x1 - x0 < 26) return;
+    const cy = (c.y + c.h / 2 + s.y + s.h / 2) / 2;
+    const pipeH = Math.min(160, Math.min(c.h, s.h) * 0.4);
+    const top = cy - pipeH / 2;
+    const arrow = 9;
+    const bodyRight = x1 - arrow;
+
+    const layers: { rate: number; color: string }[] = [
       { rate: f.servedRate, color: SEMANTIC.success },
       { rate: f.shedRate, color: SEMANTIC.shed },
       { rate: f.staleRate, color: SEMANTIC.error },
       { rate: f.unavailableRate, color: SEMANTIC.timeout },
     ];
-    let offset = -maxBand / 2;
-    for (const b of bands) {
-      const frac = clamp01(b.rate / offered);
-      const width = frac * maxBand;
-      if (width < 0.4) continue;
-      const y0 = cy0 + offset + width / 2;
-      const y1 = cy1 + offset + width / 2;
-      ctx.strokeStyle = withAlpha(b.color, 0.5);
-      ctx.lineWidth = Math.max(1, width);
-      ctx.beginPath();
-      ctx.moveTo(x0, y0);
-      ctx.bezierCurveTo((x0 + x1) / 2, y0, (x0 + x1) / 2, y1, x1, y1);
-      ctx.stroke();
-      offset += width;
+    let yy = top;
+    for (const layer of layers) {
+      const hh = (clamp01(layer.rate / offered)) * pipeH;
+      if (hh < 0.4) continue;
+      ctx.fillStyle = withAlpha(layer.color, 0.5);
+      ctx.fillRect(x0, yy, bodyRight - x0, hh);
+      yy += hh;
     }
+    // Arrowhead toward the servers.
+    ctx.fillStyle = withAlpha(SEMANTIC.success, 0.5);
+    ctx.beginPath();
+    ctx.moveTo(bodyRight, top - 3);
+    ctx.lineTo(x1, cy);
+    ctx.lineTo(bodyRight, top + pipeH + 3);
+    ctx.closePath();
+    ctx.fill();
+
+    // Caption.
+    ctx.font = '600 9px "IBM Plex Mono", monospace';
+    ctx.fillStyle = SURFACE.textDim;
+    ctx.textAlign = 'center';
+    ctx.fillText('TRAFFIC →', (x0 + bodyRight) / 2, top - 6);
+    ctx.fillText(fmtRate(offered), (x0 + bodyRight) / 2, top + pipeH + 13);
+    ctx.textAlign = 'left';
   }
 
   // -- Outcome bar ------------------------------------------------------------
@@ -442,4 +494,15 @@ export class DnsRenderer {
 function fmtRate(v: number): string {
   if (v >= 1000) return `${(v / 1000).toFixed(1)}k/s`;
   return `${Math.round(v)}/s`;
+}
+
+/** Per-server availability: the fraction of traffic routed here it served (the
+ * rest was shed/RST and re-picked elsewhere). 1.0 when it has headroom. */
+function serverAvailability(s: DnsServerView): number {
+  return s.assignedRate > 1e-6 ? Math.min(1, s.servedRate / s.assignedRate) : 1;
+}
+
+/** Availability → green (serving all) → amber (shedding some) → red. */
+function availColor(a: number): string {
+  return a >= 0.99 ? SEMANTIC.success : a >= 0.9 ? SEMANTIC.shed : SEMANTIC.timeout;
 }
