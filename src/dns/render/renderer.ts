@@ -299,28 +299,37 @@ export class DnsRenderer {
     if (showStats) {
       ctx.textAlign = 'left';
       ctx.font = '600 9px "IBM Plex Mono", monospace';
-      ctx.fillStyle = SURFACE.textDim;
-      ctx.fillText(`C${c.id}`, x + 5, y + 12);
+      ctx.fillStyle = c.kind === 'eks' ? SEMANTIC.tlsPulse : SURFACE.textDim;
+      ctx.fillText(c.kind === 'eks' ? `C${c.id} ⎈EKS` : `C${c.id}`, x + 5, y + 12);
       // Availability headline.
       ctx.font = '700 16px "IBM Plex Mono", monospace';
       ctx.fillStyle = col;
       ctx.fillText(`${Math.round(avail * 100)}%`, x + 5, y + 30);
-      // Offered rate + TTL countdown.
+      // Offered rate + TTL countdown (EKS shows its shared CoreDNS-cache clock).
       ctx.font = '500 9px "IBM Plex Mono", monospace';
       ctx.fillStyle = SURFACE.textDim;
       ctx.fillText(fmtRate(c.offeredRate), x + 5, y + h - 16);
       if (c.pinned) {
         ctx.fillStyle = SEMANTIC.retry;
         ctx.fillText('📌 pinned', x + 5, y + h - 5);
+      } else if (c.kind === 'eks') {
+        ctx.fillStyle = stale ? SEMANTIC.error : SEMANTIC.tlsPulse;
+        ctx.fillText(`⎈ ${Math.ceil(c.msUntilReResolve / 1000)}s`, x + 5, y + h - 5);
       } else {
         ctx.fillStyle = stale ? SEMANTIC.error : SURFACE.textDim;
         ctx.fillText(`↻ ${Math.ceil(c.msUntilReResolve / 1000)}s`, x + 5, y + h - 5);
       }
       // Connection-pool strip (top-right): one dot per cached IP, by health.
       this.drawPoolStrip(c, sim, x + w - 5, y + 8, w * 0.5);
-    } else if (c.pinned) {
-      ctx.fillStyle = withAlpha('#000000', 0.55);
-      ctx.fillRect(x, y, Math.max(2, w * 0.32), 3);
+    } else {
+      if (c.kind === 'eks') {
+        ctx.fillStyle = withAlpha(SEMANTIC.tlsPulse, 0.9);
+        ctx.fillRect(x + w - Math.max(2, w * 0.32), y, Math.max(2, w * 0.32), 3);
+      }
+      if (c.pinned) {
+        ctx.fillStyle = withAlpha('#000000', 0.55);
+        ctx.fillRect(x, y, Math.max(2, w * 0.32), 3);
+      }
     }
   }
 
@@ -643,18 +652,26 @@ export class DnsRenderer {
     const healthy = c.cachedSet.filter((id) => stateById.get(id) === 'healthy').length;
     const dead = c.staleIds.length;
 
+    const kindLabel = c.kind === 'eks' ? '  ·  EKS / CoreDNS' : c.pinned ? '  ·  PINNED (ignores TTL)' : '  ·  direct';
     const lines: { text: string; color: string }[] = [
-      { text: `Client cohort C${c.id}${c.pinned ? '  ·  PINNED (ignores TTL)' : ''}`, color: SURFACE.text },
+      { text: `Client cohort C${c.id}${kindLabel}`, color: SURFACE.text },
       { text: `availability  ${(avail * 100).toFixed(1)}%`, color: availColor(avail) },
       { text: `offered ${fmtRate(c.offeredRate)}  ·  served ${fmtRate(c.servedRate)}`, color: SURFACE.textDim },
     ];
     if (c.staleRate > 1e-6) lines.push({ text: `stale ${fmtRate(c.staleRate)} → dead IPs`, color: SEMANTIC.error });
     if (c.unavailableRate > 1e-6) lines.push({ text: `unavailable ${fmtRate(c.unavailableRate)}`, color: SEMANTIC.timeout });
-    lines.push({
-      text: c.pinned ? 'pinned — never re-resolves' : `re-resolve (TTL) in ${Math.ceil(c.msUntilReResolve / 1000)}s`,
-      color: SURFACE.textDim,
-    });
-    lines.push({ text: `connection pool: ${c.cachedSet.length} IPs · ${healthy} up · ${dead} dead`, color: SURFACE.text });
+    if (c.pinned) {
+      lines.push({ text: 'pinned — never re-resolves', color: SURFACE.textDim });
+    } else if (c.kind === 'eks') {
+      lines.push({
+        text: `CoreDNS cache ${Math.round(c.effectiveTtlMs / 1000)}s · re-resolve in ${Math.ceil(c.msUntilReResolve / 1000)}s`,
+        color: SEMANTIC.tlsPulse,
+      });
+    } else {
+      lines.push({ text: `re-resolve (TTL) in ${Math.ceil(c.msUntilReResolve / 1000)}s`, color: SURFACE.textDim });
+    }
+    const poolLabel = c.kind === 'eks' ? 'CoreDNS pool (shared by pods)' : 'connection pool';
+    lines.push({ text: `${poolLabel}: ${c.cachedSet.length} IPs · ${healthy} up · ${dead} dead`, color: SURFACE.text });
 
     ctx.font = '500 11px "IBM Plex Mono", monospace';
     let tw = 0;

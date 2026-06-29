@@ -79,6 +79,8 @@ class ClientCohort {
   weight: number;
   /** Connection-/JVM-pinned: ignores TTL for the run. */
   pinned: boolean;
+  /** 'eks' = a cluster behind a shared CoreDNS cache; 'direct' = ordinary client. */
+  kind: 'direct' | 'eks';
   /** TTL multiplier (1 normally, huge if pinned). */
   ttlMult: number;
   cachedSet: number[] = [];
@@ -91,9 +93,10 @@ class ClientCohort {
   staleRate = 0;
   unavailRate = 0;
 
-  constructor(weight: number, pinned: boolean) {
+  constructor(weight: number, pinned: boolean, kind: 'direct' | 'eks') {
     this.weight = weight;
     this.pinned = pinned;
+    this.kind = kind;
     this.ttlMult = pinned ? PINNED_TTL_MULT : 1;
   }
 }
@@ -150,16 +153,12 @@ export class DnsSimulation {
       this.servers.push(s);
     }
     // Clients already resolved and connected at t0.
-    for (let i = 0; i < cfg.clients.cohorts; i++) {
-      const pinned = this.rng.chance(cfg.clients.pinnedFraction);
-      const weight = 1 + (this.rng.next() * 2 - 1) * cfg.clients.heterogeneity;
-      this.cohorts.push(new ClientCohort(Math.max(0.05, weight), pinned));
-    }
+    for (let i = 0; i < cfg.clients.cohorts; i++) this.cohorts.push(this.makeCohort());
     this.applyAdvertised(this.healthyCandidates(), false);
     for (const c of this.cohorts) {
       c.cachedSet = this.pickRecords();
-      // Stagger first expiry across [0, TTL] so caches never expire in lockstep.
-      const ttl = cfg.dns.ttlMs * c.ttlMult;
+      // Stagger first expiry across [0, effective TTL] so caches never expire in lockstep.
+      const ttl = this.effectiveTtlMs(c);
       const offset = this.rng.next() * Math.min(ttl, cfg.dns.ttlMs);
       c.reResolveEvent = this.queue.schedule(this.now + Math.max(100, offset), () => this.resolveCohort(c));
     }
@@ -225,11 +224,9 @@ export class DnsSimulation {
     this.desiredCount = this.cfg.servers.count;
     // Cohorts.
     while (this.cohorts.length < this.cfg.clients.cohorts) {
-      const pinned = this.rng.chance(this.cfg.clients.pinnedFraction);
-      const weight = Math.max(0.05, 1 + (this.rng.next() * 2 - 1) * this.cfg.clients.heterogeneity);
-      const c = new ClientCohort(weight, pinned);
+      const c = this.makeCohort();
       c.cachedSet = this.pickRecords();
-      const offset = this.rng.next() * this.cfg.dns.ttlMs;
+      const offset = this.rng.next() * this.effectiveTtlMs(c);
       c.reResolveEvent = this.queue.schedule(this.now + Math.max(100, offset), () => this.resolveCohort(c));
       this.cohorts.push(c);
     }
@@ -488,15 +485,35 @@ export class DnsSimulation {
 
   // -- Resolution + TTL --------------------------------------------------------
 
+  /** Make a cohort: roll EKS first, then pinned, else a plain direct client. */
+  private makeCohort(): ClientCohort {
+    const c = this.cfg.clients;
+    const r = this.rng.next();
+    let kind: 'direct' | 'eks' = 'direct';
+    let pinned = false;
+    if (r < c.eksFraction) kind = 'eks';
+    else if (r < c.eksFraction + c.pinnedFraction) pinned = true;
+    const weight = Math.max(0.05, 1 + (this.rng.next() * 2 - 1) * c.heterogeneity);
+    return new ClientCohort(weight, pinned, kind);
+  }
+
+  /**
+   * The cache TTL a cohort resolves on. EKS clusters resolve through a shared
+   * CoreDNS cache, whose duration caps the record TTL — min(zone TTL, CoreDNS
+   * cache). Direct clients use the zone TTL (×ttlMult, huge for pinned).
+   */
+  private effectiveTtlMs(c: ClientCohort): number {
+    if (c.kind === 'eks') return Math.min(this.cfg.dns.ttlMs, this.cfg.clients.coreDnsCacheMs);
+    return this.cfg.dns.ttlMs * c.ttlMult;
+  }
+
   /** A cohort re-resolves: copy the current record set, re-arm its TTL. */
   private resolveCohort(c: ClientCohort): void {
     c.cachedSet = this.pickRecords();
     c.lastResolvedAt = this.now;
     this.metrics.countReResolve();
-    const d = this.cfg.dns;
-    const ttl = d.ttlMs * c.ttlMult;
-    const jitter = 1 + (this.rng.next() * 2 - 1) * d.ttlJitter;
-    const wait = Math.max(100, ttl * jitter);
+    const jitter = 1 + (this.rng.next() * 2 - 1) * this.cfg.dns.ttlJitter;
+    const wait = Math.max(100, this.effectiveTtlMs(c) * jitter);
     if (c.reResolveEvent) c.reResolveEvent.active = false;
     c.reResolveEvent = this.queue.schedule(this.now + wait, () => this.resolveCohort(c));
   }
@@ -762,6 +779,8 @@ export class DnsSimulation {
       cachedSet: c.cachedSet.slice(),
       staleIds: c.cachedSet.filter((id) => down.has(id)),
       pinned: c.pinned,
+      kind: c.kind,
+      effectiveTtlMs: this.effectiveTtlMs(c),
       msUntilReResolve: c.reResolveEvent ? Math.max(0, c.reResolveEvent.time - this.now) : 0,
       lastResolvedAt: c.lastResolvedAt,
       servedRate: c.servedRate,

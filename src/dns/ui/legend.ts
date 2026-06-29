@@ -52,6 +52,13 @@ function ttlFlash(): string {
   );
 }
 
+function eksTile(): string {
+  return svg(
+    `<rect x="3" y="4" width="${S - 6}" height="${S - 8}" rx="3" fill="${alpha(SEMANTIC.success, 0.2)}" stroke="${alpha(SEMANTIC.success, 0.85)}"/>` +
+      `<text x="5" y="13" font-size="7" fill="${SEMANTIC.tlsPulse}">⎈</text>`,
+  );
+}
+
 function alpha(hex: string, a: number): string {
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
@@ -89,6 +96,7 @@ const SECTIONS: Section[] = [
       { swatch: ttlFlash(), label: 'TTL re-resolve flash', detail: 'A cyan ring pulses on a cohort each time its TTL expires and it re-resolves DNS — so you can see lookups rippling across the population.' },
       { swatch: tile(alpha(SEMANTIC.success, 0.2), SEMANTIC.error, 3), label: 'Stale ring + link', detail: 'Yellow ring: the cohort still caches a removed/dead IP and keeps aiming at it (wasted connects), even if RST re-picks keep it served. A red line runs from the cohort to that dead server’s tile — showing exactly which clients are stuck on it until they re-resolve (pinned cohorts never do).' },
       { swatch: pinnedTile(), label: 'Pinned cohort', detail: 'A 📌 marks a connection-/JVM-pinned cohort that ignores TTL — it can only fail over via an RST re-pick, never via DNS.' },
+      { swatch: eksTile(), label: 'EKS / CoreDNS cohort', detail: 'A ⎈ marks an EKS cluster behind a shared CoreDNS cache — all its pods share one resolution and fail over together on the CoreDNS-cache clock (min(zone TTL, CoreDNS cache)). The countdown shows ⎈ Ns. Hover for the shared pool.' },
       { swatch: band(SEMANTIC.success), label: 'TRAFFIC pipe', detail: 'The labeled, flowing pipe in the gap is the traffic clients send to the servers (arrow points to the fleet). Its colored layers are the outcome split — served (green), shed/RST (amber), stale→dead IP (yellow), unavailable (red).' },
     ],
   },

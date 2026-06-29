@@ -21,8 +21,8 @@ const STAGES: Stage[] = [
   {
     n: '1',
     title: 'Client resolves Route 53',
-    value: (c) => `TTL ${secs(c.dns.ttlMs)} · all healthy IPs`,
-    how: 'A client cohort resolves the endpoint and caches the record set for the TTL. RTB Fabric runs a private hosted zone and returns ALL advertised healthy IPs to every client (no multivalue subset). Re-resolution is staggered/jittered across the population, and a pinned fraction never re-resolves at all.',
+    value: (c) => `TTL ${secs(c.dns.ttlMs)} · all healthy IPs · CoreDNS ${secs(c.clients.coreDnsCacheMs)}`,
+    how: 'A client cohort resolves the endpoint and caches the record set for the TTL. RTB Fabric runs a private hosted zone and returns ALL advertised healthy IPs to every client (no multivalue subset). Re-resolution is staggered/jittered; a pinned fraction never re-resolves; and EKS cohorts (⎈) sit behind a shared CoreDNS cache — the whole cluster shares one answer and resolves on min(zone TTL, CoreDNS cache).',
   },
   {
     n: '2',
@@ -70,6 +70,7 @@ const FAILURES: FailRow[] = [
 const ASSUMPTIONS: string[] = [
   'Traffic is modeled as rates, not individual requests; the sub-second RST loop is solved to a fixed point each rebalance, while DNS / health / TTL / boot are explicit discrete events.',
   'Resolver layering is collapsed into a per-cohort effective TTL (the authoritative TTL as its floor) plus a pinned/TTL-ignoring tail (connection- or JVM-pinned clients).',
+  'EKS cohorts model a cluster behind a shared CoreDNS cache: all pods share one cached answer (one cohort) and resolve on min(zone TTL, CoreDNS cache) — CoreDNS honors the record TTL capped at its cache. NodeLocal DNSCache and serve-stale are out of scope.',
   'The zone is a private hosted zone managed by an RTB Fabric publisher Lambda (run every interval) — Route53 does not health-check the servers. The Lambda evaluates liveness (not load, by default) with run-count hysteresis, and fails open (advertises all) when none are healthy.',
   'RTB Fabric returns ALL advertised healthy IPs to every client — no multivalue subset, weighting, or latency/geo routing.',
   'Clients re-resolve on cache expiry; an RST re-picks within the cached set, and fresh IPs enter only on expiry (or the opt-in early re-resolve).',

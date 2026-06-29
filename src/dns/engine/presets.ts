@@ -24,6 +24,8 @@ export function baseConfig(): DnsSimulationConfig {
       cohorts: 12,
       heterogeneity: 0.2,
       pinnedFraction: 0.15,
+      eksFraction: 0.25,
+      coreDnsCacheMs: 30_000,
       rstReResolve: false,
     },
     dns: {
@@ -106,6 +108,18 @@ export const DNS_PRESETS: DnsPreset[] = [
       'Clients re-resolve every 10 seconds. Kill a server next to Long TTL: clients clear off the dead IP fast, so the scar is short — at the cost of constant re-resolution churn. Even so, the pinned/JVM cohorts still stick until the run ends.',
     config: scenario((c) => {
       c.dns.ttlMs = 10_000;
+    }),
+  },
+  {
+    id: 'eks-coredns',
+    name: 'EKS / CoreDNS cache',
+    description:
+      'A long zone TTL (5 min), but most clients are EKS clusters behind a shared CoreDNS cache (30s). Kill a server: the EKS clusters (⎈) clear off the dead IP in ~30s because CoreDNS caps the TTL, while the direct and pinned clients stay stuck for the full 5 minutes. CoreDNS adds a shared cache tier — for better (it caps long TTLs) and for worse (a whole cluster moves as one).',
+    config: scenario((c) => {
+      c.dns.ttlMs = 300_000;
+      c.clients.eksFraction = 0.6;
+      c.clients.pinnedFraction = 0.2;
+      c.clients.coreDnsCacheMs = 30_000;
     }),
   },
   {

@@ -113,6 +113,7 @@ describe('the slow loop: TTL is a failover lever, not a fix', () => {
     const tune = (c: DnsSimulationConfig) => {
       c.servers.autoReplace = false; // isolate the staleness, no recovery
       c.clients.pinnedFraction = 0; // isolate TTL from pinned clients
+      c.clients.eksFraction = 0; // and from CoreDNS-capped EKS clients
       // Every cohort caches the full record set, so all of them hold the victim.
     };
     const longTtl = newSim((c) => {
@@ -135,6 +136,36 @@ describe('the slow loop: TTL is a failover lever, not a fix', () => {
     const shortScar = staleBetween(shortTtl, 180_000, 240_000);
     expect(longScar).toBeGreaterThan(shortScar * 5);
     expect(shortScar).toBeLessThan(longScar);
+  });
+});
+
+describe('EKS / CoreDNS shared cache', () => {
+  it('caps the effective TTL: EKS clusters recover from a kill far faster than direct clients under a long zone TTL', () => {
+    const base = (c: DnsSimulationConfig) => {
+      c.dns.ttlMs = 300_000; // long zone TTL
+      c.servers.autoReplace = false;
+      c.clients.pinnedFraction = 0;
+    };
+    const eks = newSim((c) => {
+      base(c);
+      c.clients.eksFraction = 1; // all clusters behind CoreDNS
+      c.clients.coreDnsCacheMs = 20_000; // CoreDNS caps the 5-min TTL at 20s
+    });
+    const direct = newSim((c) => {
+      base(c);
+      c.clients.eksFraction = 0; // ordinary clients on the 5-min TTL
+    });
+    run(eks, 60_000);
+    run(direct, 60_000);
+    eks.killServer(false);
+    direct.killServer(false);
+    run(eks, 120_000); // to 180s (120s after the kill)
+    run(direct, 120_000);
+    // 60-120s after the kill: EKS (20s CoreDNS cache) has long since re-resolved
+    // off the dead IP; the direct fleet (300s TTL) is still hammering it.
+    const eksScar = staleBetween(eks, 120_000, 180_000);
+    const directScar = staleBetween(direct, 120_000, 180_000);
+    expect(directScar).toBeGreaterThan(eksScar * 5);
   });
 });
 

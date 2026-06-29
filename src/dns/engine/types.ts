@@ -33,6 +33,15 @@ export interface DnsClientConfig {
    */
   pinnedFraction: number;
   /**
+   * Fraction of cohorts that are EKS clusters behind a shared CoreDNS cache —
+   * all pods in the cluster share one cached answer and fail over together. The
+   * cluster's effective TTL is min(zone TTL, CoreDNS cache) (CoreDNS honors the
+   * record TTL, capped at its configured cache).
+   */
+  eksFraction: number;
+  /** CoreDNS cache duration for EKS cohorts (ms) — the `cache N` in the Corefile. */
+  coreDnsCacheMs: number;
+  /**
    * When on, sustained shedding makes a cohort re-resolve DNS early, bypassing
    * its TTL (so it can pick up the fresh advertised set before expiry). Off by
    * default, so TTL governs recovery — the realistic, instructive case.
@@ -210,6 +219,10 @@ export interface DnsClientView {
   /** Cached IPs that are currently down (dead) — the cohort is still aiming at them. */
   staleIds: number[];
   pinned: boolean;
+  /** 'eks' = a cluster behind a shared CoreDNS cache; 'direct' = ordinary client. */
+  kind: 'direct' | 'eks';
+  /** Effective cache TTL this cohort resolves on (ms) — for the countdown label. */
+  effectiveTtlMs: number;
   msUntilReResolve: number;
   /** Sim time of this cohort's last re-resolution (for the lookup flash). */
   lastResolvedAt: number;

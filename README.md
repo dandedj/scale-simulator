@@ -349,8 +349,13 @@ records rather than publishing an empty set.
 
 Resolver layering is collapsed into a per-cohort effective TTL with a
 pinned/TTL-ignoring tail (connection- or JVM-pinned clients that only fail over
-via an RST re-pick). The **? LEGEND** and **◈ SYSTEM** dialogs spell out every
-encoding and the full list of modeling assumptions.
+via an RST re-pick). A configurable fraction of cohorts are **EKS clusters
+behind a shared CoreDNS cache** (marked ⎈): all pods in a cluster share one
+cached answer and fail over together, on `min(zone TTL, CoreDNS cache)` — so
+CoreDNS *caps* a long zone TTL (clusters can recover faster than direct/JVM
+clients), while a whole cluster moving as one makes the stale blast radius
+lumpier. The **? LEGEND** and **◈ SYSTEM** dialogs spell out every encoding and
+the full list of modeling assumptions.
 
 ### Primary metric
 
@@ -375,6 +380,10 @@ Each shares one offered-load shape so the difference is isolated; drive an event
 - **Reactive autoscale / Pre-provisioned headroom** — under the same surge,
   reactive capacity arrives after the surge (boot ~5 min) while headroom absorbs
   it instantly at higher steady-state cost.
+- **EKS / CoreDNS cache** — a long zone TTL with most clients behind a shared
+  CoreDNS cache; kill a server and watch the EKS clusters (⎈) clear off the dead
+  IP in ~30s (CoreDNS caps the TTL) while direct and pinned clients stay stuck
+  for the full 5 minutes.
 
 `npm test` covers the DNS engine too (`src/dns/engine/dnsSimulation.test.ts`):
 the timescale-separation invariant (a dead server's scar is bounded by TTL, not

@@ -134,7 +134,23 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
         info: {
           what: 'Fraction of cohorts that effectively ignore TTL — connection-pinned or JVM-pinned clients.',
           how: 'These cohorts hold their t0 resolution for the whole run and only fail over via an RST re-pick within that (stale) set, never via DNS.',
-          expect: 'Even a short TTL can’t move these off a dead IP — the honest limit of “just lower the TTL”. Marked with a notch on the cohort tiles.',
+          expect: 'Even a short TTL can’t move these off a dead IP — the honest limit of “just lower the TTL”. Marked 📌 on the cohort tiles.',
+        },
+      },
+      {
+        label: 'EKS clients', min: 0, max: 1, step: 0.05, get: (c) => c.clients.eksFraction, set: (c, v) => (c.clients.eksFraction = v), format: pct,
+        info: {
+          what: 'Fraction of cohorts that are EKS clusters behind a shared CoreDNS cache.',
+          how: 'All pods in a cluster share one cached answer (CoreDNS), so the cluster fails over as a unit on the CoreDNS cache clock — not per pod. Marked ⎈ on the cohort tiles.',
+          expect: 'Their effective TTL is min(zone TTL, CoreDNS cache), so under a long zone TTL they fail over FASTER than direct/pinned clients (CoreDNS caps it) — but a whole cluster moves together, so the stale blast radius is lumpier.',
+        },
+      },
+      {
+        label: 'CoreDNS cache', min: 1000, max: 300000, step: 1000, get: (c) => c.clients.coreDnsCacheMs, set: (c, v) => (c.clients.coreDnsCacheMs = v), format: mins,
+        info: {
+          what: 'The CoreDNS cache duration (`cache N` in the Corefile) for EKS cohorts.',
+          how: 'CoreDNS honors the record TTL capped at this value, so an EKS cohort’s effective TTL is min(zone TTL, this). Only affects EKS clients.',
+          expect: 'Below the zone TTL it makes EKS clusters fresher than direct clients; at/above it, the zone TTL governs. The classic EKS lever for how fast clusters pick up DNS changes.',
         },
       },
     ],
