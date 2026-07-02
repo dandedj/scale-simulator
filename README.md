@@ -1,6 +1,6 @@
 # RTB Fabric Simulators
 
-Two browser-based discrete-event simulations of RTB Fabric behavior under load,
+Three browser-based discrete-event simulations of RTB Fabric behavior under load,
 switched with the **mode toggle** in the header:
 
 - **Connection Storm** — TLS connection retry storms in a high-throughput RTB
@@ -11,11 +11,15 @@ switched with the **mode toggle** in the header:
   TTL, overloaded servers shedding with RSTs, and the lag between the fast (RST)
   and slow (health + DNS + boot) control loops. See
   [DNS load distribution](#dns-load-distribution) below.
+- **Scaling** — how the fleet copes with a rapid demand ramp-up: the availability
+  drop when capacity can't be added fast enough, and the scale rate the
+  autoscaling pipeline (detection → provision → boot → health → DNS → client
+  pickup) can actually achieve. See [Scaling](#scaling) below.
 
-The connection-storm model is described first; the DNS model has its own section
-at the end. Both share the shell (one playback clock, the start gate, the
-comparison mode) and the engine primitives (event queue, seeded RNG, the strip
-charts).
+The connection-storm model is described first; the DNS and Scaling models have
+their own sections at the end. All three share the shell (one playback clock, the
+start gate, the comparison mode) and the engine primitives (event queue, seeded
+RNG, the strip charts).
 
 This connection-storm mode models the full feedback loop — timeouts, connection
 teardown, TLS handshake cost, shared CPU — and lets you experiment live with
@@ -400,3 +404,72 @@ any step granularity), and that each scenario still demonstrates its lesson.
   clients that hold a resolution far past the authoritative TTL.
 - Autoscaling lead time dominated by instance boot + warm-up, far longer than a
   short traffic surge — the reactive-vs-headroom trade.
+
+## Scaling
+
+The third mode (header toggle → **↗ Scaling**) focuses on a **rapid demand
+ramp-up** and the autoscaling pipeline that has to keep up: how far availability
+drops when capacity lags demand, and what **scale rate** (TPS added per minute)
+the pipeline can actually achieve. Its own engine, renderer, and scenarios live
+under `src/scaling/`.
+
+### The model
+
+Fluid, deterministic discrete-event model: demand and capacity are TPS rates;
+pipeline stage transitions, autoscaler ticks, and demand ticks are the events.
+`served = min(offered, usable capacity)`, so during a ramp availability =
+capacity ÷ demand. Reference fleet: **50K TPS per c7g.2xlarge (100K on two)**.
+
+The autoscaler is target-tracking: it holds utilization at the **buffer** target
+(e.g. 60% — the rest is headroom) and launches instances when demand pushes past
+it. Each launched instance runs a **9-stage pipeline**, every stage individually
+tunable:
+
+1. **Detection** — metric emit + ASG alarm (breach must persist this long).
+2. **Signal → ECS** · 3. **Launch EC2** · 4. **Cloud-init / user-data** ·
+   5. **Task placement** · 6. **Task boot** · 7. **Health check** ·
+   8. **DNS publish** (⇒ serving/advertised) · 9. **Client pickup** (⇒ usable).
+
+Two limits govern the outcome, and the tab separates them:
+
+- **Latency** (Σ stages, ~5 min) — *when* the first new capacity lands and how
+  deep the dip goes. "Add 1M TPS in 1 minute" is impossible if the pipeline is 5
+  minutes: capacity arrives after the surge, regardless of how many you launch.
+- **Throughput** (`batch × capacity ÷ cooldown`) — the *sustained* TPS/min you
+  can add once the pipeline fills; the max ramp you can track.
+
+The readout reports both: the event's **recover time** and **effective add-rate**,
+the computed **max sustainable ramp**, the **pipeline latency** floor, and a
+**per-stage lag breakdown** (which stage to optimize). The board shows the
+pipeline filling with instances, the demand-vs-capacity gap, and the fleet by
+phase (provisioning → ready → in use).
+
+### Scenarios
+
+Shared demand ramp (default +1M TPS in 1 min); vary the scaling config:
+
+- **Baseline ramp** — ~5-min pipeline vs a 1-min ramp ⇒ deep dip, slow recovery
+  (max sustainable ramp ≈ 200K/min « 1M/min offered).
+- **Optimized pipeline** — warm pool / baked AMI ⇒ the per-stage lag collapses,
+  shallow short dip.
+- **Over-provisioned buffer** — big headroom (low target util) absorbs the ramp
+  while the pipeline catches up, at the cost of idle instances.
+- **Big batches** — larger batch + short cooldown lifts the sustained scale rate
+  enough to track the ramp once the pipeline fills.
+- **Slow detection** — a 3-min detection dominates the lag (the breakdown bar
+  makes it obvious).
+
+`npm test` covers the scaling engine too
+(`src/scaling/engine/scalingSimulation.test.ts`): a calm start, a ramp that dips
+then recovers, more buffer / a faster pipeline / bigger batches each reducing the
+loss, the max-sustainable-ramp arithmetic, and playback-speed determinism.
+
+### Grounding (scaling specifics)
+
+- Reference throughput: 100K TPS on 2× c7g.2xlarge ⇒ 50K TPS/instance.
+- The scale-up latency is the sum of real ASG/ECS stages — CloudWatch metric +
+  alarm datapoints for detection, EC2 launch, cloud-init/user-data, ECS
+  placement, container boot, health-check grace, and DNS registration + client
+  re-resolution — typically ~5 min end to end.
+- Sustained scale throughput is bounded by the launch batch size, cooldown, and
+  max fleet, independent of the per-instance latency.

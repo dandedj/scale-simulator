@@ -9,6 +9,7 @@
 
 import { StormExperience } from './app';
 import { DnsExperience } from './dns/experience';
+import { ScalingExperience } from './scaling/experience';
 import type { Experience, ExperienceDef, ExperienceHosts, PlaybackController } from './experience';
 
 /** Ignore wall-time gaps bigger than this (background tab, debugger). */
@@ -27,6 +28,12 @@ const EXPERIENCES: ExperienceDef[] = [
     label: '⌖ DNS Distribution',
     subtitle: 'DNS load-distribution simulator',
     create: () => new DnsExperience(),
+  },
+  {
+    id: 'scaling',
+    label: '↗ Scaling',
+    subtitle: 'autoscaling ramp-up simulator',
+    create: () => new ScalingExperience(),
   },
 ];
 
