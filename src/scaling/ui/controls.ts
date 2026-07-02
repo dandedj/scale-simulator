@@ -23,6 +23,7 @@ export interface ScalingControlHooks {
   applyScenario(pane: number, id: string): void;
   reset(): void;
   surge(factor: number, durationMs: number): void;
+  ramp(amountTps: number, durationMs: number): void;
   setPaused(paused: boolean): void;
   isPaused(): boolean;
   setTimeScale(s: number): void;
@@ -105,9 +106,17 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
       {
         label: 'Ramp duration', min: 5_000, max: 600_000, step: 5_000, get: (c) => c.traffic.rampDurationMs, set: (c, v) => (c.traffic.rampDurationMs = v), format: mins,
         info: {
-          what: 'Time to climb base → peak.',
+          what: 'Time to climb base → peak — and the duration of a triggered ▲ RAMP.',
           how: 'The ramp rate = (peak − base) ÷ this. Compare it against the max sustainable ramp (batch × capacity ÷ cooldown).',
           expect: 'A ramp faster than the pipeline can add capacity opens an availability dip; a gentle ramp stays covered by headroom.',
+        },
+      },
+      {
+        label: 'Ramp amount', min: 100_000, max: 3_000_000, step: 100_000, get: (c) => c.traffic.rampAmountTps, set: (c, v) => (c.traffic.rampAmountTps = v), format: tps,
+        info: {
+          what: 'How much the ▲ RAMP button adds (TPS), over the ramp duration.',
+          how: 'Click ▲ RAMP to schedule an additive ramp of this size on top of current demand (e.g. +1M TPS over 1 min). Ramps stack and persist until reset.',
+          expect: 'The on-demand version of the surge, but a ramp instead of a step — schedule a specific capacity increase and watch the fleet chase it.',
         },
       },
     ],
@@ -241,6 +250,7 @@ export class ScalingControlPanel {
   private surgeFactor = 2;
   private surgeDurationMs = 60_000;
   private pauseBtn!: HTMLButtonElement;
+  private rampBtn!: HTMLButtonElement;
   private compareBtn!: HTMLButtonElement;
   private paneTabBtns: HTMLButtonElement[] = [];
   private activePane = 0;
@@ -278,6 +288,14 @@ export class ScalingControlPanel {
     });
     factor.title = 'Surge intensity';
     wrap.appendChild(factor);
+
+    this.rampBtn = el('button', 'btn', '▲ RAMP') as HTMLButtonElement;
+    this.rampBtn.title = 'Schedule a ramp of the configured amount over the ramp duration (Demand group)';
+    this.rampBtn.addEventListener('click', () => {
+      const t = this.cfgFor('global').traffic;
+      this.hooks.ramp(t.rampAmountTps, t.rampDurationMs);
+    });
+    wrap.appendChild(this.rampBtn);
 
     this.pauseBtn = el('button', 'btn', '▶') as HTMLButtonElement;
     this.pauseBtn.title = 'Pause / resume (space)';
@@ -574,6 +592,10 @@ export class ScalingControlPanel {
       this.pauseBtn.textContent = glyph;
       this.pauseBtn.classList.toggle('active', this.hooks.isPaused());
     }
+    const t = this.cfgFor('global').traffic;
+    const amt = t.rampAmountTps >= 1e6 ? `${(t.rampAmountTps / 1e6).toFixed(1)}M` : `${Math.round(t.rampAmountTps / 1e3)}K`;
+    const rampLabel = `▲ RAMP +${amt}/${mins(t.rampDurationMs)}`;
+    if (this.rampBtn.textContent !== rampLabel) this.rampBtn.textContent = rampLabel;
     const sims = this.hooks.getSims();
     const compare = sims.length > 1;
     const html = compare ? totalsHtmlCompare(sims) : totalsHtmlSingle(sims[0]);

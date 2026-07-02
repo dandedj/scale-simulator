@@ -39,6 +39,8 @@ export function drawChart<B extends { time: number }, C>(
   windowStart: number,
   historyMs: number,
   ctx: C,
+  /** Force this y-axis max (e.g. a shared scale across compare panes). */
+  yMaxOverride?: number,
 ): void {
   g.clearRect(0, 0, w, h);
 
@@ -58,13 +60,8 @@ export function drawChart<B extends { time: number }, C>(
     lx += g.measureText(s.label).width + 8;
   }
 
-  // Determine y scale
-  let dataMax = 1e-6;
-  for (const b of buckets) {
-    if (b.time < windowStart) continue;
-    for (const s of def.series) dataMax = Math.max(dataMax, s.value(b, ctx));
-  }
-  const yMax = def.yMax ? def.yMax(ctx, dataMax) : dataMax * 1.15;
+  // Determine y scale (override wins, for a shared scale across compare panes).
+  const yMax = yMaxOverride ?? computeYMax(def, buckets, windowStart, ctx);
 
   // Gridlines (baseline + midpoint) + threshold
   g.strokeStyle = SURFACE.grid;
@@ -130,6 +127,21 @@ export function drawChart<B extends { time: number }, C>(
   g.fillStyle = SURFACE.textFaint;
   g.fillText(fmtAxis(yMax), plotX + 2, plotY + 8);
   g.fillText(fmtAxis(yMax / 2), plotX + 2, plotY + plotH / 2 - 3);
+}
+
+/** The y-axis max a chart would auto-scale to for these buckets. */
+export function computeYMax<B extends { time: number }, C>(
+  def: StripChartDef<B, C>,
+  buckets: B[],
+  windowStart: number,
+  ctx: C,
+): number {
+  let dataMax = 1e-6;
+  for (const b of buckets) {
+    if (b.time < windowStart) continue;
+    for (const s of def.series) dataMax = Math.max(dataMax, s.value(b, ctx));
+  }
+  return def.yMax ? def.yMax(ctx, dataMax) : dataMax * 1.15;
 }
 
 /** Compact axis value: units live in the chart title. */

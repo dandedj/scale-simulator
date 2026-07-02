@@ -5,7 +5,7 @@
  * closes, lagged by the pipeline.
  */
 
-import { drawChart, type StripChartDef } from '../../render/stripChart';
+import { computeYMax, drawChart, type StripChartDef } from '../../render/stripChart';
 import { SEMANTIC } from '../../render/colors';
 import { HISTORY_MS } from '../engine/metrics';
 import type { ScalingSimulation } from '../engine/scalingSimulation';
@@ -86,12 +86,19 @@ export class ScalingChartRail {
     }
   }
 
-  draw(sim: ScalingSimulation): void {
+  /** Each chart's auto-scaled y-max for this sim (for a shared compare scale). */
+  yMaxes(sim: ScalingSimulation): number[] {
+    const windowStart = Math.max(0, sim.now - HISTORY_MS);
+    return this.charts.map((c) => computeYMax(c.def, sim.metrics.buckets, windowStart, sim));
+  }
+
+  /** `sharedYMaxes` (compare mode) forces a common y-axis per chart across panes. */
+  draw(sim: ScalingSimulation, sharedYMaxes?: number[]): void {
     const buckets = sim.metrics.buckets;
     const windowStart = Math.max(0, sim.now - HISTORY_MS);
-    for (const { def, ctx, w, h } of this.charts) {
-      if (w === 0) continue;
-      drawChart(ctx, w, h, def, buckets, windowStart, HISTORY_MS, sim);
-    }
+    this.charts.forEach(({ def, ctx, w, h }, i) => {
+      if (w === 0) return;
+      drawChart(ctx, w, h, def, buckets, windowStart, HISTORY_MS, sim, sharedYMaxes?.[i]);
+    });
   }
 }

@@ -66,6 +66,8 @@ export class ScalingSimulation {
   pulseFactor = 1;
   pulseUntil = 0;
   private pulseEndEvent: ScheduledEvent | null = null;
+  // Triggered ramps (additive, persistent) via the ▲ RAMP button.
+  private ramps: { startAt: number; amount: number; durMs: number }[] = [];
 
   private rates: ScalingRates = { offered: 0, served: 0 };
   private breachSince = -1;
@@ -129,6 +131,23 @@ export class ScalingSimulation {
     });
     this.metrics.log(this.now, 'warn', `Manual surge: ${factor}× for ${(durationMs / 1000).toFixed(0)}s`);
     this.rebalance();
+  }
+
+  /**
+   * Schedule an additive demand ramp: raise offered by `amountTps` over
+   * `durationMs`, then hold it. Stacks with the shape and any prior ramps (e.g.
+   * "+1M TPS in 1 min"). Persists until reset.
+   */
+  triggerRamp(amountTps: number, durationMs: number): void {
+    this.ramps.push({ startAt: this.now, amount: amountTps, durMs: Math.max(1, durationMs) });
+    this.metrics.log(this.now, 'warn', `Scheduled ramp: +${fmtTps(amountTps)} over ${(durationMs / 1000).toFixed(0)}s`);
+    this.rebalance();
+  }
+
+  private rampAdd(now: number): number {
+    let sum = 0;
+    for (const r of this.ramps) sum += r.amount * clamp01((now - r.startAt) / r.durMs);
+    return sum;
   }
 
   /** Live demand/config change: the next rebalance reads cfg. */
@@ -217,7 +236,7 @@ export class ScalingSimulation {
         break;
       }
     }
-    return base * this.pulseFactor;
+    return base * this.pulseFactor + this.rampAdd(this.now);
   }
 
   private readyCapacityTps(): number {
@@ -376,4 +395,14 @@ export class ScalingSimulation {
       count: counts[i],
     }));
   }
+}
+
+function clamp01(t: number): number {
+  return t < 0 ? 0 : t > 1 ? 1 : t;
+}
+
+function fmtTps(v: number): string {
+  if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
+  if (v >= 1e3) return `${Math.round(v / 1e3)}K`;
+  return String(Math.round(v));
 }

@@ -63,8 +63,10 @@ export interface ScalingTrafficConfig {
   peakRateTps: number;
   /** Hold base this long before the ramp begins (a visible calm baseline). */
   rampStartMs: number;
-  /** Time to go base → peak (ms). */
+  /** Time to go base → peak (ms), and the duration of a triggered ramp. */
   rampDurationMs: number;
+  /** Demand added by a triggered ramp event (TPS) — the ▲ RAMP button. */
+  rampAmountTps: number;
 }
 
 export interface ScalingSimulationConfig {

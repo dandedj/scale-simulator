@@ -40,6 +40,7 @@ export function baseConfig(): ScalingSimulationConfig {
       peakRateTps: 1_100_000,
       rampStartMs: 15_000,
       rampDurationMs: 60_000,
+      rampAmountTps: 1_000_000,
     },
   };
 }

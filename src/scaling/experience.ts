@@ -75,6 +75,9 @@ export class ScalingExperience implements Experience {
       surge: (factor, durationMs) => {
         for (const p of this.panes) p.sim.triggerSurge(factor, durationMs);
       },
+      ramp: (amountTps, durationMs) => {
+        for (const p of this.panes) p.sim.triggerRamp(amountTps, durationMs);
+      },
       setPaused: (p) => this.playback.setPaused(p),
       isPaused: () => this.playback.isPaused(),
       setTimeScale: (s) => this.playback.setTimeScale(s),
@@ -109,9 +112,17 @@ export class ScalingExperience implements Experience {
   }
 
   render(): void {
-    for (const p of this.panes) {
-      p.renderer.draw(p.sim);
-      p.charts.draw(p.sim);
+    for (const p of this.panes) p.renderer.draw(p.sim);
+    if (this.compare && this.panes.length === 2) {
+      // Share a y-axis per chart so magnitude differences between the two
+      // scenarios are visible (each pane auto-scaling alone hides them).
+      const a = this.panes[0].charts.yMaxes(this.panes[0].sim);
+      const b = this.panes[1].charts.yMaxes(this.panes[1].sim);
+      const shared = a.map((m, i) => Math.max(m, b[i] ?? m));
+      this.panes[0].charts.draw(this.panes[0].sim, shared);
+      this.panes[1].charts.draw(this.panes[1].sim, shared);
+    } else {
+      for (const p of this.panes) p.charts.draw(p.sim);
     }
     this.controls.update();
     this.updateHud();
