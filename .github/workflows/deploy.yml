@@ -10,9 +10,13 @@ permissions:
   pages: write
   id-token: write
 
+# Allow one concurrent Pages deployment, but do NOT cancel one in flight — the
+# Pages deployment id is the commit SHA, so cancelling mid-flight leaves the
+# deployment wedged and same-SHA retries collide with it. Matches GitHub's
+# official Pages workflow.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
