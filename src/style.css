@@ -648,6 +648,33 @@ main {
   margin: 2px 0 8px;
 }
 
+/* A/B experiments: prefilled scenario pairs (one card loads both panes) */
+
+.experiments {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.experiments-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.experiment-card {
+  padding: 7px 9px;
+}
+
+.experiment-card .preset-name {
+  font-size: 12.5px;
+  letter-spacing: 0.5px;
+  margin-bottom: 2px;
+}
+
 .btn-small {
   font-size: 11px;
   padding: 4px 9px;

@@ -82,13 +82,21 @@ export interface FabricConfig {
   /** Nominal fabric processing time per request at idle (ms). */
   processingMs: number;
   /**
-   * CPU work-units/second. Requests cost ~1 unit/ms of processing; TLS
+   * CPU work-units one request consumes, spread over its processing time.
+   * The default (4u) matches the default processing time at 1 unit/ms;
+   * raising it makes every request demand more of the shared CPU without
+   * changing its nominal latency. Sustained request CPU demand = request
+   * rate × this.
+   */
+  requestCpuCost: number;
+  /**
+   * CPU work-units/second. Requests cost requestCpuCost units each; TLS
    * handshakes cost tlsCpuCost units each. When demanded work exceeds
    * capacity every in-flight operation stretches proportionally — this is
    * the coupling that turns a handshake burst into a storm.
    */
   cpuCapacity: number;
-  /** CPU work-units consumed by one full TLS handshake (vs ~processingMs for a request). */
+  /** CPU work-units consumed by one full TLS handshake (vs requestCpuCost for a request). */
   tlsCpuCost: number;
 
   /**
@@ -213,6 +221,18 @@ export interface Preset {
   /** What the audience should watch for. */
   description: string;
   config: SimulationConfig;
+}
+
+/** A prefilled comparison-mode pairing: one preset per pane, loaded together. */
+export interface Experiment {
+  id: string;
+  name: string;
+  /** What the A/B contrast demonstrates. */
+  description: string;
+  /** Preset id loaded into SIM A. */
+  a: string;
+  /** Preset id loaded into SIM B. */
+  b: string;
 }
 
 // ---------------------------------------------------------------------------

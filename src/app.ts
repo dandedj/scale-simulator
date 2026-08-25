@@ -10,7 +10,7 @@
  */
 
 import type { Experience, ExperienceHosts, PlaybackController } from './experience';
-import { cloneConfig, presetById, PRESETS } from './engine/presets';
+import { cloneConfig, experimentById, presetById, PRESETS } from './engine/presets';
 import { Simulation } from './engine/simulation';
 import type { SimulationConfig } from './engine/types';
 import { ChartRail } from './render/charts';
@@ -32,7 +32,8 @@ const COMPARE_HELP_HTML = `
       <li><b>Two sims, one clock.</b> SIM A (top) and SIM B (bottom) run in lockstep on the same virtual clock, each with its own charts and totals.</li>
       <li><b>Shared traffic.</b> The Traffic knobs — client count and request rate — apply to both sims, so they always see the same offered load. Speed, pause, and reset are shared too.</li>
       <li><b>Per-sim tuning.</b> The Clients, RTB Fabric, Downstream pools, and Downstreams groups edit one sim at a time — pick it with the SIM A / SIM B tabs in the Tuning panel. Client behavior (timeouts, retries, jitter, breakers) can differ between sims.</li>
-      <li><b>Scenarios.</b> A scenario button sets that sim's client, fabric &amp; downstream tuning; only the traffic shape applies to both. Storm-prone and Protected share identical client settings, isolating the fabric protections — compare them under the same pulse.</li>
+      <li><b>Scenarios.</b> A scenario button sets that sim's client, fabric &amp; downstream tuning; only the traffic shape applies to both. The scenarios share one client profile, isolating the fabric-side differences — compare them under the same pulse.</li>
+      <li><b>A/B experiments.</b> The experiment cards in the Scenarios panel load a prefilled pair — one scenario into SIM A, another into SIM B — in one click.</li>
       <li><b>◉ PULSE surges both sims at once</b> — the same traffic spike, two responses.</li>
     </ul>
     <button id="help-dismiss" class="btn">GOT IT</button>
@@ -85,6 +86,7 @@ export class StormExperience implements Experience {
       getSims: () => this.panes.map((p) => p.sim),
       loadPreset: (id) => this.resetPanes([cloneConfig(presetById(id).config)]),
       applyScenario: (pane, id) => this.applyScenario(pane, id),
+      applyExperiment: (id) => this.applyExperiment(id),
       reset: () => this.resetPanes(this.panes.map((p) => cloneConfig(p.sim.cfg))),
       pulse: (factor, durationMs) => {
         for (const p of this.panes) p.sim.triggerPulse(factor, durationMs);
@@ -263,6 +265,28 @@ export class StormExperience implements Experience {
       c.clients.requestRatePerSec = preset.clients.requestRatePerSec;
     }
     this.resetPanes(cfgs);
+  }
+
+  /**
+   * A prefilled A/B pair: load one whole preset into each pane at once,
+   * entering comparison mode if needed. As with per-pane scenarios, the
+   * traffic shape (SIM A's) applies to both so offered load is identical.
+   */
+  private applyExperiment(id: string): void {
+    const exp = experimentById(id);
+    const a = cloneConfig(presetById(exp.a).config);
+    const b = cloneConfig(presetById(exp.b).config);
+    b.clients.count = a.clients.count;
+    b.clients.requestRatePerSec = a.clients.requestRatePerSec;
+    const entering = !this.compare;
+    this.compare = true;
+    this.resetPanes([a, b]);
+    if (entering) {
+      this.controls.setCompareUI(true);
+      this.helpEl.classList.remove('hidden');
+      this.playback.setStartHint(COMPARE_HINT);
+    }
+    this.controls.setActiveExperiment(exp);
   }
 
   private updateHud(): void {

@@ -195,9 +195,11 @@ preset — clients included — to its sim, propagating only the traffic shape
 to both. Because the scenarios share one fixed client profile (Lock contention
 aside), picking a different scenario per pane isolates the fabric-side
 difference under the same pulse — e.g. *Wide open* vs *Rate limited*, or
-*Shed early* vs *Kernel limited*. Per-sim client knobs also allow client-side
-A/B experiments (e.g. jittered vs un-jittered retries) against the same fabric
-tuning. Run totals and the event log report both sims side by side.
+*Shed early* vs *Kernel limited*. The **A/B experiments** cards in the Scenarios
+panel load those pairings in one click, entering comparison mode and setting both
+panes at once. Per-sim client knobs also allow client-side A/B experiments (e.g.
+jittered vs un-jittered retries) against the same fabric tuning. Run totals and
+the event log report both sims side by side.
 
 **Is the difference real?** Under the totals, three A/B significance callouts
 answer whether the gap is signal or noise — goodput, mean latency, and the tail:

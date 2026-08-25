@@ -10,9 +10,9 @@
  * tabs.
  */
 
-import { PRESETS } from '../engine/presets';
+import { EXPERIMENTS, PRESETS } from '../engine/presets';
 import type { Simulation } from '../engine/simulation';
-import type { LockConfig, LockSite, SimulationConfig } from '../engine/types';
+import type { Experiment, LockConfig, LockSite, SimulationConfig } from '../engine/types';
 import { compareMeans, compareQuantiles, compareSuccessRates, type ABQuantile } from '../stats';
 import { Legend } from './legend';
 import { SystemOverview } from './overview';
@@ -31,6 +31,8 @@ export interface ControlHooks {
   loadPreset(id: string): void;
   /** Comparison mode: apply a preset's tuning to one pane (clients shared). */
   applyScenario(pane: number, id: string): void;
+  /** Load a prefilled A/B pair into the two panes (entering comparison mode if needed). */
+  applyExperiment(id: string): void;
   reset(): void;
   /** Surge every sim at once. */
   pulse(factor: number, durationMs: number): void;
@@ -250,8 +252,8 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
       {
         label: 'TLS CPU cost', min: 5, max: 200, step: 5, get: (c) => c.fabric.tlsCpuCost, set: (c, v) => (c.fabric.tlsCpuCost = v), format: (v) => `${v}u`,
         info: {
-          what: 'CPU work-units one full handshake consumes, versus ~processing-time units for a request.',
-          how: 'In the processor-sharing model, demand = Σ work-rates; a handshake demands this many units while a warm request demands ~processing time. The preset ratio is ~25× (measured 15–70×). It also scales outbound fabric→downstream connects (at half).',
+          what: 'CPU work-units one full handshake consumes, versus the request CPU cost for a request.',
+          how: 'In the processor-sharing model, demand = Σ work-rates; a handshake demands this many units while a warm request demands the request CPU cost below. The preset ratio is ~25× (measured 15–70×). It also scales outbound fabric→downstream connects (at half).',
           expect: 'Raising it widens the gap between a handshake and a proxied request, so fewer simultaneous handshakes saturate the CPU. This ratio is the core reason connection churn is so much costlier than serving traffic.',
         },
       },
@@ -259,8 +261,16 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
         label: 'Processing time', min: 1, max: 10, step: 0.5, get: (c) => c.fabric.processingMs, set: (c, v) => (c.fabric.processingMs = v), format: ms,
         info: {
           what: 'Nominal fabric processing time per request at idle.',
-          how: 'Each request demands ~1 work-unit per ms of processing on the shared CPU, stretched under contention. It is the cheap end of the CPU model that handshakes are measured against.',
-          expect: 'Higher per-request processing raises baseline CPU load and shrinks the headroom available to absorb a handshake burst before saturation.',
+          how: 'A request occupies the shared CPU for this long (stretched under contention), demanding its request CPU cost spread over that time.',
+          expect: 'Longer processing adds fabric latency toward the client deadline and holds more requests in flight at once. Sustained request CPU load is request rate × request CPU cost, so the cost knob below — not this one — moves it.',
+        },
+      },
+      {
+        label: 'Request CPU cost', min: 1, max: 60, step: 1, get: (c) => c.fabric.requestCpuCost, set: (c, v) => (c.fabric.requestCpuCost = v), format: (v) => `${v}u`,
+        info: {
+          what: 'CPU work-units one request consumes — the per-request CPU.',
+          how: 'Each request demands this many units over its processing time. The default 4u matches the 4ms processing time (1 unit/ms); a full TLS handshake is 60u. Sustained request demand = request rate × this, against CPU capacity.',
+          expect: 'Raising it multiplies baseline CPU load, shrinking the headroom that absorbs a handshake burst — the same pulse storms sooner. Past capacity ÷ request rate (25u at the defaults’ 120/s vs 3ku/s), even steady traffic saturates the CPU and everything stretches.',
         },
       },
       {
@@ -599,11 +609,27 @@ export class ControlPanel {
       card.addEventListener('click', () => {
         this.hooks.loadPreset(preset.id);
         this.setActivePreset(preset.id);
+        this.setActiveExperiment(null);
         this.refreshKnobs();
       });
       grid.appendChild(card);
     }
     section.appendChild(grid);
+
+    // A/B experiments: prefilled scenario pairs, visible in both modes. One
+    // click loads a scenario into each pane (switching to comparison mode).
+    const exps = el('div', 'experiments');
+    exps.appendChild(el('div', 'experiments-title', 'A/B experiments'));
+    for (const exp of EXPERIMENTS) {
+      const card = el('button', 'preset-card experiment-card');
+      card.dataset.experiment = exp.id;
+      card.appendChild(el('div', 'preset-name', exp.name));
+      card.appendChild(el('div', 'preset-desc', exp.description));
+      card.addEventListener('click', () => this.hooks.applyExperiment(exp.id));
+      exps.appendChild(card);
+    }
+    exps.appendChild(el('div', 'scenario-note', 'One click loads the pair into SIM A / SIM B and runs them side by side under the same traffic.'));
+    section.appendChild(exps);
 
     // Comparison mode: one compact scenario row per pane.
     const cmp = el('div', 'compare-only');
@@ -619,6 +645,7 @@ export class ControlPanel {
         b.addEventListener('click', () => {
           this.hooks.applyScenario(pane, preset.id);
           this.setActiveScenario(pane, preset.id);
+          this.setActiveExperiment(null);
         });
         btns.appendChild(b);
       }
@@ -647,6 +674,21 @@ export class ControlPanel {
     this.side.querySelectorAll<HTMLElement>(`.preset-mini[data-pane='${pane}']`).forEach((b) => {
       b.classList.toggle('active', b.dataset.preset === id);
     });
+  }
+
+  /**
+   * Highlight the loaded experiment (and its per-pane scenarios); null clears
+   * the experiment cards only, so a per-pane scenario pick or knob edit breaks
+   * the pairing without touching the rows' own highlights.
+   */
+  setActiveExperiment(exp: Experiment | null): void {
+    this.side.querySelectorAll<HTMLElement>('.experiment-card').forEach((c) => {
+      c.classList.toggle('active', c.dataset.experiment === (exp?.id ?? null));
+    });
+    if (exp) {
+      this.setActiveScenario(0, exp.a);
+      this.setActiveScenario(1, exp.b);
+    }
   }
 
   // -- Knobs --------------------------------------------------------------------
@@ -952,6 +994,7 @@ export class ControlPanel {
   }
 
   private markCustom(scope: KnobScope): void {
+    this.setActiveExperiment(null);
     if (!this.hooks.isCompare()) {
       this.setActivePreset(null);
       return;
@@ -975,6 +1018,7 @@ export class ControlPanel {
     this.syncPaneTabs();
     this.setActiveScenario(0, null);
     this.setActiveScenario(1, null);
+    this.setActiveExperiment(null);
     if (!on) this.setActivePreset(null);
     this.lastTotalsHtml = '';
     this.refreshKnobs();

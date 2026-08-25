@@ -132,8 +132,8 @@ const LANES: Lane[] = [
       {
         n: '9',
         title: 'Fabric processing',
-        value: (c) => `${c.fabric.processingMs}ms · CPU ${(c.fabric.cpuCapacity / 1000).toFixed(1)}ku/s`,
-        how: 'Each request demands ~1 work-unit per ms of processing on the shared CPU, stretched by the slowdown factor under contention.',
+        value: (c) => `${c.fabric.processingMs}ms / ${c.fabric.requestCpuCost}u · CPU ${(c.fabric.cpuCapacity / 1000).toFixed(1)}ku/s`,
+        how: 'Each request demands its CPU cost (work-units) over its processing time on the shared CPU, stretched by the slowdown factor under contention.',
         outcome: { kind: 'pass', text: 'then routed to a downstream' },
       },
       {

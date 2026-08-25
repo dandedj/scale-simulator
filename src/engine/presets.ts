@@ -20,7 +20,7 @@
  * Traffic knobs and the pulse button.
  */
 
-import type { Preset, SimulationConfig } from './types';
+import type { Experiment, Preset, SimulationConfig } from './types';
 
 /**
  * The plain baseline: gentle, well-behaved clients on a modest fabric with
@@ -53,6 +53,7 @@ export function baseConfig(): SimulationConfig {
       tlsResumptionRate: 0.7,
       tlsResumptionCostFactor: 0.4,
       processingMs: 4,
+      requestCpuCost: 4,
       cpuCapacity: 3000,
       tlsCpuCost: 60,
       // TLS error pacing is off by default: pacing de-synchronizes reconnect
@@ -223,6 +224,52 @@ export function presetById(id: string): Preset {
   const p = PRESETS.find((p) => p.id === id);
   if (!p) throw new Error(`Unknown preset: ${id}`);
   return p;
+}
+
+/**
+ * Prefilled comparison-mode pairings: one click loads a scenario into each
+ * pane. Each pair holds everything but the contrasted fabric tuning constant
+ * (the scenarios already share one client profile and traffic shape).
+ */
+export const EXPERIMENTS: Experiment[] = [
+  {
+    id: 'open-vs-shed',
+    name: 'Wide open vs Shed early',
+    description:
+      'The unprotected fabric against cheap rejection at the door. Pulse both: A melts its CPU on handshakes and stays down after the surge; B sheds connections with an RST and recovers.',
+    a: 'unbounded',
+    b: 'early-shed',
+  },
+  {
+    id: 'open-vs-rate',
+    name: 'Wide open vs Rate limited',
+    description:
+      'The same generous limits, with and without accept-rate shedding. Pulse both: the reconnect flood that storms A is bounced at TCP accept in B, before any TLS work.',
+    a: 'unbounded',
+    b: 'rate-limited',
+  },
+  {
+    id: 'open-vs-kernel',
+    name: 'Wide open vs Kernel limited',
+    description:
+      'High app limits with and without the kernel modeled. Pulse both: B drops connections at the accept queue and FD ceiling beneath the app limits — a dirtier failure than a clean RST.',
+    a: 'unbounded',
+    b: 'kernel-bound',
+  },
+  {
+    id: 'shed-vs-tuned',
+    name: 'Shed early vs Well tuned',
+    description:
+      'Two protected fabrics: tight static caps vs layered modest limits with high TLS resumption. Pulse both and compare shed volume, recovery time, and the significance readout.',
+    a: 'early-shed',
+    b: 'well-tuned',
+  },
+];
+
+export function experimentById(id: string): Experiment {
+  const e = EXPERIMENTS.find((e) => e.id === id);
+  if (!e) throw new Error(`Unknown experiment: ${id}`);
+  return e;
 }
 
 /** Deep-clone a config so live knob edits never mutate the preset. */

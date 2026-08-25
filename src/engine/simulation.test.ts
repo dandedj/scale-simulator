@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { baseConfig, presetById, cloneConfig } from './presets';
+import { baseConfig, presetById, cloneConfig, EXPERIMENTS } from './presets';
 import { Simulation } from './simulation';
 import type { SimulationConfig } from './types';
 
@@ -295,6 +295,57 @@ describe('TLS resumption', () => {
     expect(all.metrics.totals.resumedHandshakes).toBeGreaterThan(0);
     expect(all.metrics.totals.tlsHandshakesCompleted).toBeGreaterThan(0);
     expect(none.metrics.totals.resumedHandshakes).toBe(0);
+  });
+});
+
+describe('request CPU cost', () => {
+  /** Mean CPU utilization past warm-up (the pre-warm handshake burst spikes the start). */
+  function steadyUtil(sim: Simulation): number {
+    const buckets = sim.metrics.buckets.filter((b) => b.time >= 5_000);
+    return buckets.reduce((sum, b) => sum + b.cpuUtilization, 0) / buckets.length;
+  }
+
+  it('a higher per-request CPU cost saturates the fabric at traffic the default absorbs', () => {
+    const lean = baseSim();
+    run(lean, 20_000);
+    expect(statsBetween(lean, 5_000, 20_000).successRate).toBeGreaterThan(0.9);
+
+    // 6 clients × 20/s × 40u = 4.8ku/s demanded vs 3ku/s capacity: the CPU is
+    // saturated by steady traffic alone, so every service time stretches and
+    // requests blow the client deadline — no pulse needed.
+    const heavy = baseSim((cfg) => {
+      cfg.fabric.requestCpuCost = 40;
+    });
+    run(heavy, 20_000);
+    expect(steadyUtil(heavy)).toBeGreaterThan(1);
+    expect(statsBetween(heavy, 5_000, 20_000).successRate).toBeLessThan(0.5);
+  });
+
+  it('cost raises request CPU demand at a fixed processing time', () => {
+    // Calm clients (a deadline no request brushes → no timeout churn) isolate
+    // the request contribution from handshake spikes in the sampled gauge:
+    // 4× the cost adds ≈3× 120/s × 4u ÷ 3ku/s ≈ +0.48 utilization.
+    const calm = (cost: number) =>
+      baseSim((cfg) => {
+        cfg.clients.clientTimeoutMs = 1000;
+        cfg.fabric.requestCpuCost = cost;
+      });
+    const cheap = calm(4);
+    const costly = calm(16);
+    run(cheap, 20_000);
+    run(costly, 20_000);
+    expect(statsBetween(costly, 5_000, 20_000).successRate).toBeGreaterThan(0.9);
+    expect(steadyUtil(costly)).toBeGreaterThan(steadyUtil(cheap) + 0.3);
+  });
+});
+
+describe('A/B experiments', () => {
+  it('every experiment pairs two known presets', () => {
+    for (const exp of EXPERIMENTS) {
+      expect(presetById(exp.a).id).toBe(exp.a);
+      expect(presetById(exp.b).id).toBe(exp.b);
+      expect(exp.a).not.toBe(exp.b);
+    }
   });
 });
 

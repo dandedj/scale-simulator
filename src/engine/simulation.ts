@@ -1234,7 +1234,7 @@ export class Simulation {
         return;
       }
       req.setPhase('processingAtFabric', this.now, this.now + f.processingMs * this.cpu.slowdownFactor());
-      this.cpu.add(f.processingMs, f.processingMs, () => {
+      this.cpu.add(f.processingMs, f.requestCpuCost, () => {
         if (req.attempt !== a || req.fate) {
           this.fabricInFlight--; // processed a request whose client already left
           return;
