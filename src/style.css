@@ -1613,7 +1613,12 @@ input[type='range']::-moz-range-thumb {
 
 /* ---------- DNS distribution mode ---------- */
 
-/* Traffic-shape segmented selector (a knob-row control). */
+/* Rows a control group hides when they don't apply to the selected policy. */
+.knob-row.hidden {
+  display: none;
+}
+
+/* Segmented selectors (a knob-row control): demand shape, ramp amount/rate, policy. */
 .shape-seg {
   display: flex;
   gap: 4px;

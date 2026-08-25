@@ -1,7 +1,8 @@
 /**
- * Control panel for the Scaling sim: scenario presets, the SURGE trigger, live
- * knobs (demand, capacity/buffer, the 9 scale-up stages, launch throughput), run
- * totals, and the event ticker. Mirrors the DNS panel's structure and CSS.
+ * Control panel for the Scaling sim: scenario presets, the SURGE and RAMP
+ * triggers, live controls (demand ramp, capacity/buffer, the scaling policy, the
+ * launch step sizes and bake, the 9 scale-up stages), run totals, and the event
+ * ticker. Mirrors the DNS panel's structure and CSS.
  *
  * The Demand group is 'global' (shared across compare panes so offered load is
  * identical); the rest are 'sim' (edited per pane via the SIM A / SIM B tabs).
@@ -10,7 +11,12 @@
 import { compareSuccessRates } from '../../stats';
 import { SCALING_PRESETS } from '../engine/presets';
 import type { ScalingSimulation } from '../engine/scalingSimulation';
-import type { ScalingSimulationConfig, ScalingTrafficShape } from '../engine/types';
+import type {
+  ScalingAdjustmentType,
+  ScalingPolicyType,
+  ScalingSimulationConfig,
+  ScalingTrafficShape,
+} from '../engine/types';
 import { ScalingLegend } from './legend';
 import { ScalingOverview } from './overview';
 
@@ -40,6 +46,7 @@ interface SettingInfo {
   expect: string;
 }
 interface KnobDef {
+  kind: 'knob';
   label: string;
   min: number;
   max: number;
@@ -47,22 +54,35 @@ interface KnobDef {
   get(c: ScalingSimulationConfig): number;
   set(c: ScalingSimulationConfig, v: number): void;
   format?(v: number): string;
+  /** Hide the row when it does not apply to the selected policy. */
+  when?(c: ScalingSimulationConfig): boolean;
   info?: SettingInfo;
 }
-interface ToggleDef {
+/** A segmented selector — a fixed set of choices rather than a continuous range. */
+interface ChoiceDef {
+  kind: 'choice';
   label: string;
-  get(c: ScalingSimulationConfig): boolean;
-  set(c: ScalingSimulationConfig, v: boolean): void;
+  options: Array<{ value: string | number; label: string }>;
+  get(c: ScalingSimulationConfig): string | number;
+  set(c: ScalingSimulationConfig, v: string | number): void;
+  when?(c: ScalingSimulationConfig): boolean;
   info?: SettingInfo;
 }
+type ControlDef = KnobDef | ChoiceDef;
 
 const tps = (v: number) => (v >= 1e6 ? `${(v / 1e6).toFixed(2)}M/s` : v >= 1e3 ? `${Math.round(v / 1e3)}K/s` : `${Math.round(v)}/s`);
 const secs = (v: number) => `${Math.round(v / 1000)}s`;
-const mins = (v: number) => (v >= 60_000 ? `${(v / 60_000).toFixed(1)}m` : `${Math.round(v / 1000)}s`);
+/** Compact duration: 45s · 5m · 7.5m · 1h · 1.5h. */
+const mins = (v: number) => {
+  if (v < 60_000) return `${Math.round(v / 1000)}s`;
+  const [n, unit] = v >= 3_600_000 ? [v / 3_600_000, 'h'] : [v / 60_000, 'm'];
+  return `${Number.isInteger(n) ? n : n.toFixed(1)}${unit}`;
+};
 const pct = (v: number) => `${Math.round(v * 100)}%`;
 
 function stageKnob(label: string, key: keyof ScalingSimulationConfig['stages'], info: SettingInfo): KnobDef {
   return {
+    kind: 'knob',
     label,
     min: 0,
     max: 300_000,
@@ -74,28 +94,86 @@ function stageKnob(label: string, key: keyof ScalingSimulationConfig['stages'], 
   };
 }
 
-const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles: ToggleDef[] }> = [
+/** One rung of the step-scaling ladder, as a knob over its adjustment. */
+function stepKnob(index: number, label: string, info: SettingInfo): KnobDef {
+  return {
+    kind: 'knob',
+    label,
+    min: 0,
+    max: 200,
+    step: 5,
+    get: (c) => c.policy.steps[index]?.adjustment ?? 0,
+    set: (c, v) => {
+      if (c.policy.steps[index]) c.policy.steps[index].adjustment = v;
+    },
+    format: (v) => String(Math.round(v)),
+    when: (c) => c.policy.type === 'step',
+    info,
+  };
+}
+
+const RAMP_AMOUNTS = [250_000, 500_000, 1_000_000, 2_000_000, 3_000_000];
+const RAMP_RATES = [60_000, 300_000, 600_000, 1_800_000, 3_600_000];
+
+const GROUPS: Array<{ name: string; scope: KnobScope; open?: boolean; controls: ControlDef[] }> = [
   {
     name: 'Demand',
     scope: 'global',
-    knobs: [
+    open: true,
+    controls: [
       {
+        kind: 'choice',
+        label: 'Demand shape',
+        options: [
+          { value: 'steady', label: 'steady' },
+          { value: 'ramp', label: 'ramp' },
+          { value: 'step', label: 'step' },
+        ],
+        get: (c) => c.traffic.shape,
+        set: (c, v) => (c.traffic.shape = v as ScalingTrafficShape),
+        info: {
+          what: 'How the ramp amount is delivered.',
+          how: 'Steady holds the base rate. Ramp climbs base → base + amount over the ramp rate. Step jumps there all at once.',
+          expect: 'Step is the worst case — the whole add arrives before anything can be launched. Ramp is the realistic one.',
+        },
+      },
+      {
+        kind: 'knob',
         label: 'Base rate', min: 20_000, max: 1_000_000, step: 10_000, get: (c) => c.traffic.baseRateTps, set: (c, v) => (c.traffic.baseRateTps = v), format: tps,
         info: {
           what: 'Steady demand and the floor of the ramp (TPS).',
           how: 'The fleet is pre-warmed to serve this at the target utilization, so the run starts calm.',
-          expect: 'Sets the baseline; the ramp climbs from here to the peak.',
+          expect: 'Sets the baseline the ramp climbs from.',
         },
       },
       {
-        label: 'Peak rate', min: 100_000, max: 3_000_000, step: 50_000, get: (c) => c.traffic.peakRateTps, set: (c, v) => (c.traffic.peakRateTps = v), format: tps,
+        kind: 'choice',
+        label: 'Ramp amount',
+        options: RAMP_AMOUNTS.map((v) => ({ value: v, label: v >= 1e6 ? `+${v / 1e6}M` : `+${v / 1e3}K` })),
+        get: (c) => c.traffic.rampAmountTps,
+        set: (c, v) => (c.traffic.rampAmountTps = v as number),
         info: {
-          what: 'The demand the ramp climbs to (TPS).',
-          how: 'Peak − base is the capacity the fleet must add. At 50K/instance, +1M TPS needs 20 more instances at 100% (≈33 at a 60% buffer).',
-          expect: 'A peak the pipeline can’t reach in time drops availability until it catches up.',
+          what: 'How much demand the ramp adds on top of base (TPS).',
+          how: 'The scheduled shape climbs base → base + this; ▲ RAMP adds this much from wherever demand currently sits, and stacks. At 50K/instance a +1M add needs 20 more instances at 100% util, ≈33 at a 60% buffer — +3M needs ≈100.',
+          expect: 'Larger adds need more scale-out steps, and every step costs a full pipeline + bake — so the recovery time grows faster than the amount does.',
         },
       },
       {
+        kind: 'choice',
+        label: 'Ramp rate',
+        // Spelled out: the segment CSS uppercases, and a bare "1M" next to the
+        // ramp-amount row would read as a million rather than a minute.
+        options: RAMP_RATES.map((v) => ({ value: v, label: v >= 3_600_000 ? '1hr' : `${v / 60_000}min` })),
+        get: (c) => c.traffic.rampDurationMs,
+        set: (c, v) => (c.traffic.rampDurationMs = v as number),
+        info: {
+          what: 'How long the ramp amount takes to arrive.',
+          how: 'The offered ramp rate is amount ÷ this. Compare it against the max sustainable ramp in the readout (max step × capacity ÷ decision interval).',
+          expect: 'Faster than the fleet can add capacity and availability dips until it catches up. Slow enough — an hour for +1M — and the scale-out keeps pace with no visible dip at all.',
+        },
+      },
+      {
+        kind: 'knob',
         label: 'Ramp start', min: 0, max: 120_000, step: 5_000, get: (c) => c.traffic.rampStartMs, set: (c, v) => (c.traffic.rampStartMs = v), format: secs,
         info: {
           what: 'How long demand holds at base before the ramp begins.',
@@ -103,55 +181,167 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
           expect: 'Cosmetic — shifts when the ramp starts.',
         },
       },
-      {
-        label: 'Ramp duration', min: 5_000, max: 600_000, step: 5_000, get: (c) => c.traffic.rampDurationMs, set: (c, v) => (c.traffic.rampDurationMs = v), format: mins,
-        info: {
-          what: 'Time to climb base → peak — and the duration of a triggered ▲ RAMP.',
-          how: 'The ramp rate = (peak − base) ÷ this. Compare it against the max sustainable ramp (batch × capacity ÷ cooldown).',
-          expect: 'A ramp faster than the pipeline can add capacity opens an availability dip; a gentle ramp stays covered by headroom.',
-        },
-      },
-      {
-        label: 'Ramp amount', min: 100_000, max: 3_000_000, step: 100_000, get: (c) => c.traffic.rampAmountTps, set: (c, v) => (c.traffic.rampAmountTps = v), format: tps,
-        info: {
-          what: 'How much the ▲ RAMP button adds (TPS), over the ramp duration.',
-          how: 'Click ▲ RAMP to schedule an additive ramp of this size on top of current demand (e.g. +1M TPS over 1 min). Ramps stack and persist until reset.',
-          expect: 'The on-demand version of the surge, but a ramp instead of a step — schedule a specific capacity increase and watch the fleet chase it.',
-        },
-      },
     ],
-    toggles: [],
   },
   {
     name: 'Capacity & buffer',
     scope: 'sim',
-    knobs: [
+    open: true,
+    controls: [
       {
+        kind: 'knob',
         label: 'Capacity / instance', min: 5_000, max: 200_000, step: 5_000, get: (c) => c.capacity.capacityPerInstanceTps, set: (c, v) => (c.capacity.capacityPerInstanceTps = v), format: tps,
         info: {
           what: 'TPS one instance serves at 100%.',
           how: 'Reference: 50K on a c7g.2xlarge (100K on two). Fleet capacity = instances × this.',
-          expect: 'Bigger instances mean fewer to launch for a given add — fewer batches, faster to target.',
+          expect: 'Bigger instances mean fewer to launch for a given add — fewer steps, so fewer bakes to sit through.',
         },
       },
       {
+        kind: 'knob',
         label: 'Target utilization (buffer)', min: 0.2, max: 0.95, step: 0.05, get: (c) => c.capacity.targetUtilization, set: (c, v) => (c.capacity.targetUtilization = v), format: pct,
         info: {
-          what: 'The utilization the autoscaler holds — the buffer.',
-          how: 'Steady-state util sits here; (1 − this) is headroom. Scale-out triggers when util exceeds it. The fleet is pre-warmed to keep base at this util.',
+          what: 'The utilization the autoscaler holds — the buffer. ECS calls it targetCapacity (default 100%).',
+          how: 'Steady-state util sits here; (1 − this) is headroom. Scale-out triggers when util exceeds it. AWS suggests 60–80% for workloads that burst.',
           expect: 'A lower target = more headroom that absorbs a ramp during the scaling lag (shallower dip) — at the cost of more idle instances.',
         },
       },
     ],
-    toggles: [],
+  },
+  {
+    name: 'Scaling policy',
+    scope: 'sim',
+    open: true,
+    controls: [
+      {
+        kind: 'choice',
+        label: 'Policy type',
+        options: [
+          { value: 'target-tracking', label: 'target' },
+          { value: 'step', label: 'step' },
+          { value: 'simple', label: 'simple' },
+        ],
+        get: (c) => c.policy.type,
+        set: (c, v) => (c.policy.type = v as ScalingPolicyType),
+        info: {
+          what: 'Which AWS policy decides how much capacity to add.',
+          how: 'Target tracking computes the capacity that would hold utilization at target and closes the gap. Step picks an adjustment from a ladder keyed on how far past target the metric is. Simple applies one fixed adjustment per alarm and then blocks for a cooldown.',
+          expect: 'Target tracking lands on the right size and stops. Step reacts harder to a deep breach and can overshoot. Simple is the slowest — it can only act once per cooldown however far behind it is.',
+        },
+      },
+      {
+        kind: 'knob',
+        label: 'Scale-out gain', min: 0.5, max: 2, step: 0.1, get: (c) => c.policy.scaleOutGain, set: (c, v) => (c.policy.scaleOutGain = v), format: (v) => `${v.toFixed(1)}×`,
+        when: (c) => c.policy.type === 'target-tracking',
+        info: {
+          what: 'Multiplier on the capacity target tracking computes.',
+          how: '1.0× is the AWS arithmetic — provision exactly what holds the metric at target. Above 1 deliberately over-provisions each step; below 1 walks up in fractions of the gap.',
+          expect: 'Above 1 recovers sooner and leaves idle instances behind. Below 1 needs several bakes to close the same gap.',
+        },
+      },
+      {
+        kind: 'choice',
+        label: 'Adjustment type',
+        options: [
+          { value: 'percent-change-in-capacity', label: '% of fleet' },
+          { value: 'change-in-capacity', label: 'instances' },
+        ],
+        get: (c) => c.policy.adjustmentType,
+        set: (c, v) => (c.policy.adjustmentType = v as ScalingAdjustmentType),
+        when: (c) => c.policy.type !== 'target-tracking',
+        info: {
+          what: 'How a step or simple adjustment is read (the AWS AdjustmentType).',
+          how: 'PercentChangeInCapacity scales the add with the fleet — 30% of 10 instances is 3, of 100 is 30. ChangeInCapacity adds a flat count whatever the fleet size.',
+          expect: 'Percent keeps recovery time roughly constant as the fleet grows; a flat count gets relatively weaker the bigger the fleet, so large adds crawl.',
+        },
+      },
+      stepKnob(0, 'Step 1 — over target', {
+        what: 'The adjustment applied for a shallow breach — utilization just past target.',
+        how: 'The first rung of the ladder, from the breach threshold up to the next bound.',
+        expect: 'Keep it small: this rung fires on ordinary noise around the target.',
+      }),
+      stepKnob(1, 'Step 2 — 25% over', {
+        what: 'The adjustment once utilization is 25% past target (e.g. 75% util against a 60% target).',
+        how: 'The middle rung — a real but survivable breach.',
+        expect: 'This is the rung most ramps sit on; it does most of the work.',
+      }),
+      stepKnob(2, 'Step 3 — 2× target', {
+        what: 'The adjustment once utilization is double the target — the fleet is saturated and shedding.',
+        how: 'The top rung. AWS only applies the difference between the fleet it scales from and what has already been requested, so a deep breach tops up rather than double-adding.',
+        expect: 'The lever that turns a deep dip around fast — and the one that overshoots if it is set far above what the demand actually needs.',
+      }),
+      {
+        kind: 'knob',
+        label: 'Simple adjustment', min: 1, max: 100, step: 1, get: (c) => c.policy.simpleAdjustment, set: (c, v) => (c.policy.simpleAdjustment = v), format: (v) => String(Math.round(v)),
+        when: (c) => c.policy.type === 'simple',
+        info: {
+          what: 'The single adjustment a simple-scaling policy applies per alarm.',
+          how: 'Read as instances or a percent of the fleet, per the adjustment type. However deep the breach, this is all that gets added — then the cooldown blocks everything.',
+          expect: 'Set too small against a big ramp and the fleet can never catch up: each cooldown buys one adjustment.',
+        },
+      },
+    ],
+  },
+  {
+    name: 'Launch step & bake',
+    scope: 'sim',
+    open: true,
+    controls: [
+      {
+        kind: 'knob',
+        label: 'Bake (instance warmup)', min: 0, max: 900_000, step: 30_000, get: (c) => c.launch.bakeMs, set: (c, v) => (c.launch.bakeMs = v), format: mins,
+        info: {
+          what: 'How long new capacity settles before the autoscaler counts it. ECS instanceWarmupPeriod / ASG DefaultInstanceWarmup — 300s is the AWS default and suggested starting point.',
+          how: 'A baking instance is in service and carrying traffic, but the policy does not count it in the capacity it scales *from* — while still counting it in what it has already requested. So repeated breaches of the same size collapse into one scaling activity instead of launching the same capacity twice.',
+          expect: 'This, not the cooldown, is what paces a target-tracking or step policy: each scale-out has to finish the pipeline and then bake before the next one can build on it. Long bakes make recovery a staircase; short ones recover faster and risk over-scaling.',
+        },
+      },
+      {
+        kind: 'knob',
+        label: 'Min step size', min: 1, max: 20, step: 1, get: (c) => c.launch.minStepSize, set: (c, v) => (c.launch.minStepSize = v), format: (v) => String(Math.round(v)),
+        info: {
+          what: 'Fewest instances a scale-out launches (ECS minimumScalingStepSize, default 1).',
+          how: 'When the policy asks for less than this, it launches this many anyway.',
+          expect: 'A floor under tiny adds — it stops a large fleet inching up one instance at a time.',
+        },
+      },
+      {
+        kind: 'knob',
+        label: 'Max step size', min: 1, max: 120, step: 1, get: (c) => c.launch.maxStepSize, set: (c, v) => (c.launch.maxStepSize = v), format: (v) => String(Math.round(v)),
+        info: {
+          what: 'Most instances one scale-out launches (ECS maximumScalingStepSize, default 10000 — effectively no ceiling).',
+          how: 'With the decision interval it sets the sustained add rate: max step × capacity ÷ (pipeline + bake). The readout shows the result as the max sustainable ramp.',
+          expect: 'The throughput lever. Set below what the ramp needs and the fleet is capped at one step per bake — recovery takes as many bakes as it takes steps.',
+        },
+      },
+      {
+        kind: 'knob',
+        label: 'Cooldown (simple)', min: 0, max: 900_000, step: 30_000, get: (c) => c.launch.cooldownMs, set: (c, v) => (c.launch.cooldownMs = v), format: mins,
+        when: (c) => c.policy.type === 'simple',
+        info: {
+          what: 'The simple-scaling cooldown (AWS default 300s).',
+          how: 'AWS accepts Cooldown only on a simple-scaling policy: it blocks every decision until it expires, however far behind the fleet has fallen. Target-tracking and step policies throttle themselves with the bake instead.',
+          expect: 'Stacked on top of the pipeline and bake, a long cooldown is the slowest configuration in the model.',
+        },
+      },
+      {
+        kind: 'knob',
+        label: 'Max instances', min: 1, max: 400, step: 1, get: (c) => c.launch.maxInstances, set: (c, v) => (c.launch.maxInstances = v), format: (v) => String(Math.round(v)),
+        info: {
+          what: 'Ceiling on fleet size.',
+          how: 'Scale-out stops here; the FLEET panel turns red at the ceiling.',
+          expect: 'Below what the peak needs and availability can never fully recover.',
+        },
+      },
+    ],
   },
   {
     name: 'Scale-up stages',
     scope: 'sim',
-    knobs: [
+    controls: [
       stageKnob('Detection', 'detectionMs', {
-        what: 'Metric emit + ASG alarm before any launch.',
-        how: 'The breach must persist this long before the ASG acts (metric period × datapoints-to-alarm).',
+        what: 'Metric emit + alarm before any launch.',
+        how: 'ECS and EC2 publish these metrics once a minute, and the breach must hold for the configured datapoints-to-alarm before the policy acts.',
         expect: 'Often a big, overlooked chunk — nothing is even requested until it fires.',
       }),
       stageKnob('Signal → ECS', 'signalMs', {
@@ -191,42 +381,10 @@ const GROUPS: Array<{ name: string; scope: KnobScope; knobs: KnobDef[]; toggles:
       }),
       stageKnob('Client pickup', 'clientPickupMs', {
         what: 'Clients re-resolve and start using it.',
-        how: 'DNS TTL / CoreDNS cache before traffic actually flows to the new IP.',
+        how: 'DNS TTL / CoreDNS cache before traffic actually flows to the new IP. The bake clock starts once this passes and the instance is truly in service.',
         expect: 'Until this passes the instance is provisioned but idle — see the DNS tab for how this lag behaves.',
       }),
     ],
-    toggles: [],
-  },
-  {
-    name: 'Launch throughput',
-    scope: 'sim',
-    knobs: [
-      {
-        label: 'Batch size', min: 1, max: 40, step: 1, get: (c) => c.launch.launchBatchSize, set: (c, v) => (c.launch.launchBatchSize = v),
-        info: {
-          what: 'Instances launched per scale-out step.',
-          how: 'With the cooldown, sets the sustained add rate = batch × capacity ÷ cooldown.',
-          expect: 'Bigger batches add capacity faster once the pipeline fills — the throughput lever.',
-        },
-      },
-      {
-        label: 'Cooldown', min: 5_000, max: 300_000, step: 5_000, get: (c) => c.launch.cooldownMs, set: (c, v) => (c.launch.cooldownMs = v), format: mins,
-        info: {
-          what: 'Minimum time between scale-out steps.',
-          how: 'Prevents launching a huge fleet before the first batch reports in.',
-          expect: 'Shorter cooldown raises the sustained scale rate; too long starves a fast ramp.',
-        },
-      },
-      {
-        label: 'Max instances', min: 1, max: 100, step: 1, get: (c) => c.launch.maxInstances, set: (c, v) => (c.launch.maxInstances = v),
-        info: {
-          what: 'Ceiling on fleet size.',
-          how: 'Scale-out stops here.',
-          expect: 'Below what the peak needs and availability can never fully recover.',
-        },
-      },
-    ],
-    toggles: [],
   },
 ];
 
@@ -236,10 +394,13 @@ const TOTAL_METRICS: Array<{ key: string; color: string; value(t: Totals): strin
   { key: 'availability', color: 'var(--ok)', value: (t) => `${(t.offered > 0 ? (t.served / t.offered) * 100 : 100).toFixed(2)}%` },
   { key: 'lost req', color: 'var(--bad)', value: (t) => fmtBig(t.lost) },
   { key: 'served', color: 'var(--ok)', value: (t) => fmtBig(t.served) },
-  { key: 'launches', color: 'var(--info)', value: (t) => String(t.launches) },
+  { key: 'scale-outs', color: 'var(--info)', value: (t) => String(t.launches) },
   { key: 'instances +', color: 'var(--info)', value: (t) => String(t.instancesLaunched) },
   { key: 'peak fleet', color: 'var(--tls)', value: (t) => String(t.peakInstances) },
 ];
+
+/** Overshoot reads off the readout, not the totals, so it gets its own accessor. */
+const OVERSHOOT = { key: 'overshoot', color: 'var(--warn)' };
 
 export class ScalingControlPanel {
   private refreshers: Array<() => void> = [];
@@ -290,7 +451,7 @@ export class ScalingControlPanel {
     wrap.appendChild(factor);
 
     this.rampBtn = el('button', 'btn', '▲ RAMP') as HTMLButtonElement;
-    this.rampBtn.title = 'Schedule a ramp of the configured amount over the ramp duration (Demand group)';
+    this.rampBtn.title = 'Add the configured ramp amount, at the configured ramp rate, on top of demand right now (Demand group). Ramps stack and persist until reset.';
     this.rampBtn.addEventListener('click', () => {
       const t = this.cfgFor('global').traffic;
       this.hooks.ramp(t.rampAmountTps, t.rampDurationMs);
@@ -417,77 +578,84 @@ export class ScalingControlPanel {
       if (group.scope === 'sim' && this.paneTabBtns.length === 0) section.appendChild(this.buildPaneTabs());
       const details = document.createElement('details');
       details.className = 'knob-group';
-      if (group.name === 'Scale-up stages' || group.name === 'Capacity & buffer') details.open = true;
+      details.open = group.open === true;
       const summary = document.createElement('summary');
       summary.textContent = group.name;
       details.appendChild(summary);
-      if (group.name === 'Demand') details.appendChild(this.buildShapeSelector());
-
-      for (const knob of group.knobs) {
-        const row = el('div', 'knob-row');
-        const labelEl = el('div', 'knob-label', knob.label);
-        const valueEl = el('div', 'knob-value');
-        const input = document.createElement('input');
-        input.type = 'range';
-        input.min = String(knob.min);
-        input.max = String(knob.max);
-        input.step = String(knob.step);
-        const fmt = knob.format ?? ((v: number) => String(Math.round(v * 100) / 100));
-        const sync = () => {
-          const v = knob.get(this.cfgFor(group.scope));
-          input.value = String(v);
-          valueEl.textContent = fmt(v);
-        };
-        sync();
-        input.addEventListener('input', () => {
-          this.applyKnob(group.scope, knob, parseFloat(input.value));
-          valueEl.textContent = fmt(knob.get(this.cfgFor(group.scope)));
-        });
-        this.refreshers.push(sync);
-        const top = el('div', 'knob-top');
-        top.appendChild(labelEl);
-        const meta = el('div', 'knob-meta');
-        meta.appendChild(valueEl);
-        const info = knob.info ? this.buildInfo(knob.info) : null;
-        if (info) meta.appendChild(info.btn);
-        top.appendChild(meta);
-        row.append(top, input);
-        if (info) row.appendChild(info.panel);
-        details.appendChild(row);
+      for (const control of group.controls) {
+        details.appendChild(control.kind === 'knob' ? this.buildKnobRow(group.scope, control) : this.buildChoiceRow(group.scope, control));
       }
       section.appendChild(details);
     }
     this.side.appendChild(section);
   }
 
-  private buildShapeSelector(): HTMLElement {
+  private buildKnobRow(scope: KnobScope, knob: KnobDef): HTMLElement {
     const row = el('div', 'knob-row');
-    const top = el('div', 'knob-top');
-    top.appendChild(el('div', 'knob-label', 'Demand shape'));
-    row.appendChild(top);
+    const valueEl = el('div', 'knob-value');
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = String(knob.min);
+    input.max = String(knob.max);
+    input.step = String(knob.step);
+    const fmt = knob.format ?? ((v: number) => String(Math.round(v * 100) / 100));
+    const sync = () => {
+      const cfg = this.cfgFor(scope);
+      row.classList.toggle('hidden', knob.when ? !knob.when(cfg) : false);
+      const v = knob.get(cfg);
+      input.value = String(v);
+      valueEl.textContent = fmt(v);
+    };
+    input.addEventListener('input', () => {
+      this.applyControl(scope, (c, v) => knob.set(c, v as number), parseFloat(input.value));
+      valueEl.textContent = fmt(knob.get(this.cfgFor(scope)));
+    });
+    this.refreshers.push(sync);
+    row.append(this.rowTop(knob.label, valueEl, knob.info, row), input);
+    sync();
+    return row;
+  }
+
+  private buildChoiceRow(scope: KnobScope, choice: ChoiceDef): HTMLElement {
+    const row = el('div', 'knob-row');
     const seg = el('div', 'shape-seg');
-    const shapes: ScalingTrafficShape[] = ['steady', 'ramp', 'step'];
     const btns: HTMLButtonElement[] = [];
     const sync = () => {
-      const cur = this.cfgFor('global').traffic.shape;
-      btns.forEach((b) => b.classList.toggle('active', b.dataset.shape === cur));
+      const cfg = this.cfgFor(scope);
+      row.classList.toggle('hidden', choice.when ? !choice.when(cfg) : false);
+      const cur = String(choice.get(cfg));
+      btns.forEach((b) => b.classList.toggle('active', b.dataset.value === cur));
     };
-    for (const s of shapes) {
-      const b = el('button', 'shape-btn', s) as HTMLButtonElement;
-      b.dataset.shape = s;
+    for (const opt of choice.options) {
+      const b = el('button', 'shape-btn', opt.label) as HTMLButtonElement;
+      b.dataset.value = String(opt.value);
       b.addEventListener('click', () => {
-        for (const sim of this.hooks.getSims()) sim.cfg.traffic.shape = s;
-        this.hooks.configChanged('rate', 'all');
-        sync();
-        this.markCustom('global');
+        this.applyControl(scope, (c, v) => choice.set(c, v), opt.value);
+        // A policy change shows or hides the rows that belong to it.
+        this.refreshKnobs();
       });
       btns.push(b);
       seg.appendChild(b);
     }
-    sync();
     this.refreshers.push(sync);
-    row.appendChild(seg);
+    row.append(this.rowTop(choice.label, null, choice.info, row), seg);
+    sync();
     return row;
+  }
+
+  /** Label + optional live value + the ⓘ disclosure, shared by both row kinds. */
+  private rowTop(label: string, valueEl: HTMLElement | null, info: SettingInfo | undefined, row: HTMLElement): HTMLElement {
+    const top = el('div', 'knob-top');
+    top.appendChild(el('div', 'knob-label', label));
+    const meta = el('div', 'knob-meta');
+    if (valueEl) meta.appendChild(valueEl);
+    const built = info ? this.buildInfo(info) : null;
+    if (built) {
+      meta.appendChild(built.btn);
+      row.appendChild(built.panel);
+    }
+    top.appendChild(meta);
+    return top;
   }
 
   private buildInfo(info: SettingInfo): { btn: HTMLButtonElement; panel: HTMLElement } {
@@ -529,14 +697,14 @@ export class ScalingControlPanel {
     this.paneTabBtns.forEach((b, i) => b.classList.toggle('active', i === this.activePane));
   }
 
-  private applyKnob(scope: KnobScope, knob: KnobDef, v: number): void {
+  private applyControl(scope: KnobScope, set: (c: ScalingSimulationConfig, v: string | number) => void, v: string | number): void {
     const sims = this.hooks.getSims();
     if (scope === 'global') {
-      for (const sim of sims) knob.set(sim.cfg, v);
+      for (const sim of sims) set(sim.cfg, v);
       this.hooks.configChanged('rate', 'all');
     } else {
       const idx = Math.min(this.activePane, sims.length - 1);
-      knob.set(sims[idx].cfg, v);
+      set(sims[idx].cfg, v);
       this.hooks.configChanged('plain', idx);
     }
     this.markCustom(scope);
@@ -593,7 +761,7 @@ export class ScalingControlPanel {
       this.pauseBtn.classList.toggle('active', this.hooks.isPaused());
     }
     const t = this.cfgFor('global').traffic;
-    const amt = t.rampAmountTps >= 1e6 ? `${(t.rampAmountTps / 1e6).toFixed(1)}M` : `${Math.round(t.rampAmountTps / 1e3)}K`;
+    const amt = t.rampAmountTps >= 1e6 ? `${t.rampAmountTps / 1e6}M` : `${Math.round(t.rampAmountTps / 1e3)}K`;
     const rampLabel = `▲ RAMP +${amt}/${mins(t.rampDurationMs)}`;
     if (this.rampBtn.textContent !== rampLabel) this.rampBtn.textContent = rampLabel;
     const sims = this.hooks.getSims();
@@ -630,7 +798,11 @@ export class ScalingControlPanel {
 
 function totalsHtmlSingle(sim: ScalingSimulation): string {
   const t = sim.metrics.totals;
-  return TOTAL_METRICS.map((m) => `<div class="total"><span style="color:${m.color}">${m.value(t)}</span><label>${m.key}</label></div>`).join('');
+  const cells = TOTAL_METRICS.map((m) => `<div class="total"><span style="color:${m.color}">${m.value(t)}</span><label>${m.key}</label></div>`);
+  cells.push(
+    `<div class="total"><span style="color:${OVERSHOOT.color}">${sim.scaleReadout().overshootInstances}</span><label>${OVERSHOOT.key}</label></div>`,
+  );
+  return cells.join('');
 }
 
 function totalsHtmlCompare(sims: ScalingSimulation[]): string {
@@ -642,7 +814,11 @@ function totalsHtmlCompare(sims: ScalingSimulation[]): string {
     const cells = sims.map((s) => `<span style="color:${m.color}">${m.value(s.metrics.totals)}</span>`).join('');
     return `<div class="cmp-row"><label>${m.key}</label>${cells}</div>`;
   }).join('');
-  return head + rows + significanceHtml(sims);
+  const overshoot =
+    `<div class="cmp-row"><label>${OVERSHOOT.key}</label>` +
+    sims.map((s) => `<span style="color:${OVERSHOOT.color}">${s.scaleReadout().overshootInstances}</span>`).join('') +
+    `</div>`;
+  return head + rows + overshoot + significanceHtml(sims);
 }
 
 function significanceHtml(sims: ScalingSimulation[]): string {

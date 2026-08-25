@@ -2,13 +2,14 @@
  * Scaling-model metrics: time-bucketed amounts and gauges the chart rail reads.
  * Mirrors the DNS collector — rate integration into request amounts plus gauges
  * sampled at bucket close — with fields for the demand/capacity/utilization story.
- * 1s buckets over a 20-minute window so a full ramp-and-recover arc is on screen.
+ * 2s buckets over a 2-hour window: a slow ramp plus a bake-throttled recovery is
+ * an hours-long arc, and the rail scales its view to whatever has run so far.
  */
 
 import type { ScalingMetricsBucket, ScalingSimEventLog } from './types';
 
-export const BUCKET_MS = 1000;
-export const HISTORY_MS = 1_200_000;
+export const BUCKET_MS = 2000;
+export const HISTORY_MS = 7_200_000;
 const MAX_BUCKETS = Math.ceil(HISTORY_MS / BUCKET_MS);
 
 /** The piecewise-constant rate field (TPS) integrated between events. */
@@ -21,10 +22,12 @@ export interface ScalingGauges {
   offeredRate: number;
   readyCapacityTps: number;
   usableCapacityTps: number;
+  meteredCapacityTps: number;
   utilization: number;
   provisioning: number;
   ready: number;
   inUse: number;
+  baking: number;
   inFlight: number;
 }
 
@@ -68,10 +71,12 @@ export class ScalingMetricsCollector {
       this.current.offeredRate = g.offeredRate;
       this.current.readyCapacityTps = g.readyCapacityTps;
       this.current.usableCapacityTps = g.usableCapacityTps;
+      this.current.meteredCapacityTps = g.meteredCapacityTps;
       this.current.utilization = g.utilization;
       this.current.provisioning = g.provisioning;
       this.current.ready = g.ready;
       this.current.inUse = g.inUse;
+      this.current.baking = g.baking;
       this.current.inFlight = g.inFlight;
       this.buckets.push(this.current);
       if (this.buckets.length > MAX_BUCKETS) this.buckets.shift();
@@ -121,10 +126,12 @@ export class ScalingMetricsCollector {
       offeredRate: 0,
       readyCapacityTps: 0,
       usableCapacityTps: 0,
+      meteredCapacityTps: 0,
       utilization: 0,
       provisioning: 0,
       ready: 0,
       inUse: 0,
+      baking: 0,
       inFlight: 0,
     };
   }

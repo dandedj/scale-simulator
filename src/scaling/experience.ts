@@ -12,10 +12,11 @@ import { ScalingChartRail } from './render/charts';
 import { ScalingRenderer } from './render/renderer';
 import { ScalingControlPanel, PANE_TAGS } from './ui/controls';
 
-const DEFAULT_TIME_SCALE = 30;
+/** Ramps here run for tens of minutes of sim time, so playback starts well dilated. */
+const DEFAULT_TIME_SCALE = 60;
 const MAX_SIM_MS_PER_FRAME = 60_000;
 
-const SINGLE_HINT = 'Pick a scenario and tune the pipeline first — the demand ramp runs when you start.';
+const SINGLE_HINT = 'Pick a scenario and tune the policy, bake and pipeline first — the demand ramp runs when you start.';
 const COMPARE_HINT = 'Tune each sim — A above, B below — then start. Both run on the same clock and demand ramp.';
 
 const COMPARE_HELP_HTML = `
@@ -23,10 +24,10 @@ const COMPARE_HELP_HTML = `
     <h2>Comparison mode</h2>
     <ul>
       <li><b>Two sims, one clock.</b> SIM A (top) and SIM B (bottom) run in lockstep, each with its own board, charts, and totals.</li>
-      <li><b>Shared demand.</b> The Demand knobs — shape, base/peak rate, ramp — apply to both sims, so they face the same ramp.</li>
-      <li><b>Per-sim tuning.</b> The Capacity &amp; buffer, Scale-up stages, and Launch throughput groups edit one sim at a time — pick it with the SIM A / SIM B tabs.</li>
-      <li><b>Scenarios.</b> A scenario sets that sim's scaling config; only the demand ramp is shared. Compare e.g. Baseline vs Optimized pipeline, or vs Over-provisioned buffer.</li>
-      <li><b>◉ SURGE hits both sims at once</b> — the same demand step, two responses.</li>
+      <li><b>Shared demand.</b> The Demand controls — shape, base rate, ramp amount and ramp rate — apply to both sims, so they face the same ramp.</li>
+      <li><b>Per-sim tuning.</b> The Capacity &amp; buffer, Scaling policy, Launch step &amp; bake, and Scale-up stages groups edit one sim at a time — pick it with the SIM A / SIM B tabs.</li>
+      <li><b>Scenarios.</b> A scenario sets that sim's scaling config; only the demand ramp is shared. Compare e.g. Sustained ramp vs Long bake to see what a bake costs, or Baseline vs Optimized pipeline.</li>
+      <li><b>◉ SURGE and ▲ RAMP hit both sims at once</b> — the same demand change, two responses.</li>
     </ul>
     <button id="scaling-help-dismiss" class="btn">GOT IT</button>
   </div>`;
@@ -228,6 +229,7 @@ export class ScalingExperience implements Experience {
     if (!cfgs[pane]) return;
     cfgs[pane].capacity = preset.capacity;
     cfgs[pane].stages = preset.stages;
+    cfgs[pane].policy = preset.policy;
     cfgs[pane].launch = preset.launch;
     cfgs[pane].slaTarget = preset.slaTarget;
     for (const c of cfgs) c.traffic = structuredClone(preset.traffic);

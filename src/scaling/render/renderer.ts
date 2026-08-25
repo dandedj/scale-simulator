@@ -1,10 +1,12 @@
 /**
  * Canvas renderer for the Scaling model. Shows, live: a scale-rate readout
  * (offered / usable capacity / availability, recover time, effective add-rate,
- * max-sustainable-ramp, pipeline latency); a per-stage lag breakdown bar (where
- * the ~5 minutes goes — the "what to optimize" view); the scale-up pipeline with
- * instances flowing stage by stage; a demand-vs-capacity meter (the current gap);
- * and the fleet as tiles colored by phase. Motion is a function of sim time.
+ * max-sustainable-ramp, pipeline latency, and the bake hold before the next
+ * scale decision); a per-stage lag breakdown bar (where the ~5 minutes goes —
+ * the "what to optimize" view); the scale-up pipeline with instances flowing
+ * stage by stage; a demand-vs-capacity meter (the current gap, and how much of
+ * the serving capacity the autoscaler is not yet counting); and the fleet as
+ * tiles colored by phase. Motion is a function of sim time.
  */
 
 import { loadColor, SEMANTIC, SURFACE, withAlpha } from '../../render/colors';
@@ -112,8 +114,12 @@ export class ScalingRenderer {
     ctx.font = '600 11px "IBM Plex Mono", monospace';
     ctx.fillStyle = SURFACE.textDim;
     ctx.fillText(`offered ${fmtTps(d.offeredTps)}`, x + 12, y + 40);
-    ctx.fillText(`usable  ${fmtTps(d.usableCapacityTps)}  (ready ${fmtTps(d.readyCapacityTps)})`, x + 12, y + 56);
-    ctx.fillText(`instances ${d.inUse} in use · ${d.ready} ready · ${d.provisioning} launching`, x + 12, y + 72);
+    ctx.fillText(`usable  ${fmtTps(d.usableCapacityTps)}  (counted ${fmtTps(d.meteredCapacityTps)})`, x + 12, y + 56);
+    ctx.fillText(
+      `instances ${d.inUse} in use · ${d.baking} baking · ${d.ready} ready · ${d.provisioning} launching`,
+      x + 12,
+      y + 72,
+    );
     const availCol = avail >= sim.cfg.slaTarget ? SEMANTIC.success : avail >= 0.9 ? SEMANTIC.shed : SEMANTIC.timeout;
     ctx.font = '700 20px "IBM Plex Mono", monospace';
     ctx.fillStyle = availCol;
@@ -151,6 +157,27 @@ export class ScalingRenderer {
       ry += 20;
     }
     ctx.textAlign = 'left';
+
+    // The autoscaler's own state, centred under the availability figure: what it
+    // is waiting on before it can act again, and how far it has over-provisioned.
+    const cx = x + w * 0.5;
+    const held = r.holdRemainingMs > 0;
+    const beat = 0.5 + 0.5 * Math.sin(sim.now / 300);
+    ctx.textAlign = 'center';
+    ctx.font = '700 10px "IBM Plex Mono", monospace';
+    ctx.fillStyle = held ? withAlpha(SEMANTIC.retry, 0.6 + 0.4 * beat) : SURFACE.textDim;
+    ctx.fillText(held ? `⏳ ${r.holdReason?.toUpperCase()} ${fmtDur(r.holdRemainingMs)}` : fmtDur(r.decisionIntervalMs), cx, y + 58);
+    ctx.font = '500 8.5px "IBM Plex Mono", monospace';
+    ctx.fillStyle = SURFACE.textFaint;
+    ctx.fillText(held ? 'until the next scale decision' : 'between scale decisions', cx, y + 68);
+    ctx.textAlign = 'left';
+    if (r.overshootInstances > 0) {
+      ctx.textAlign = 'center';
+      ctx.font = '600 9px "IBM Plex Mono", monospace';
+      ctx.fillStyle = SEMANTIC.shed;
+      ctx.fillText(`+${r.overshootInstances} beyond peak need`, cx, y + h - 6);
+      ctx.textAlign = 'left';
+    }
   }
 
   // -- Per-stage lag breakdown ------------------------------------------------
@@ -161,11 +188,15 @@ export class ScalingRenderer {
     ctx.textAlign = 'left';
     ctx.font = '600 10px "IBM Plex Mono", monospace';
     ctx.fillStyle = SURFACE.textDim;
-    ctx.fillText('WHERE THE LAG GOES', r.x + 8, r.y + 14);
+    ctx.fillText('WHERE THE SCALE CYCLE GOES', r.x + 8, r.y + 14);
 
-    const stages: { label: string; ms: number }[] = [
+    // Detection + the per-instance pipeline is the lag to the *first* new
+    // capacity; the bake is what has to pass before a second scale-out can build
+    // on it. Together they are one full scale cycle.
+    const stages: { label: string; ms: number; bake?: boolean }[] = [
       { label: 'detect', ms: sim.cfg.stages.detectionMs },
       ...PIPELINE_STAGES.map((s) => ({ label: s.label, ms: sim.cfg.stages[s.key] })),
+      { label: 'bake', ms: sim.cfg.launch.bakeMs, bake: true },
     ];
     const total = stages.reduce((a, s) => a + s.ms, 0) || 1;
     const maxMs = Math.max(...stages.map((s) => s.ms));
@@ -177,18 +208,19 @@ export class ScalingRenderer {
     for (let i = 0; i < stages.length; i++) {
       const seg = (stages[i].ms / total) * barW;
       const dominant = stages[i].ms === maxMs;
-      ctx.fillStyle = withAlpha(dominant ? SEMANTIC.timeout : SEMANTIC.inFlight, i % 2 === 0 ? 0.85 : 0.6);
+      const base = stages[i].bake ? SEMANTIC.retry : dominant ? SEMANTIC.timeout : SEMANTIC.inFlight;
+      ctx.fillStyle = withAlpha(base, stages[i].bake ? 0.8 : i % 2 === 0 ? 0.85 : 0.6);
       ctx.fillRect(cx, barY, Math.max(0, seg - 1), barH);
       cx += seg;
     }
     // Label the dominant stage + total.
     const dom = stages.reduce((a, s) => (s.ms > a.ms ? s : a), stages[0]);
     ctx.font = '500 9px "IBM Plex Mono", monospace';
-    ctx.fillStyle = SEMANTIC.timeout;
+    ctx.fillStyle = dom.bake ? SEMANTIC.retry : SEMANTIC.timeout;
     ctx.fillText(`slowest: ${dom.label} ${fmtDur(dom.ms)}`, barX, r.y + r.h - 5);
     ctx.textAlign = 'right';
     ctx.fillStyle = SURFACE.textDim;
-    ctx.fillText(`total ${fmtDur(total)}`, r.x + r.w - 8, r.y + r.h - 5);
+    ctx.fillText(`cycle ${fmtDur(total)}`, r.x + r.w - 8, r.y + r.h - 5);
     ctx.textAlign = 'left';
   }
 
@@ -276,7 +308,13 @@ export class ScalingRenderer {
     seg(d.usableCapacityTps, SEMANTIC.success, 0.85);
     seg(readyOnlyCap, SEMANTIC.inFlight, 0.7);
     seg(provisioningCap, SEMANTIC.tlsPulse, 0.4);
-    // Offered marker.
+    // Live traffic river over the serving (green) capacity: motion so a steady
+    // state still reads as carrying load. Flow speed rises with utilization.
+    const usableX = barX + (d.usableCapacityTps / scale) * barW;
+    const servedTps = Math.min(d.offeredTps, d.usableCapacityTps);
+    const servedX = barX + (servedTps / scale) * barW;
+    this.flowStripes(barX, barY, servedX - barX, barH, SURFACE.canvas, 0.4, d.utilization, sim.now);
+    // Offered marker + a pulsing head so the current load reads as live.
     const ox = barX + (d.offeredTps / scale) * barW;
     ctx.strokeStyle = SEMANTIC.timeout;
     ctx.lineWidth = 2;
@@ -284,19 +322,43 @@ export class ScalingRenderer {
     ctx.moveTo(ox, barY - 4);
     ctx.lineTo(ox, barY + barH + 4);
     ctx.stroke();
-    // Deficit: offered beyond usable → the dropped demand.
-    const usableX = barX + (d.usableCapacityTps / scale) * barW;
+    const beat = 0.5 + 0.5 * Math.sin(sim.now / 200);
+    ctx.fillStyle = withAlpha(SEMANTIC.timeout, 0.55 + 0.45 * beat);
+    ctx.beginPath();
+    ctx.arc(ox, barY - 5, 2.4 + 1.4 * beat, 0, Math.PI * 2);
+    ctx.fill();
+    // Deficit: offered beyond usable → the dropped demand, as a red rush.
     if (ox > usableX + 1) {
-      ctx.fillStyle = withAlpha(SEMANTIC.timeout, 0.3 + 0.2 * (0.5 + 0.5 * Math.sin(sim.now / 240)));
+      ctx.fillStyle = withAlpha(SEMANTIC.timeout, 0.28 + 0.18 * beat);
       ctx.fillRect(usableX, barY, ox - usableX, barH);
+      this.flowStripes(usableX, barY, ox - usableX, barH, SURFACE.text, 0.3, 1, sim.now);
+    }
+    // Where the autoscaler thinks capacity ends: everything to the right of this
+    // is serving traffic but still baking, so it does not count toward the fleet
+    // the next scale decision is computed from.
+    if (d.baking > 0) {
+      const mx = barX + (d.meteredCapacityTps / scale) * barW;
+      ctx.strokeStyle = withAlpha(SEMANTIC.retry, 0.9);
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(mx, barY - 2);
+      ctx.lineTo(mx, barY + barH + 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
     ctx.font = '500 9px "IBM Plex Mono", monospace';
     ctx.fillStyle = SEMANTIC.timeout;
     ctx.textAlign = 'left';
     ctx.fillText(`▲ offered ${fmtTps(d.offeredTps)}`, barX, r.y + r.h - 6);
     ctx.textAlign = 'right';
-    ctx.fillStyle = SURFACE.textDim;
-    ctx.fillText(`usable ${fmtTps(d.usableCapacityTps)} · util ${Math.round(d.utilization * 100)}%`, r.x + r.w - 8, r.y + r.h - 6);
+    ctx.fillStyle = d.baking > 0 ? SEMANTIC.retry : SURFACE.textDim;
+    const counted = d.baking > 0 ? `counted ${fmtTps(d.meteredCapacityTps)} · ` : '';
+    ctx.fillText(
+      `${counted}usable ${fmtTps(d.usableCapacityTps)} · util ${Math.round(d.utilization * 100)}%`,
+      r.x + r.w - 8,
+      r.y + r.h - 6,
+    );
     ctx.textAlign = 'left';
   }
 
@@ -304,13 +366,33 @@ export class ScalingRenderer {
 
   private drawFleet(sim: ScalingSimulation, r: Rect): void {
     const ctx = this.ctx;
-    this.panel(r.x, r.y, r.w, r.h, SURFACE.border);
+    const insts = sim.instanceViews();
+    const atMax = insts.length >= sim.cfg.launch.maxInstances;
+    const beat = 0.5 + 0.5 * Math.sin(sim.now / 200);
+    // At the ceiling → red pulsing border: no more scale-out is possible.
+    this.panel(r.x, r.y, r.w, r.h, atMax ? withAlpha(SEMANTIC.timeout, 0.45 + 0.45 * beat) : SURFACE.border);
     ctx.textAlign = 'left';
     ctx.font = '600 10px "IBM Plex Mono", monospace';
     ctx.fillStyle = SURFACE.textDim;
     ctx.fillText('FLEET', r.x + 8, r.y + 14);
 
-    const insts = sim.instanceViews();
+    // Fleet-size / max-capacity badge, top-right of the panel header.
+    ctx.textAlign = 'right';
+    if (atMax) {
+      ctx.font = '700 9px "IBM Plex Mono", monospace';
+      ctx.fillStyle = withAlpha(SEMANTIC.timeout, 0.7 + 0.3 * beat);
+      ctx.fillText(`⛔ MAX FLEET ${insts.length}/${sim.cfg.launch.maxInstances}`, r.x + r.w - 8, r.y + 14);
+    } else {
+      ctx.font = '500 9px "IBM Plex Mono", monospace';
+      ctx.fillStyle = SURFACE.textFaint;
+      ctx.fillText(`${insts.length}/${sim.cfg.launch.maxInstances}`, r.x + r.w - 8, r.y + 14);
+    }
+    ctx.textAlign = 'left';
+
+    const d = sim.demandView();
+    const target = clamp01(d.targetUtilization);
+    const util = d.utilization;
+    const nStages = PIPELINE_STAGES.length;
     const n = Math.max(1, insts.length);
     const gridTop = r.y + 22;
     const gridW = Math.max(1, r.w - 16);
@@ -324,19 +406,58 @@ export class ScalingRenderer {
       const inst = insts[i];
       const col = i % cols;
       const row = Math.floor(i / cols);
-      const x = r.x + 8 + col * cw;
-      const y = gridTop + row * ch;
-      let color: string;
-      let a = 0.85;
-      if (inst.inUse) color = inst.prewarmed ? SEMANTIC.success : loadColor(sim.demandView().utilization);
-      else if (inst.ready) color = SEMANTIC.inFlight;
-      else {
-        // Provisioning: pulse to read as "working".
-        color = SEMANTIC.tlsPulse;
-        a = 0.35 + 0.4 * (0.5 + 0.5 * Math.sin(sim.now / 260 + i));
+      const tx = r.x + 8 + col * cw + pad;
+      const ty = gridTop + row * ch + pad;
+      const tw = Math.max(2, cw - 2 * pad);
+      const th = Math.max(2, ch - 2 * pad);
+      const detailed = th >= 9 && tw >= 5;
+
+      if (inst.inUse) {
+        if (detailed) {
+          // In-use tile is a utilization gauge relative to the scaling threshold:
+          // fill = current util, dashed line = target util (where scale-out trips).
+          ctx.fillStyle = withAlpha(SURFACE.panelRaised, 0.9);
+          ctx.fillRect(tx, ty, tw, th);
+          const fh = th * clamp01(util);
+          ctx.fillStyle = withAlpha(loadColor(util), 0.9);
+          ctx.fillRect(tx, ty + th - fh, tw, fh);
+          const thY = ty + th * (1 - target);
+          ctx.strokeStyle = withAlpha(SURFACE.text, 0.7);
+          ctx.setLineDash([2, 2]);
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(tx, thY);
+          ctx.lineTo(tx + tw, thY);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          if (util >= 1) {
+            // Over capacity → dropping: red top edge.
+            ctx.fillStyle = withAlpha(SEMANTIC.timeout, 0.6 + 0.4 * beat);
+            ctx.fillRect(tx, ty, tw, 1.5);
+          }
+          if (inst.baking) {
+            // Serving, but the autoscaler is not counting it yet: outlined.
+            ctx.strokeStyle = withAlpha(SEMANTIC.retry, 0.75 + 0.25 * beat);
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(tx + 0.75, ty + 0.75, tw - 1.5, th - 1.5);
+          }
+        } else {
+          ctx.fillStyle = withAlpha(inst.baking ? SEMANTIC.retry : inst.prewarmed ? SEMANTIC.success : loadColor(util), 0.85);
+          ctx.fillRect(tx, ty, tw, th);
+        }
+      } else if (inst.ready) {
+        // Provisioned & advertised, but clients not yet using it.
+        ctx.fillStyle = withAlpha(SEMANTIC.inFlight, 0.8);
+        ctx.fillRect(tx, ty, tw, th);
+      } else {
+        // Provisioning: fill rises with pipeline progress; pulse reads as "working".
+        const prog = clamp01((inst.stageIndex + inst.stageProgress) / nStages);
+        const a = 0.3 + 0.35 * (0.5 + 0.5 * Math.sin(sim.now / 260 + i));
+        ctx.fillStyle = withAlpha(SURFACE.panelRaised, 0.9);
+        ctx.fillRect(tx, ty, tw, th);
+        ctx.fillStyle = withAlpha(SEMANTIC.tlsPulse, a);
+        ctx.fillRect(tx, ty + th * (1 - prog), tw, th * prog);
       }
-      ctx.fillStyle = withAlpha(inst.inUse ? SEMANTIC.success : color, inst.inUse ? 0.85 : a);
-      ctx.fillRect(x + pad, y + pad, Math.max(2, cw - 2 * pad), Math.max(2, ch - 2 * pad));
     }
   }
 
@@ -363,11 +484,14 @@ export class ScalingRenderer {
     const barH = h - 30;
     ctx.fillStyle = SURFACE.panelRaised;
     ctx.fillRect(barX, barY, barW, barH);
-    ctx.fillStyle = withAlpha(SEMANTIC.success, 0.85);
-    ctx.fillRect(barX, barY, barW * clamp01(served / offered), barH);
-    ctx.fillStyle = withAlpha(SEMANTIC.timeout, 0.85);
     const servedW = barW * clamp01(served / offered);
+    ctx.fillStyle = withAlpha(SEMANTIC.success, 0.85);
+    ctx.fillRect(barX, barY, servedW, barH);
+    ctx.fillStyle = withAlpha(SEMANTIC.timeout, 0.85);
     ctx.fillRect(barX + servedW, barY, barW - servedW, barH);
+    // Live flow so a steady, fully-served run still reads as carrying traffic.
+    this.flowStripes(barX, barY, servedW, barH, SURFACE.canvas, 0.32, d.utilization, sim.now);
+    if (barW - servedW > 1) this.flowStripes(barX + servedW, barY, barW - servedW, barH, SURFACE.text, 0.26, 1, sim.now);
     const sloX = barX + barW * sim.cfg.slaTarget;
     ctx.strokeStyle = withAlpha(SURFACE.text, 0.5);
     ctx.setLineDash([3, 3]);
@@ -386,6 +510,41 @@ export class ScalingRenderer {
     ctx.beginPath();
     ctx.roundRect(3, 3, this.cssW - 6, this.cssH - 6, 10);
     ctx.stroke();
+  }
+
+  /**
+   * Diagonal stripes drifting across a rect (clipped to it) — a live "traffic
+   * river" so a steady state still reads as flowing rather than frozen. Flow
+   * speed scales with `intensity` (0..1+, the utilization of the region).
+   */
+  private flowStripes(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    color: string,
+    alpha: number,
+    intensity: number,
+    now: number,
+  ): void {
+    if (w < 2 || h < 2) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
+    ctx.clip();
+    const period = 14;
+    const speed = 0.0022 * (0.4 + 1.2 * clamp01(intensity)); // px per sim-ms
+    const phase = (now * speed) % period;
+    ctx.strokeStyle = withAlpha(color, alpha);
+    ctx.lineWidth = 3;
+    for (let sx = x - h - period + phase; sx < x + w + period; sx += period) {
+      ctx.beginPath();
+      ctx.moveTo(sx, y + h);
+      ctx.lineTo(sx + h, y);
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   private panel(x: number, y: number, w: number, h: number, border: string): void {

@@ -47,10 +47,24 @@ export interface ScalingStageConfig {
 }
 
 export interface ScalingLaunchConfig {
-  /** Instances launched per scale-out step. */
-  launchBatchSize: number;
-  /** Minimum time between scale-out steps (ms). */
+  /** Fewest instances a scale-out step launches (ECS minimumScalingStepSize). */
+  minStepSize: number;
+  /** Most instances one scale-out step launches (ECS maximumScalingStepSize). */
+  maxStepSize: number;
+  /**
+   * Simple-scaling cooldown: after a scale-out, block every decision for this
+   * long. AWS accepts `Cooldown` only on a simple-scaling policy (default 300s);
+   * target-tracking and step policies throttle themselves with the bake instead.
+   */
   cooldownMs: number;
+  /**
+   * Bake / instance warmup (ECS instanceWarmupPeriod, ASG DefaultInstanceWarmup
+   * — 300s is the documented default and starting point). An instance that has
+   * entered service but is still baking carries traffic, yet the autoscaler does
+   * not count it toward the capacity it scales from — so the new capacity gets
+   * to settle into the metric before it drives another decision.
+   */
+  bakeMs: number;
   /** Ceiling on fleet size. */
   maxInstances: number;
 }
@@ -59,14 +73,57 @@ export interface ScalingTrafficConfig {
   shape: ScalingTrafficShape;
   /** Steady demand and the ramp floor (TPS). */
   baseRateTps: number;
-  /** Ramp target / step level (TPS). */
-  peakRateTps: number;
   /** Hold base this long before the ramp begins (a visible calm baseline). */
   rampStartMs: number;
-  /** Time to go base → peak (ms), and the duration of a triggered ramp. */
-  rampDurationMs: number;
-  /** Demand added by a triggered ramp event (TPS) — the ▲ RAMP button. */
+  /**
+   * How much demand the ramp adds on top of base (TPS). The scheduled shape
+   * climbs base → base + this; the ▲ RAMP button adds this much from wherever
+   * demand currently sits.
+   */
   rampAmountTps: number;
+  /** How long that amount takes to arrive (ms) — the ramp rate. */
+  rampDurationMs: number;
+}
+
+// ---------------------------------------------------------------------------
+// Scaling policy — how aggressively capacity is added
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirrors the AWS policy types. `target-tracking` computes a desired count from
+ * the metric and closes the gap; `step` picks an adjustment from a ladder keyed
+ * on how far past target the metric is; `simple` applies one fixed adjustment
+ * per alarm and blocks until the cooldown expires.
+ */
+export type ScalingPolicyType = 'target-tracking' | 'step' | 'simple';
+
+/** How a step/simple adjustment is read (AWS AdjustmentType). */
+export type ScalingAdjustmentType = 'change-in-capacity' | 'percent-change-in-capacity';
+
+/** One rung of a step-scaling ladder. */
+export interface ScalingStepAdjustment {
+  /**
+   * Applies when the breach — (utilization ÷ target) − 1 — reaches this
+   * fraction. The AWS MetricIntervalLowerBound, expressed relative to target.
+   */
+  lowerBound: number;
+  /** Instances to add, or % of current capacity, per the adjustment type. */
+  adjustment: number;
+}
+
+export interface ScalingPolicyConfig {
+  type: ScalingPolicyType;
+  /**
+   * target-tracking only: multiplier on the computed gap. 1.0 is the AWS
+   * formula (close the gap exactly); above 1 over-provisions on purpose, below
+   * 1 walks up in fractions of the gap.
+   */
+  scaleOutGain: number;
+  adjustmentType: ScalingAdjustmentType;
+  /** step only: rungs in ascending lowerBound order. */
+  steps: ScalingStepAdjustment[];
+  /** simple only: the single adjustment applied per alarm. */
+  simpleAdjustment: number;
 }
 
 export interface ScalingSimulationConfig {
@@ -75,6 +132,7 @@ export interface ScalingSimulationConfig {
   slaTarget: number;
   capacity: ScalingCapacityConfig;
   stages: ScalingStageConfig;
+  policy: ScalingPolicyConfig;
   launch: ScalingLaunchConfig;
   traffic: ScalingTrafficConfig;
 }
@@ -122,6 +180,8 @@ export interface ScalingInstanceView {
   stageProgress: number;
   ready: boolean;
   inUse: boolean;
+  /** In service but still inside the bake window — serving, yet uncounted by the autoscaler. */
+  baking: boolean;
   /** Pre-warmed at t0 (not the result of a scale-out). */
   prewarmed: boolean;
 }
@@ -137,11 +197,15 @@ export interface ScalingDemandView {
   offeredTps: number;
   readyCapacityTps: number;
   usableCapacityTps: number;
+  /** Serving capacity past its bake — what the autoscaler counts when it scales. */
+  meteredCapacityTps: number;
   utilization: number;
   targetUtilization: number;
   provisioning: number;
   ready: number;
   inUse: number;
+  /** In service and carrying traffic, but still inside the bake window. */
+  baking: number;
 }
 
 export interface ScalingReadout {
@@ -156,10 +220,21 @@ export interface ScalingReadout {
   minAvailability: number;
   /** Demand added in the event (TPS). */
   addedTps: number;
-  /** Throughput-bound sustainable ramp: batch × cap ÷ cooldown (TPS/min). */
+  /** Throughput-bound sustainable ramp: max step × cap ÷ decision interval (TPS/min). */
   maxSustainableRampPerMin: number;
   /** Latency floor: detection + Σ per-instance stages (ms) — when the first new capacity lands. */
   pipelineLatencyMs: number;
+  /**
+   * Gate between scale-out decisions: max(cooldown, per-instance pipeline +
+   * bake). With a bake configured this, not the cooldown, sets the cadence.
+   */
+  decisionIntervalMs: number;
+  /** ms until the autoscaler may act again; 0 when it is free to decide. */
+  holdRemainingMs: number;
+  /** What is holding it — the bake timer, the cooldown, or nothing. */
+  holdReason: 'bake' | 'cooldown' | null;
+  /** Instances beyond what the peak demand needed at target utilization. */
+  overshootInstances: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,10 +251,12 @@ export interface ScalingMetricsBucket {
   offeredRate: number;
   readyCapacityTps: number;
   usableCapacityTps: number;
+  meteredCapacityTps: number;
   utilization: number;
   provisioning: number;
   ready: number;
   inUse: number;
+  baking: number;
   inFlight: number;
 }
 
