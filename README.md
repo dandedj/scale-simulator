@@ -749,9 +749,14 @@ misrepresent both.
 
 ### Scenarios
 
-Four scenarios share the +1M-in-1-min ramp and vary the pipeline; four share a
-+1M-over-30-min ramp and vary the policy and bake:
+The tab opens on **Steady baseline** — a calm fleet serving 50K TPS on two
+instances, with nothing scheduled. It holds there until you add demand yourself
+with ▲ RAMP or ◉ SURGE, which is the way to watch a single scale-out end to end
+on the timeline. The rest run their ramp for you: four share the +1M-in-1-min
+ramp and vary the pipeline, four share a +1M-over-30-min ramp and vary the
+policy and bake.
 
+- **Steady baseline** — 50K, holding; you drive it.
 - **Baseline ramp** — ~5-min pipeline vs a 1-min ramp. The policy orders the
   whole gap within two decisions, so pure pipeline latency is what is left.
 - **Optimized pipeline** — warm pool / baked AMI collapses the per-stage lag;

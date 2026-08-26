@@ -72,6 +72,16 @@ function scenario(tune: (c: ScalingSimulationConfig) => void): ScalingSimulation
 
 export const SCALING_PRESETS: ScalingPreset[] = [
   {
+    id: 'steady',
+    name: 'Steady baseline',
+    description:
+      'Where the tab opens: a calm fleet serving 50K TPS on two instances, sitting under the target buffer with nothing scheduled. Press START and it just holds. Add demand when you want it — ▲ RAMP for the configured amount and rate, ◉ SURGE for a step — and watch the whole scale-out play out on the timeline. The scenarios below run their ramp for you instead.',
+    config: scenario((c) => {
+      c.traffic.shape = 'steady';
+      c.traffic.baseRateTps = 50_000;
+    }),
+  },
+  {
     id: 'baseline',
     name: 'Baseline ramp',
     description:

@@ -414,6 +414,32 @@ describe('playback determinism', () => {
   });
 });
 
+describe('the landing scenario', () => {
+  /** What the tab opens on: calm, small, and waiting for the user to act. */
+  it('holds a small steady fleet and never scales on its own', () => {
+    const sim = new ScalingSimulation(cloneScalingConfig(SCALING_PRESETS[0].config));
+    expect(SCALING_PRESETS[0].id).toBe('steady');
+    expect(sim.cfg.traffic.shape).toBe('steady');
+    expect(sim.cfg.traffic.baseRateTps).toBe(50_000);
+    expect(sim.instances.length).toBe(2);
+    run(sim, 1_800_000);
+    expect(sim.metrics.totals.launches).toBe(0);
+    expect(sim.metrics.totals.lost).toBe(0);
+    expect(sim.metrics.lifetimeAvailability()).toBeCloseTo(1, 6);
+  });
+
+  it('scales only once the user adds demand', () => {
+    const sim = new ScalingSimulation(cloneScalingConfig(SCALING_PRESETS[0].config));
+    run(sim, 120_000);
+    expect(sim.metrics.totals.launches).toBe(0);
+    sim.triggerRamp(1_000_000, 60_000);
+    run(sim, 900_000);
+    expect(sim.metrics.totals.launches).toBeGreaterThan(0);
+    // And it converges on what 1.05M at a 60% buffer actually needs.
+    expect(sim.instances.length).toBe(Math.ceil(1_050_000 / (0.6 * 50_000)));
+  });
+});
+
 describe('presets', () => {
   it('every preset runs without producing NaN or negative flows', () => {
     for (const p of SCALING_PRESETS) {

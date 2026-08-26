@@ -17,7 +17,8 @@ import { ScalingControlPanel, PANE_TAGS } from './ui/controls';
 const DEFAULT_TIME_SCALE = 60;
 const MAX_SIM_MS_PER_FRAME = 60_000;
 
-const SINGLE_HINT = 'Pick a scenario and tune the policy, bake and pipeline first — the demand ramp runs when you start.';
+const SINGLE_HINT =
+  'Starts calm at 50K TPS and holds there — press START, then ▲ RAMP when you want to add demand. Pick a scenario to run a scheduled ramp instead.';
 const COMPARE_HINT = 'Tune each sim — A above, B below — then start. Both run on the same clock and demand ramp.';
 
 const COMPARE_HELP_HTML = `
