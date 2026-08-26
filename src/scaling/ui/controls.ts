@@ -596,7 +596,7 @@ export class ScalingControlPanel {
     const fromScale = (s: number) => (Math.log10(s) - Math.log10(1)) / (Math.log10(600) - Math.log10(1));
     const syncSpeed = () => {
       const s = this.hooks.getTimeScale();
-      speedLabel.textContent = s >= 1 ? `${Math.round(s)}× speed` : `${(1 / s).toFixed(0)}× slower`;
+      speedLabel.textContent = s >= 1 ? `${Math.round(s)}×` : `${(1 / s).toFixed(0)}× slow`;
     };
     speed.value = String(fromScale(Math.min(600, Math.max(1, this.hooks.getTimeScale()))));
     speed.addEventListener('input', () => {

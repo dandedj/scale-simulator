@@ -488,7 +488,7 @@ export class DnsControlPanel {
     const fromScale = (s: number) => (Math.log10(s) - Math.log10(1)) / (Math.log10(600) - Math.log10(1));
     const syncSpeedLabel = () => {
       const s = this.hooks.getTimeScale();
-      speedLabel.textContent = s >= 1 ? `${Math.round(s)}× speed` : `${(1 / s).toFixed(0)}× slower`;
+      speedLabel.textContent = s >= 1 ? `${Math.round(s)}×` : `${(1 / s).toFixed(0)}× slow`;
     };
     speed.value = String(fromScale(this.clampScale(this.hooks.getTimeScale())));
     speed.addEventListener('input', () => {

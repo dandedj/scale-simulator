@@ -585,7 +585,7 @@ export class ControlPanel {
     const fromScale = (s: number) => (Math.log10(s) - Math.log10(0.01)) / (Math.log10(2) - Math.log10(0.01));
     const syncSpeedLabel = () => {
       const s = this.hooks.getTimeScale();
-      speedLabel.textContent = s >= 0.99 ? `${s.toFixed(1)}× speed` : `${(1 / s).toFixed(0)}× slower`;
+      speedLabel.textContent = s >= 0.99 ? `${s.toFixed(1)}×` : `${(1 / s).toFixed(0)}× slow`;
     };
     speed.value = String(fromScale(this.hooks.getTimeScale()));
     speed.addEventListener('input', () => {

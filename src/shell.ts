@@ -107,7 +107,10 @@ export class Shell {
         this.setPaused(!this.paused);
       }
     });
-    window.addEventListener('resize', () => this.active.resize());
+    window.addEventListener('resize', () => {
+      this.active.resize();
+      this.syncControlOverflow();
+    });
     document.addEventListener('visibilitychange', () => {
       // Browsers throttle rAF in background tabs; auto-pause instead of letting
       // the sim lurch when the tab returns.
@@ -227,6 +230,7 @@ export class Shell {
     this.gateArmed = true;
     this.setPaused(true);
     this.syncModeTabs();
+    this.syncControlOverflow();
     if (this.brandSub) this.brandSub.textContent = def.subtitle;
   }
 
@@ -275,6 +279,15 @@ export class Shell {
     }
     requestAnimationFrame(this.frame);
   };
+
+  /** Flag the control strip when it holds more buttons than it can show. */
+  private syncControlOverflow(): void {
+    const host = this.hosts.header;
+    const strip = host.firstElementChild;
+    if (!strip) return;
+    // Measured after layout settles, or a freshly mounted strip reads as empty.
+    requestAnimationFrame(() => host.classList.toggle('scrolls', strip.scrollWidth > strip.clientWidth + 1));
+  }
 
   /** Keep the address bar showing the live configuration, cheaply. */
   private syncUrl(): void {

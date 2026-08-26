@@ -55,13 +55,18 @@ body {
 #header {
   display: flex;
   align-items: center;
-  gap: 20px;
-  padding: 10px 16px;
+  gap: 14px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   background:
     radial-gradient(1200px 60px at 50% 0%, rgba(86, 180, 233, 0.05), transparent),
     var(--panel);
   flex-shrink: 0;
+}
+
+.brand {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .brand h1 {
@@ -73,8 +78,10 @@ body {
   color: var(--text);
 }
 
+/* The ☰ nav names the current simulator and its menu carries the subtitles, so
+   repeating one here only costs header width. */
 .brand-sub {
-  display: block;
+  display: none;
   font-size: 9.5px;
   letter-spacing: 2.5px;
   text-transform: uppercase;
@@ -83,13 +90,42 @@ body {
 }
 
 #header-controls {
+  position: relative;
+  min-width: 0;
   flex: 1;
+}
+
+/* Only drawn when the strip actually has more than it can show, so the buttons
+   past the edge are discoverable rather than simply absent. */
+#header-controls.scrolls::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 26px;
+  pointer-events: none;
+  background: linear-gradient(to right, transparent, var(--panel));
 }
 
 .time-controls {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  /* Room for the scrollbar so it never overlaps the buttons it scrolls. */
+  padding-bottom: 2px;
+}
+
+/* Header buttons are tighter than panel ones: the strip has to hold ten of
+   them beside the brand, the nav and the HUD without any of it wrapping. */
+#header-controls .btn,
+#mode-switch .btn {
+  font-size: 12px;
+  letter-spacing: 0.8px;
+  padding: 5px 9px;
 }
 
 .btn {
@@ -97,6 +133,10 @@ body {
   font-weight: 700;
   font-size: 14px;
   letter-spacing: 1.2px;
+  /* A squeezed header used to wrap every button label onto two or three lines
+     and take the whole bar with it. Nothing in here wraps; the control strip
+     scrolls instead. */
+  white-space: nowrap;
   color: var(--text);
   background: var(--panel-raised);
   border: 1px solid var(--border);
@@ -229,7 +269,8 @@ body {
 .hud {
   display: flex;
   align-items: center;
-  gap: 18px;
+  gap: 11px;
+  flex-shrink: 0;
 }
 
 /* The experience fills #hud-extra with mode-specific chips; display:contents
@@ -238,21 +279,22 @@ body {
   display: contents;
 }
 
+/* One row per chip: value and label side by side. Stacking them made every
+   chip two lines tall and the header with it. */
 .hud-item {
-  text-align: right;
-  /* Each chip is one row: a wrapped label ("SUCCESS RATE", "SIM TIME") pushed
-     the whole header taller for no gain. */
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
   white-space: nowrap;
 }
 
 .hud-item span {
-  font-size: 19px;
+  font-size: 17px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
 .hud-item label {
-  display: block;
   font-size: 9px;
   letter-spacing: 1.6px;
   text-transform: uppercase;
@@ -271,6 +313,7 @@ body {
 }
 
 #storm-badge {
+  white-space: nowrap;
   font-family: var(--font-display);
   font-weight: 700;
   font-size: 15px;
@@ -1893,6 +1936,7 @@ input[type='range']::-moz-range-thumb {
 
 /* Below-SLO HUD badge (the DNS analog of the storm badge). */
 #dns-degraded {
+  white-space: nowrap;
   font-family: var(--font-display);
   font-weight: 700;
   font-size: 15px;
