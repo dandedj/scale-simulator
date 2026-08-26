@@ -461,17 +461,37 @@ already requested:
 newDesired = max(currentDesired, meteredCapacity + adjustment)
 ```
 
-That one rule is the whole behavior. Repeated breaches of the same size collapse
-into a single scaling activity, and a deeper breach only tops up the difference —
-it reproduces the worked example in the EC2 Auto Scaling step-scaling docs, and
-it is what stops an autoscaler from ordering the same capacity twice.
+Repeated breaches of the same size therefore collapse into a single scaling
+activity, and a deeper breach only tops up the difference — it reproduces the
+worked example in the EC2 Auto Scaling step-scaling docs, and it is what stops an
+autoscaler from ordering the same capacity twice.
 
-The cost shows up on a **sustained** ramp, not an instant jump. Against a step
-change the policy sizes the entire gap before anything lands, so the bake never
-binds and pipeline latency is the whole story. Against demand that keeps climbing
-the policy scales from a fleet smaller than the one it already has, and
-under-orders every step: on the +1M-over-30-min ramp, a 600s bake loses roughly
-3× what a 300s bake does, for identical demand and an identical peak fleet.
+**Whose warmup: ECS or ASG.** The clock is per instance under both, but they
+differ in what the bake gates and when it starts. The **Warmup rules** toggle
+picks between them:
+
+| | ECS cluster auto scaling | EC2 Auto Scaling (target / step) |
+|---|---|---|
+| Gates | Blocks the next scale-out until **every** instance is warm | Blocks nothing — warming instances are left out of the metric and out of the capacity scaled from |
+| Clock starts | Instance **launch** | Instance reaches **InService** |
+| Cycle | Bake runs *alongside* the pipeline | Bake runs *after* the pipeline |
+
+ECS is the default here, because this is an ECS-on-EC2 pipeline and because "the
+scale-out is blocked for instances that are within the `instanceWarmupPeriod`"
+is what an operator usually means by "our bake is 300s before another scale
+decision is made". Instances launch together, so that per-instance check behaves
+as a fleet-wide gate. The same 300s buys fewer, larger steps under ECS and
+continuous but under-sized ones under ASG. One consequence catches people out:
+because the ECS clock runs from the launch, **a bake shorter than the pipeline
+expires before the capacity it covers has even landed**, and adds nothing to the
+cycle at all.
+
+Either way the cost lands on a **sustained** ramp, not an instant jump. Against a
+step change the policy sizes the entire gap before anything lands, so the bake
+never binds and pipeline latency is the whole story — 0s and 600s bakes lose
+exactly the same. Against demand that keeps climbing, on the +1M-over-30-min ramp
+a 600s bake loses roughly 3× what a 300s bake does, for identical demand and an
+identical peak fleet.
 
 Two limits govern the outcome, and the tab separates them:
 
@@ -480,8 +500,8 @@ Two limits govern the outcome, and the tab separates them:
   pipeline is 5 minutes: capacity arrives after the surge, however many you
   launch.
 - **Throughput** (`max step × capacity ÷ decision interval`, where the decision
-  interval is `pipeline + bake`) — the *sustained* TPS/min you can add, and so
-  the fastest ramp you can track.
+  interval is the bake under ECS rules and `pipeline + bake` under ASG rules) —
+  the *sustained* TPS/min you can add, and so the fastest ramp you can track.
 
 The readout reports both: the event's **recover time** and **effective
 add-rate**, the computed **max sustainable ramp**, the **pipeline latency**
@@ -571,7 +591,10 @@ and playback-speed determinism.
   but not toward the capacity a policy scales from; `Cooldown` applies only to
   simple scaling (default 300s); ECS managed scaling defaults are
   `targetCapacity` 100%, `minimumScalingStepSize` 1, `maximumScalingStepSize`
-  10000, `instanceWarmupPeriod` 300s. A policy acts at most once per 60s metric
-  period. AWS suggests a 60–80% utilization target for workloads that burst.
+  10000, `instanceWarmupPeriod` 300s. Warmup is a per-instance clock under both
+  rule sets; ECS additionally blocks the next scale-out until every instance is
+  warm. A policy acts at most once per 60s metric period. AWS suggests a 60–80%
+  utilization target for workloads that burst.
 - Scale-in, instance termination, and predictive scaling are out of scope —
-  overshoot is reported but never reclaimed.
+  overshoot is reported but never reclaimed. ECS's fixed 15-minute
+  post-scale-out scale-in hold is out of scope for the same reason.

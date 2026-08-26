@@ -58,8 +58,10 @@ class Instance {
   stageEnteredAt: number;
   stageEndsAt: number;
   prewarmed: boolean;
-  /** When it entered service — the bake clock's zero. Pre-warmed fleet counts from the start. */
+  /** When it entered service — the ASG bake clock's zero. */
   inServiceAt: number;
+  /** When it was launched — the ECS bake clock's zero. */
+  launchedAt: number;
   event: ScheduledEvent | null = null;
 
   constructor(stageIndex: number, now: number, prewarmed: boolean) {
@@ -67,7 +69,9 @@ class Instance {
     this.stageEnteredAt = now;
     this.stageEndsAt = now;
     this.prewarmed = prewarmed;
+    // The pre-warmed fleet is past every warmup at t0 — it did not just launch.
     this.inServiceAt = prewarmed ? -Infinity : Infinity;
+    this.launchedAt = prewarmed ? -Infinity : now;
   }
 
   get ready(): boolean {
@@ -230,6 +234,10 @@ export class ScalingSimulation {
     // Simple scaling is the one policy AWS gates with a cooldown: it blocks
     // every decision until the cooldown expires, however far behind it falls.
     if (c.policy.type === 'simple' && this.now - this.lastLaunchAt < c.launch.cooldownMs) return;
+    // ECS cluster auto scaling blocks the whole next step while anything is
+    // still warming. EC2 Auto Scaling does not — there the bake only keeps the
+    // warming instances out of the metric, which `meteredInstances` handles.
+    if (c.launch.warmupMode === 'ecs' && !this.allWarm()) return;
 
     this.lastDecisionAt = this.now;
     const tier = this.stepTier(util / target - 1);
@@ -277,11 +285,32 @@ export class ScalingSimulation {
     return Math.min(Math.max(n, c.launch.minStepSize), c.launch.maxStepSize, room);
   }
 
+  /**
+   * When this instance's warmup clock started. ECS measures from the launch, EC2
+   * Auto Scaling from the moment the instance reaches service — so the same
+   * 300s means different things under the two.
+   */
+  private warmupStart(inst: Instance): number {
+    return this.cfg.launch.warmupMode === 'ecs' ? inst.launchedAt : inst.inServiceAt;
+  }
+
+  private warm(inst: Instance): boolean {
+    return this.now - this.warmupStart(inst) >= this.cfg.launch.bakeMs;
+  }
+
+  /**
+   * ECS blocks the next scale-out until *every* instance is past its warmup.
+   * Instances launch together here, so in practice the newest batch governs.
+   */
+  private allWarm(): boolean {
+    for (const inst of this.instances) if (!this.warm(inst)) return false;
+    return true;
+  }
+
   /** In-service instances whose bake has expired — the capacity the policy counts. */
   private meteredInstances(): number {
-    const bake = this.cfg.launch.bakeMs;
     let n = 0;
-    for (const inst of this.instances) if (inst.inUse && this.now - inst.inServiceAt >= bake) n++;
+    for (const inst of this.instances) if (inst.inUse && this.warm(inst)) n++;
     return n;
   }
 
@@ -402,7 +431,10 @@ export class ScalingSimulation {
    */
   private decisionIntervalMs(): number {
     const c = this.cfg;
-    const settle = this.perInstancePipelineMs() + c.launch.bakeMs;
+    // ECS blocks from the launch, so the bake alone paces it. Under ASG nothing
+    // is blocked, but a batch only becomes countable once it has finished the
+    // pipeline *and* baked — which is what sets the cadence there.
+    const settle = c.launch.warmupMode === 'ecs' ? c.launch.bakeMs : this.perInstancePipelineMs() + c.launch.bakeMs;
     const cooldown = c.policy.type === 'simple' ? c.launch.cooldownMs : 0;
     return Math.max(settle, cooldown, METRIC_PERIOD_MS);
   }
@@ -432,6 +464,7 @@ export class ScalingSimulation {
       decisionIntervalMs: interval,
       holdRemainingMs: hold.remainingMs,
       holdReason: hold.reason,
+      holdBlocks: hold.blocks || this.cfg.policy.type === 'simple',
       overshootInstances: Math.max(0, this.metrics.totals.peakInstances - requiredAtPeak),
     };
   }
@@ -440,16 +473,17 @@ export class ScalingSimulation {
    * What the last scale-out is still waiting on — the bake window it has to
    * clear before it counts as capacity, or a simple-scaling cooldown.
    */
-  private holdView(): { remainingMs: number; reason: 'bake' | 'cooldown' | null } {
+  private holdView(): { remainingMs: number; reason: 'bake' | 'cooldown' | null; blocks: boolean } {
     const c = this.cfg;
-    if (this.lastLaunchAt === -Infinity) return { remainingMs: 0, reason: null };
+    const ecs = c.launch.warmupMode === 'ecs';
+    if (this.lastLaunchAt === -Infinity) return { remainingMs: 0, reason: null, blocks: ecs };
     // Every launched instance is deterministic, so the batch's bake end is known
-    // the moment it launches.
-    const bakeEnd = this.lastLaunchAt + this.perInstancePipelineMs() + c.launch.bakeMs;
+    // the moment it launches — from the launch under ECS, from landing under ASG.
+    const bakeEnd = this.lastLaunchAt + (ecs ? 0 : this.perInstancePipelineMs()) + c.launch.bakeMs;
     const cooldownEnd = c.policy.type === 'simple' ? this.lastLaunchAt + c.launch.cooldownMs : -Infinity;
     const end = Math.max(bakeEnd, cooldownEnd);
-    if (this.now >= end) return { remainingMs: 0, reason: null };
-    return { remainingMs: end - this.now, reason: cooldownEnd > bakeEnd ? 'cooldown' : 'bake' };
+    if (this.now >= end) return { remainingMs: 0, reason: null, blocks: ecs };
+    return { remainingMs: end - this.now, reason: cooldownEnd > bakeEnd ? 'cooldown' : 'bake', blocks: ecs };
   }
 
   // -- Timeline ----------------------------------------------------------------
@@ -530,7 +564,6 @@ export class ScalingSimulation {
   // -- Views + conditions ------------------------------------------------------
 
   private gauges(): ScalingGauges {
-    const bake = this.cfg.launch.bakeMs;
     let provisioning = 0;
     let ready = 0;
     let inUse = 0;
@@ -538,7 +571,7 @@ export class ScalingSimulation {
     for (const inst of this.instances) {
       if (inst.inUse) {
         inUse++;
-        if (this.now - inst.inServiceAt >= bake) metered++;
+        if (this.warm(inst)) metered++;
       } else if (inst.ready) ready++;
       else provisioning++;
     }
@@ -610,7 +643,6 @@ export class ScalingSimulation {
   }
 
   instanceViews(): ScalingInstanceView[] {
-    const bake = this.cfg.launch.bakeMs;
     return this.instances.map((inst) => {
       const total = inst.stageEndsAt - inst.stageEnteredAt;
       const prog = inst.inUse ? 1 : total > 0 ? Math.min(1, (this.now - inst.stageEnteredAt) / total) : 1;
@@ -620,7 +652,7 @@ export class ScalingSimulation {
         stageProgress: prog,
         ready: inst.ready,
         inUse: inst.inUse,
-        baking: inst.inUse && this.now - inst.inServiceAt < bake,
+        baking: inst.inUse && !this.warm(inst),
         prewarmed: inst.prewarmed,
       };
     });

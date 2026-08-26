@@ -48,6 +48,10 @@ export function baseConfig(): ScalingSimulationConfig {
       maxStepSize: 20,
       cooldownMs: 300_000,
       bakeMs: 300_000,
+      // The pipeline this models is ECS on EC2, so ECS cluster auto scaling's
+      // warmup rules are the default: the bake blocks the next step outright,
+      // measured from the launch.
+      warmupMode: 'ecs',
       maxInstances: 160,
     },
     traffic: {

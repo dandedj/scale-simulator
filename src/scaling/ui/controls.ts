@@ -16,6 +16,7 @@ import type {
   ScalingPolicyType,
   ScalingSimulationConfig,
   ScalingTrafficShape,
+  ScalingWarmupMode,
 } from '../engine/types';
 import { ScalingLegend } from './legend';
 import { ScalingOverview } from './overview';
@@ -348,12 +349,28 @@ const GROUPS: Array<{ name: string; scope: KnobScope; open?: boolean; controls: 
     open: true,
     controls: [
       {
+        kind: 'choice',
+        label: 'Warmup rules',
+        options: [
+          { value: 'ecs', label: 'ECS' },
+          { value: 'asg', label: 'ASG' },
+        ],
+        get: (c) => c.launch.warmupMode,
+        set: (c, v) => (c.launch.warmupMode = v as ScalingWarmupMode),
+        info: {
+          what: 'Whose warmup semantics the bake follows. The two differ in what the bake gates and when its clock starts.',
+          how: 'ECS cluster auto scaling blocks the next scale-out until every instance has passed its warmup, timed from the launch — “the scale-out is blocked for instances that are within the instanceWarmupPeriod”. EC2 Auto Scaling blocks nothing: a warming instance is left out of the aggregated metrics and out of the capacity the policy scales from, while still counting toward what has been requested, and its clock starts when it reaches InService.',
+          expect: 'ECS gives fewer, larger steps — the fleet waits out the whole bake between them. ASG keeps deciding throughout, just from a fleet it is under-counting. And because the ECS clock runs from the launch, a bake shorter than the pipeline expires before the capacity it covers has even landed.',
+        },
+      },
+      {
         kind: 'knob',
         label: 'Bake (instance warmup)', min: 0, max: 900_000, step: 30_000, get: (c) => c.launch.bakeMs, set: (c, v) => (c.launch.bakeMs = v), format: mins,
+        entry: { min: 0, max: 3_600_000, parse: parseDuration, format: mins },
         info: {
-          what: 'How long new capacity settles before the autoscaler counts it. ECS instanceWarmupPeriod / ASG DefaultInstanceWarmup — 300s is the AWS default and suggested starting point.',
-          how: 'A baking instance is in service and carrying traffic, but the policy does not count it in the capacity it scales *from* — while still counting it in what it has already requested. So repeated breaches of the same size collapse into one scaling activity instead of launching the same capacity twice.',
-          expect: 'This, not the cooldown, is what paces a target-tracking or step policy: each scale-out has to finish the pipeline and then bake before the next one can build on it. Long bakes make recovery a staircase; short ones recover faster and risk over-scaling.',
+          what: 'How long new capacity settles before the autoscaler counts it. ECS instanceWarmupPeriod / ASG DefaultInstanceWarmup — 300s is the documented default for both.',
+          how: 'A baking instance is in service and carrying traffic, but the policy does not count it in the capacity it scales *from* — while still counting it in what it has already requested. So repeated breaches of the same size collapse into one scaling activity instead of launching the same capacity twice. Under ECS rules it also blocks the next step outright. See Warmup rules above.',
+          expect: 'This, not the cooldown, is what paces a target-tracking or step policy. Its cost lands on a sustained ramp, not an instant jump: against a step change the policy sizes the whole gap before anything lands, so the bake never binds.',
         },
       },
       {

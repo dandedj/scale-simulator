@@ -59,10 +59,15 @@ const STAGES: Stage[] = [
   {
     n: '6',
     title: 'Bake — the new capacity settles',
-    value: (c) => `${dur(c.launch.bakeMs)}${c.policy.type === 'simple' ? ` · cooldown ${dur(c.launch.cooldownMs)}` : ''}`,
-    how: 'A baking instance serves traffic, but the policy does not count it in the capacity it scales *from* — while still counting it in what it has already requested. Repeated breaches of the same size therefore collapse into one scaling activity, and a deeper breach only tops up the difference. Once the bake expires the instance joins the metric and the next decision can build on it.',
+    value: (c) => `${dur(c.launch.bakeMs)} · ${c.launch.warmupMode === 'ecs' ? 'ECS rules' : 'ASG rules'}${c.policy.type === 'simple' ? ` · cooldown ${dur(c.launch.cooldownMs)}` : ''}`,
+    how: 'A baking instance serves traffic, but the policy does not count it in the capacity it scales *from* — while still counting it in what it has already requested. Repeated breaches of the same size therefore collapse into one scaling activity, and a deeper breach only tops up the difference. What else the bake does depends on whose rules apply — see below.',
   },
 ];
+
+const WARMUP = {
+  title: 'Whose warmup: ECS or ASG',
+  body: 'The bake is a per-instance clock under both, but they differ in what it gates and when it starts. <b>ECS cluster auto scaling</b> blocks the next scale-out until every instance has passed its warmup — "the scale-out is blocked for instances that are within the instanceWarmupPeriod" — and times it from the launch. Because instances launch together, that reads as a whole-fleet gate, and it is what an operator usually means by "our bake is 300s before another scale decision". <b>EC2 Auto Scaling</b> target-tracking and step policies block nothing: a warming instance is simply left out of the aggregated metrics and out of the capacity the policy scales from, and its clock starts when it reaches InService. So the same 300s buys fewer, larger steps under ECS, and continuous but under-sized ones under ASG. One consequence catches people out: since the ECS clock runs from the launch, a bake shorter than the pipeline expires before the capacity it covers has even landed, and adds nothing to the cycle.',
+};
 
 const ENGINE = {
   title: 'Two limits: latency vs throughput',
@@ -89,6 +94,7 @@ const ASSUMPTIONS: string[] = [
   'Capacity is fixed per instance (reference: 50K TPS on a c7g.2xlarge, i.e. 100K on two).',
   'Scale-out follows the documented AWS arithmetic: warming instances count toward what has been requested but not toward the capacity the policy scales from, so repeated breaches of the same size collapse into one scaling activity. Percent adjustments round the AWS way (a magnitude above 1 rounds down; anything above zero moves at least one instance).',
   'A policy can act at most once per metric period (60s — the ECS/EC2 publish interval), whatever the model’s tick rate.',
+  'Warmup is a per-instance clock under both rule sets. ECS additionally blocks the next scale-out until every instance is warm, which under batch launches behaves as a fleet-wide gate. ECS’s fixed 15-minute post-scale-out scale-in hold is out of scope, since nothing here scales in.',
   'A launched instance is serving after DNS publish and in service once clients pick it up; the bake clock starts there. served = min(offered, usable capacity), so demand beyond usable capacity is dropped.',
   'The fleet is pre-warmed to the buffer for the base demand at t0 (a calm start). Scale-in, instance termination, predictive scaling, and cost-per-instance are out of scope — overshoot is reported but never reclaimed.',
 ];
@@ -165,6 +171,7 @@ export class ScalingOverview {
     parts.push('<div class="ov-panels">');
     parts.push(`<div class="ov-panel ov-engine"><h3>${POLICY.title}</h3><p>${POLICY.body}</p></div>`);
     parts.push(`<div class="ov-panel"><h3>${READOUT.title}</h3><p>${READOUT.body}</p></div>`);
+    parts.push(`<div class="ov-panel"><h3>${WARMUP.title}</h3><p>${WARMUP.body}</p></div>`);
     parts.push(`<div class="ov-panel"><h3>${TIMELINE.title}</h3><p>${TIMELINE.body}</p></div>`);
     const items = ASSUMPTIONS.map((a) => `<li>${a}</li>`).join('');
     parts.push(`<div class="ov-panel"><h3>Modeling assumptions</h3><ul class="ov-assume">${items}</ul></div>`);

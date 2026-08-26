@@ -86,8 +86,8 @@ const SECTIONS: Section[] = [
     title: 'Pipeline & lag',
     entries: [
       { swatch: dotsRow(SEMANTIC.tlsPulse), label: 'Pipeline flow', detail: 'Each row is a stage; dots are instances moving through it (left→right by progress). The count on the right is how many are in that stage now.' },
-      { swatch: breakdown(), label: 'Scale-cycle bar', detail: 'One full cycle split into its parts — detection, the 8 per-instance stages, and the bake — each segment ∝ its duration. The slowest is flagged; the bake segment is pink. Detection + stages is the time to the first new capacity, and the whole bar is how often a scale-out can build on the last one.' },
-      { swatch: tile(alpha(SEMANTIC.retry, 0.8)), label: 'Bake hold', detail: 'The ⏳ readout counts down what the last scale-out is still waiting on — the bake, or a simple-scaling cooldown — before the policy can act again.' },
+      { swatch: breakdown(), label: 'Scale-cycle bar', detail: 'One full cycle split into its parts — detection, the 8 per-instance stages, and the bake — each segment ∝ its duration. The slowest is flagged; the bake segment is pink. Detection + stages is the time to the first new capacity, and the whole bar is how often a scale-out can build on the last one. Under ECS rules the bake runs alongside the pipeline rather than after it, so only the part that outlasts the pipeline shows.' },
+      { swatch: tile(alpha(SEMANTIC.retry, 0.8)), label: 'Bake hold', detail: 'The ⏳ readout counts down the last scale-out’s bake (or a simple-scaling cooldown). Under ECS rules that is a hard block on the next step; under ASG rules nothing is blocked and the countdown is just until the batch starts counting toward the metric.' },
     ],
   },
   {

@@ -59,12 +59,27 @@ export interface ScalingLaunchConfig {
   cooldownMs: number;
   /**
    * Bake / instance warmup (ECS instanceWarmupPeriod, ASG DefaultInstanceWarmup
-   * — 300s is the documented default and starting point). An instance that has
-   * entered service but is still baking carries traffic, yet the autoscaler does
-   * not count it toward the capacity it scales from — so the new capacity gets
-   * to settle into the metric before it drives another decision.
+   * — 300s is the documented default for both). What it gates depends on
+   * `warmupMode`; the clock is per instance either way.
    */
   bakeMs: number;
+  /**
+   * Which service's warmup semantics apply. The two differ in both what the
+   * bake gates and when its clock starts, and the difference is large enough to
+   * change a run's shape:
+   *
+   * - `ecs` — ECS cluster auto scaling. "Auto Scaling checks if all existing
+   *   instances have passed the instanceWarmupPeriod (now minus the instance
+   *   launch time). The scale-out is blocked for instances that are within the
+   *   instanceWarmupPeriod." So the next scale-out step waits for the whole
+   *   fleet, and the clock runs from launch — a bake shorter than the pipeline
+   *   expires before the capacity it covers has even landed.
+   * - `asg` — EC2 Auto Scaling target-tracking / step policies. Nothing is
+   *   blocked: a warming instance is left out of the aggregated metrics and out
+   *   of the capacity the policy scales from, while still counting toward what
+   *   has been requested. The clock runs from the instance reaching InService.
+   */
+  warmupMode: ScalingWarmupMode;
   /** Ceiling on fleet size. */
   maxInstances: number;
 }
@@ -96,6 +111,9 @@ export interface ScalingTrafficConfig {
  * per alarm and blocks until the cooldown expires.
  */
 export type ScalingPolicyType = 'target-tracking' | 'step' | 'simple';
+
+/** Whose warmup rules the bake follows — see `ScalingLaunchConfig.warmupMode`. */
+export type ScalingWarmupMode = 'ecs' | 'asg';
 
 /** How a step/simple adjustment is read (AWS AdjustmentType). */
 export type ScalingAdjustmentType = 'change-in-capacity' | 'percent-change-in-capacity';
@@ -233,6 +251,8 @@ export interface ScalingReadout {
   holdRemainingMs: number;
   /** What is holding it — the bake timer, the cooldown, or nothing. */
   holdReason: 'bake' | 'cooldown' | null;
+  /** True when the bake is a hard block on the next step, not just metric exclusion. */
+  holdBlocks: boolean;
   /** Instances beyond what the peak demand needed at target utilization. */
   overshootInstances: number;
 }

@@ -187,15 +187,23 @@ describe('scaling levers reduce the loss', () => {
 });
 
 describe('scale readout', () => {
-  it('reports the decision interval as pipeline + bake, and the ramp it implies', () => {
+  it('paces ECS on the bake alone — its clock runs from the launch', () => {
     const sim = newSim();
     const r = sim.scaleReadout();
-    // Σ per-instance stages (240s) + bake (300s) = 540s between scale-outs.
-    expect(r.decisionIntervalMs).toBe(540_000);
-    // 20 instances × 50K × (60s / 540s) ≈ 111K TPS/min.
-    expect(r.maxSustainableRampPerMin).toBeCloseTo((20 * 50_000 * 60_000) / 540_000, 0);
+    expect(r.decisionIntervalMs).toBe(300_000);
+    expect(r.maxSustainableRampPerMin).toBeCloseTo((20 * 50_000 * 60_000) / 300_000, 0);
     // detection 60s + Σ per-instance stages (240s) = 300s.
     expect(r.pipelineLatencyMs).toBe(300_000);
+    expect(r.holdBlocks).toBe(true);
+  });
+
+  it('paces ASG on pipeline + bake — its clock only starts once the batch lands', () => {
+    const sim = newSim((c) => (c.launch.warmupMode = 'asg'));
+    const r = sim.scaleReadout();
+    // Σ per-instance stages (240s) + bake (300s) = 540s before a batch counts.
+    expect(r.decisionIntervalMs).toBe(540_000);
+    // Nothing is blocked under ASG — the bake only withholds the metric.
+    expect(r.holdBlocks).toBe(false);
   });
 
   it('a simple-scaling cooldown longer than the bake sets the interval instead', () => {
@@ -221,10 +229,12 @@ describe('policy arithmetic', () => {
    * The worked example from the EC2 Auto Scaling step-scaling docs: from a fleet
    * of 10, a +30% adjustment while an earlier instance is still warming adds 2,
    * not 3, because the one already requested counts toward the new desired
-   * capacity.
+   * capacity. This is ASG behavior specifically — under ECS the second step
+   * would be blocked outright until the first instance finished warming.
    */
-  it('a deeper breach tops up rather than re-requesting capacity in flight', () => {
+  it('a deeper breach tops up rather than re-requesting capacity in flight (ASG)', () => {
     const sim = newSim((c) => {
+      c.launch.warmupMode = 'asg';
       c.traffic.shape = 'steady';
       c.traffic.baseRateTps = 300_000; // 10 instances at 60% of 50K
       c.policy.type = 'step';
@@ -247,6 +257,45 @@ describe('policy arithmetic', () => {
     sim.cfg.traffic.baseRateTps = 400_000;
     run(sim, 130_000);
     expect(sim.instances.length).toBe(13);
+  });
+
+  /**
+   * "Auto Scaling checks if all existing instances have passed the
+   * instanceWarmupPeriod... The scale-out is blocked for instances that are
+   * within the instanceWarmupPeriod." Same breach, same ladder — under ECS the
+   * escalation simply does not fire until the fleet is warm.
+   */
+  it('ECS blocks the escalating step until the whole fleet is warm', () => {
+    const build = (mode: 'ecs' | 'asg') =>
+      newSim((c) => {
+        c.launch.warmupMode = mode;
+        c.traffic.shape = 'steady';
+        c.traffic.baseRateTps = 300_000;
+        c.policy.type = 'step';
+        c.policy.adjustmentType = 'percent-change-in-capacity';
+        c.launch.bakeMs = 600_000;
+        c.launch.maxStepSize = 100;
+      });
+    const ecs = build('ecs');
+    const asg = build('asg');
+    for (const sim of [ecs, asg]) {
+      sim.cfg.traffic.baseRateTps = 320_000;
+      run(sim, 130_000);
+      sim.cfg.traffic.baseRateTps = 400_000;
+      run(sim, 130_000);
+    }
+    expect(asg.instances.length).toBe(13); // 11, then topped up to 13
+    expect(ecs.instances.length).toBe(11); // blocked at the first step
+  });
+
+  it('the ECS bake runs from the launch, so a short one expires before capacity lands', () => {
+    // Pipeline is 240s; a 60s bake is long gone by the time the batch is in
+    // service, so the next step fires while the first is still provisioning.
+    const sim = newSim((c) => (c.launch.bakeMs = 60_000));
+    run(sim, 300_000);
+    const launchTimes = sim.metrics.events.filter((e) => e.kind === 'scale').map((e) => e.time);
+    expect(launchTimes.length).toBeGreaterThan(1);
+    expect(launchTimes[1] - launchTimes[0]).toBeLessThan(240_000);
   });
 
   it('target tracking closes the gap exactly and then stops', () => {

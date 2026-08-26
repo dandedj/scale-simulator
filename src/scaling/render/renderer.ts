@@ -169,7 +169,9 @@ export class ScalingRenderer {
     ctx.fillText(held ? `⏳ ${r.holdReason?.toUpperCase()} ${fmtDur(r.holdRemainingMs)}` : fmtDur(r.decisionIntervalMs), cx, y + 58);
     ctx.font = '500 8.5px "IBM Plex Mono", monospace';
     ctx.fillStyle = SURFACE.textFaint;
-    ctx.fillText(held ? 'until the next scale decision' : 'between scale decisions', cx, y + 68);
+    // Under ASG rules nothing is blocked — the bake only withholds the metric.
+    const heldLabel = r.holdBlocks ? 'until the next scale decision' : 'until this batch is counted';
+    ctx.fillText(held ? heldLabel : 'between scale decisions', cx, y + 68);
     ctx.textAlign = 'left';
     if (r.overshootInstances > 0) {
       ctx.textAlign = 'center';
@@ -193,10 +195,18 @@ export class ScalingRenderer {
     // Detection + the per-instance pipeline is the lag to the *first* new
     // capacity; the bake is what has to pass before a second scale-out can build
     // on it. Together they are one full scale cycle.
+    //
+    // Under ASG the bake starts when the batch lands, so it follows the pipeline
+    // and the whole bar adds up. Under ECS it starts at the launch and runs
+    // *alongside* the pipeline, so only the part that outlasts the pipeline
+    // lengthens the cycle — a bake shorter than the pipeline adds nothing at all.
+    const pipelineMs = PIPELINE_STAGES.reduce((a, st) => a + sim.cfg.stages[st.key], 0);
+    const bakeMs =
+      sim.cfg.launch.warmupMode === 'ecs' ? Math.max(0, sim.cfg.launch.bakeMs - pipelineMs) : sim.cfg.launch.bakeMs;
     const stages: { label: string; ms: number; bake?: boolean }[] = [
       { label: 'detect', ms: sim.cfg.stages.detectionMs },
       ...PIPELINE_STAGES.map((s) => ({ label: s.label, ms: sim.cfg.stages[s.key] })),
-      { label: 'bake', ms: sim.cfg.launch.bakeMs, bake: true },
+      { label: 'bake', ms: bakeMs, bake: true },
     ];
     const total = stages.reduce((a, s) => a + s.ms, 0) || 1;
     const maxMs = Math.max(...stages.map((s) => s.ms));
