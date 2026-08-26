@@ -10,10 +10,14 @@
 import { StormExperience } from './app';
 import { DnsExperience } from './dns/experience';
 import { ScalingExperience } from './scaling/experience';
+import { encode, LINK_KEYS, readParams, writeUrl } from './deeplink';
 import type { Experience, ExperienceDef, ExperienceHosts, PlaybackController } from './experience';
+import { ReferenceExperience } from './reference';
 
 /** Ignore wall-time gaps bigger than this (background tab, debugger). */
 const MAX_FRAME_WALL_MS = 100;
+/** How often the address bar is refreshed from the live state (ms). */
+const URL_SYNC_MS = 500;
 
 /** The registered modes, in tab order. */
 const EXPERIENCES: ExperienceDef[] = [
@@ -35,6 +39,12 @@ const EXPERIENCES: ExperienceDef[] = [
     subtitle: 'autoscaling ramp-up simulator',
     create: () => new ScalingExperience(),
   },
+  {
+    id: 'reference',
+    label: '§ Options reference',
+    subtitle: 'every setting, explained',
+    create: () => new ReferenceExperience(),
+  },
 ];
 
 export class Shell {
@@ -43,6 +53,10 @@ export class Shell {
   private gateArmed = true;
   private pausedByVisibility = false;
   private lastWall = 0;
+  private lastUrlSync = 0;
+  private lastQuery = '';
+  /** Deep-link params for the mode being mounted, consumed once. */
+  private pendingLink: URLSearchParams | null = null;
 
   private active!: Experience;
   private activeId = '';
@@ -106,7 +120,12 @@ export class Shell {
       }
     });
 
-    this.mountExperience(EXPERIENCES[0]);
+    // Boot straight into whatever the link asks for.
+    const params = readParams();
+    const wanted = EXPERIENCES.find((d) => d.id === params.get(LINK_KEYS.mode));
+    this.pendingLink = params;
+    this.mountExperience(wanted ?? EXPERIENCES[0]);
+    if (params.get(LINK_KEYS.run) === '1') this.setPaused(false);
 
     requestAnimationFrame((t) => {
       this.lastWall = t;
@@ -158,7 +177,33 @@ export class Shell {
     });
     menu.addEventListener('click', (e) => e.stopPropagation());
 
-    this.modeSwitchEl.append(trigger, menu);
+    // Sharing the current configuration is a global action, like the mode
+    // itself — it belongs beside the nav, not among the per-mode controls.
+    const link = document.createElement('button');
+    link.className = 'btn mode-link';
+    link.textContent = '🔗 LINK';
+    link.title = 'Copy a link to this exact configuration';
+    link.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.copyLink(link);
+    });
+    this.modeSwitchEl.append(trigger, menu, link);
+  }
+
+  private async copyLink(btn: HTMLButtonElement): Promise<void> {
+    this.syncUrl();
+    const url = window.location.href;
+    const done = (label: string) => {
+      btn.textContent = label;
+      window.setTimeout(() => (btn.textContent = '🔗 LINK'), 1400);
+    };
+    try {
+      await navigator.clipboard.writeText(url);
+      done('✓ COPIED');
+    } catch {
+      // Clipboard access can be refused; the URL is in the address bar anyway.
+      done('⌫ IN BAR');
+    }
   }
 
   private setModeMenu(open: boolean): void {
@@ -173,6 +218,11 @@ export class Shell {
     this.activeId = def.id;
     this.appEl.classList.add(`mode-${def.id}`);
     this.active.mount(this.hosts, this.playback);
+    // Restore before the first frame, so nothing is simulated at the wrong config.
+    if (this.pendingLink) {
+      this.active.applyDeepLink?.(this.pendingLink);
+      this.pendingLink = null;
+    }
     this.pausedByVisibility = false;
     this.gateArmed = true;
     this.setPaused(true);
@@ -219,6 +269,19 @@ export class Shell {
     this.active.render();
     const clock = `${(this.active.simTimeMs() / 1000).toFixed(1)}s`;
     if (this.hudClock.textContent !== clock) this.hudClock.textContent = clock;
+    if (wallNow - this.lastUrlSync > URL_SYNC_MS) {
+      this.lastUrlSync = wallNow;
+      this.syncUrl();
+    }
     requestAnimationFrame(this.frame);
   };
+
+  /** Keep the address bar showing the live configuration, cheaply. */
+  private syncUrl(): void {
+    const state = this.active.deepLink?.() ?? { mode: this.activeId };
+    const query = encode({ ...state, mode: this.activeId, run: !this.paused || undefined });
+    if (query === this.lastQuery) return;
+    this.lastQuery = query;
+    writeUrl(query);
+  }
 }

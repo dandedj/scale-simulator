@@ -4,6 +4,7 @@
  * panel. The shell drives it through the Experience interface.
  */
 
+import { applyOverrides, diff, LINK_KEYS, PANE_B_PREFIX, type LinkState } from '../deeplink';
 import type { Experience, ExperienceHosts, PlaybackController } from '../experience';
 import { ScalingSimulation } from './engine/scalingSimulation';
 import { cloneScalingConfig, scalingPresetById, SCALING_PRESETS } from './engine/presets';
@@ -59,6 +60,8 @@ export class ScalingExperience implements Experience {
 
   private panes: Pane[] = [];
   private compare = false;
+  /** Scenario each pane started from, so a link can encode only the difference. */
+  private linkScenario: Array<string | null> = [null, null];
   private controls!: ScalingControlPanel;
   private playback!: PlaybackController;
   private hosts!: ExperienceHosts;
@@ -94,8 +97,14 @@ export class ScalingExperience implements Experience {
 
     this.controls = new ScalingControlPanel(hosts.side, hosts.header, {
       getSims: () => this.panes.map((p) => p.sim),
-      loadPreset: (id) => this.resetPanes([cloneScalingConfig(scalingPresetById(id).config)]),
-      applyScenario: (pane, id) => this.applyScenario(pane, id),
+      loadPreset: (id) => {
+        this.linkScenario = [id, null];
+        this.resetPanes([cloneScalingConfig(scalingPresetById(id).config)]);
+      },
+      applyScenario: (pane, id) => {
+        this.linkScenario[pane] = id;
+        this.applyScenario(pane, id);
+      },
       reset: () => this.resetPanes(this.panes.map((p) => cloneScalingConfig(p.sim.cfg))),
       surge: (factor, durationMs) => {
         for (const p of this.panes) p.sim.triggerSurge(factor, durationMs);
@@ -365,6 +374,50 @@ export class ScalingExperience implements Experience {
     cfgs[pane].slaTarget = preset.slaTarget;
     for (const c of cfgs) c.traffic = structuredClone(preset.traffic);
     this.resetPanes(cfgs);
+  }
+
+
+  /**
+   * This mode's share of a deep link: the scenario each pane started from plus
+   * only the settings that differ from it, so the link says what was changed
+   * rather than restating a whole config.
+   */
+  deepLink(): LinkState {
+    const cfgs = this.panes.map((p) => p.sim.cfg);
+    const idA = this.linkScenario[0];
+    const idB = this.linkScenario[1];
+    const baseFor = (id: string | null) => (id ? scalingPresetById(id).config : SCALING_PRESETS[0].config);
+    return {
+      mode: '',
+      scenario: idA,
+      scenarioB: this.compare ? idB : null,
+      compare: this.compare,
+      overrides: cfgs[0] ? diff(baseFor(idA), cfgs[0]) : {},
+      overridesB: this.compare && cfgs[1] ? diff(baseFor(idB), cfgs[1]) : {},
+    };
+  }
+
+  /** Restore a linked configuration before the first frame. */
+  applyDeepLink(params: URLSearchParams): void {
+    const wantCompare = params.get(LINK_KEYS.compare) === '1';
+    const idA = params.get(LINK_KEYS.scenario);
+    const idB = params.get(LINK_KEYS.scenarioB);
+    const known = (id: string | null) => (id && SCALING_PRESETS.some((p) => p.id === id) ? id : null);
+    const a = known(idA);
+    const b = known(idB);
+    const cfgA = cloneScalingConfig((a ? scalingPresetById(a) : SCALING_PRESETS[0]).config);
+    applyOverrides(cfgA, params, '');
+    const cfgs = [cfgA];
+    if (wantCompare) {
+      const cfgB = cloneScalingConfig((b ? scalingPresetById(b) : SCALING_PRESETS[0]).config);
+      applyOverrides(cfgB, params, PANE_B_PREFIX);
+      cfgs.push(cfgB);
+    }
+    this.compare = wantCompare;
+    this.linkScenario = [a, wantCompare ? b : null];
+    this.resetPanes(cfgs);
+    this.controls.setCompareUI(wantCompare, [a, b]);
+    if (!wantCompare && a) this.controls.setActivePreset(a);
   }
 
   private updateHud(): void {

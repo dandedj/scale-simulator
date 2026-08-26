@@ -28,6 +28,32 @@ wait, TLS error pacing, session resumption, and circuit breakers on both the
 clients and the fabric→downstream pools) to see how each changes the system's
 response to load surges.
 
+## Deep links
+
+Every configuration is addressable. The address bar always shows the current
+one — tune anything and copy it, or press **🔗 LINK** to copy it directly:
+
+```
+?m=scaling&s=sustained                              a scenario, as-is
+?m=scaling&s=sustained&launch.bakeMs=600000         …with one thing changed
+?m=scaling&cmp=1&s=sustained&s2=long-bake&run=1     a comparison, running on load
+?m=scaling&cmp=1&s=sustained&s2=sustained&b.launch.bakeMs=900000   pane B only
+```
+
+A link is a **scenario plus what differs from it**, not a dump of every field,
+so it stays short and stays readable. Reserved keys: `m` (mode), `s` / `s2`
+(scenario per pane), `cmp` (comparison mode), `run` (skip the start gate).
+Every other key is a dot-path into that mode's config; prefix one with `b.` to
+aim it at pane B. An unknown path is ignored, so an old link degrades rather
+than breaking.
+
+The **§ Options reference** in the ☰ nav (`?m=reference`) lists every setting in
+every simulator with the path that sets it, its range, its default, and its
+what/how/expect. It is generated from the control panels themselves and the
+paths are recovered by running each real setter, so the page cannot drift from
+the app — and a test asserts every path it publishes is one the link parser
+accepts.
+
 ## Run it
 
 ```bash

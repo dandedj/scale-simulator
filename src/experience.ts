@@ -10,6 +10,8 @@
  * whichever experience is active.
  */
 
+import type { LinkState } from './deeplink';
+
 /** DOM containers the shell hands an experience on mount; cleared on unmount. */
 export interface ExperienceHosts {
   /** #header-controls — the experience builds its header buttons here. */
@@ -53,6 +55,14 @@ export interface Experience {
   readonly maxSimStepMs: number;
   /** Called when the run resumes from the start gate (optional). */
   onResume?(): void;
+  /**
+   * This mode's share of a deep link: scenario, comparison state, and every
+   * setting that differs from the scenario it started from. Omit for a mode with
+   * nothing to encode.
+   */
+  deepLink?(): LinkState;
+  /** Restore from a deep link, before the first frame. */
+  applyDeepLink?(params: URLSearchParams): void;
   /** Tear down all DOM, listeners, and dialogs the experience created. */
   unmount(): void;
 }

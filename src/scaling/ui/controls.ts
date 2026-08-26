@@ -9,7 +9,9 @@
  */
 
 import { compareSuccessRates } from '../../stats';
-import { SCALING_PRESETS } from '../engine/presets';
+import { PROBE_NUMBER, PROBE_STRING, pathOfSetter } from '../../deeplink';
+import type { OptionDoc } from '../../optionDoc';
+import { baseConfig, SCALING_PRESETS } from '../engine/presets';
 import type { ScalingSimulation } from '../engine/scalingSimulation';
 import type {
   ScalingAdjustmentType,
@@ -466,6 +468,46 @@ const GROUPS: Array<{ name: string; scope: KnobScope; open?: boolean; controls: 
   },
 ];
 
+
+/**
+ * Every scaling setting, described from the same definitions the panel renders
+ * — including the dot-path, recovered by running each setter and seeing what it
+ * moved. The reference and the deep links therefore cannot name a field the
+ * control does not actually write.
+ */
+export function describeScalingOptions(): OptionDoc[] {
+  const base = baseConfig();
+  const out: OptionDoc[] = [];
+  for (const group of GROUPS) {
+    for (const c of group.controls) {
+      if (c.kind === 'knob') {
+        const fmt = c.format ?? ((v: number) => String(v));
+        out.push({
+          group: group.name,
+          label: c.label,
+          path: pathOfSetter(base, c.set as (cfg: ScalingSimulationConfig, v: never) => void, PROBE_NUMBER),
+          kind: 'range',
+          range: { min: c.min, max: c.max, step: c.step },
+          value: fmt(c.get(base)),
+          info: c.info,
+        });
+      } else {
+        const probe = typeof c.options[0]?.value === 'number' ? PROBE_NUMBER : PROBE_STRING;
+        out.push({
+          group: group.name,
+          label: c.label,
+          path: pathOfSetter(base, c.set as (cfg: ScalingSimulationConfig, v: never) => void, probe),
+          kind: 'choice',
+          choices: c.options.map((o) => o.label),
+          value: c.options.find((o) => o.value === c.get(base))?.label ?? String(c.get(base)),
+          info: c.info,
+        });
+      }
+    }
+  }
+  return out;
+}
+
 type Totals = ScalingSimulation['metrics']['totals'];
 
 const TOTAL_METRICS: Array<{ key: string; color: string; value(t: Totals): string }> = [
@@ -907,12 +949,13 @@ export class ScalingControlPanel {
     this.timelineBtn.classList.toggle('active', on);
   }
 
-  setCompareUI(on: boolean): void {
+  /** `scenarios` restores the per-pane highlights, for a linked comparison. */
+  setCompareUI(on: boolean, scenarios?: Array<string | null>): void {
     this.compareBtn.classList.toggle('active', on);
     this.activePane = 0;
     this.syncPaneTabs();
-    this.setActiveScenario(0, null);
-    this.setActiveScenario(1, null);
+    this.setActiveScenario(0, scenarios?.[0] ?? null);
+    this.setActiveScenario(1, scenarios?.[1] ?? null);
     if (!on) this.setActivePreset(null);
     this.lastTotalsHtml = '';
     this.refreshKnobs();

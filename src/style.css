@@ -133,8 +133,14 @@ body {
   border-right: 1px solid var(--border);
 }
 
-.mode-trigger {
+.mode-trigger,
+.mode-link {
   white-space: nowrap;
+}
+
+.mode-link {
+  margin-left: 6px;
+  font-size: 11px;
 }
 
 .mode-menu {
@@ -1903,4 +1909,194 @@ input[type='range']::-moz-range-thumb {
 
 #dns-degraded.visible {
   opacity: 1;
+}
+
+
+/* ---------- Options reference ---------- */
+
+/* A document, not a stage: no side panel, no HUD, and it scrolls. */
+#app.reference-mode #side,
+#app.reference-mode #start-gate,
+/* No clock on a document. */
+#app.reference-mode .hud {
+  display: none;
+}
+
+#app.reference-mode #panes {
+  overflow-y: auto;
+  padding: 0;
+}
+
+.ref-search {
+  width: 240px;
+  padding: 6px 9px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.ref-search:focus {
+  outline: none;
+  border-color: var(--info);
+}
+
+.reference-page {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 22px 24px 60px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+
+.ref-head h1 {
+  font-family: var(--font-display);
+  font-size: 30px;
+  letter-spacing: 1px;
+  color: var(--text);
+}
+
+.ref-head p,
+.ref-blurb,
+.ref-note,
+.ref-links p {
+  font-size: 12px;
+  line-height: 1.65;
+  max-width: 74ch;
+  margin: 8px 0 0;
+}
+
+.reference-page h2 {
+  font-family: var(--font-display);
+  font-size: 19px;
+  letter-spacing: 0.8px;
+  color: var(--text);
+  margin: 30px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.reference-page h3 {
+  font-size: 11px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--info);
+  margin: 20px 0 8px;
+}
+
+.reference-page code {
+  font-size: 11.5px;
+  color: var(--text);
+  background: var(--panel-raised);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+.ref-link-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.ref-link {
+  padding: 9px 11px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.ref-link code {
+  font-size: 12px;
+  color: var(--ok);
+  background: transparent;
+  padding: 0;
+  word-break: break-all;
+}
+
+.ref-link-label {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text);
+}
+
+.ref-link-note {
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-faint);
+}
+
+.ref-options {
+  display: grid;
+  gap: 7px;
+}
+
+.ref-option {
+  padding: 9px 11px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.ref-option-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ref-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ref-path {
+  font-size: 11px;
+  color: var(--ok);
+  background: var(--panel-raised);
+  border-radius: 3px;
+  padding: 1px 5px;
+  user-select: all;
+}
+
+.ref-path-none {
+  color: var(--text-faint);
+  user-select: auto;
+}
+
+.ref-default {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.ref-default::before {
+  content: 'default ';
+  color: var(--text-faint);
+}
+
+.ref-range {
+  display: block;
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.ref-info {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+}
+
+.ref-info p {
+  margin: 0 0 3px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  max-width: 88ch;
+}
+
+.ref-info b {
+  color: var(--text-dim);
 }

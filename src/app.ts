@@ -9,6 +9,7 @@
  * Experience interface the shell drives.
  */
 
+import { applyOverrides, diff, LINK_KEYS, PANE_B_PREFIX, type LinkState } from './deeplink';
 import type { Experience, ExperienceHosts, PlaybackController } from './experience';
 import { cloneConfig, experimentById, presetById, PRESETS } from './engine/presets';
 import { Simulation } from './engine/simulation';
@@ -58,6 +59,8 @@ export class StormExperience implements Experience {
 
   private panes: Pane[] = [];
   private compare = false;
+  /** Scenario each pane started from, so a link can encode only the difference. */
+  private linkScenario: Array<string | null> = [null, null];
   private controls!: ControlPanel;
   private playback!: PlaybackController;
   private hosts!: ExperienceHosts;
@@ -84,8 +87,14 @@ export class StormExperience implements Experience {
 
     this.controls = new ControlPanel(hosts.side, hosts.header, {
       getSims: () => this.panes.map((p) => p.sim),
-      loadPreset: (id) => this.resetPanes([cloneConfig(presetById(id).config)]),
-      applyScenario: (pane, id) => this.applyScenario(pane, id),
+      loadPreset: (id) => {
+        this.linkScenario = [id, null];
+        this.resetPanes([cloneConfig(presetById(id).config)]);
+      },
+      applyScenario: (pane, id) => {
+        this.linkScenario[pane] = id;
+        this.applyScenario(pane, id);
+      },
       applyExperiment: (id) => this.applyExperiment(id),
       reset: () => this.resetPanes(this.panes.map((p) => cloneConfig(p.sim.cfg))),
       pulse: (factor, durationMs) => {
@@ -274,6 +283,7 @@ export class StormExperience implements Experience {
    */
   private applyExperiment(id: string): void {
     const exp = experimentById(id);
+    this.linkScenario = [exp.a, exp.b];
     const a = cloneConfig(presetById(exp.a).config);
     const b = cloneConfig(presetById(exp.b).config);
     b.clients.count = a.clients.count;
@@ -287,6 +297,50 @@ export class StormExperience implements Experience {
       this.playback.setStartHint(COMPARE_HINT);
     }
     this.controls.setActiveExperiment(exp);
+  }
+
+
+  /**
+   * This mode's share of a deep link: the scenario each pane started from plus
+   * only the settings that differ from it, so the link says what was changed
+   * rather than restating a whole config.
+   */
+  deepLink(): LinkState {
+    const cfgs = this.panes.map((p) => p.sim.cfg);
+    const idA = this.linkScenario[0];
+    const idB = this.linkScenario[1];
+    const baseFor = (id: string | null) => (id ? presetById(id).config : PRESETS[0].config);
+    return {
+      mode: '',
+      scenario: idA,
+      scenarioB: this.compare ? idB : null,
+      compare: this.compare,
+      overrides: cfgs[0] ? diff(baseFor(idA), cfgs[0]) : {},
+      overridesB: this.compare && cfgs[1] ? diff(baseFor(idB), cfgs[1]) : {},
+    };
+  }
+
+  /** Restore a linked configuration before the first frame. */
+  applyDeepLink(params: URLSearchParams): void {
+    const wantCompare = params.get(LINK_KEYS.compare) === '1';
+    const idA = params.get(LINK_KEYS.scenario);
+    const idB = params.get(LINK_KEYS.scenarioB);
+    const known = (id: string | null) => (id && PRESETS.some((p) => p.id === id) ? id : null);
+    const a = known(idA);
+    const b = known(idB);
+    const cfgA = cloneConfig((a ? presetById(a) : PRESETS[0]).config);
+    applyOverrides(cfgA, params, '');
+    const cfgs = [cfgA];
+    if (wantCompare) {
+      const cfgB = cloneConfig((b ? presetById(b) : PRESETS[0]).config);
+      applyOverrides(cfgB, params, PANE_B_PREFIX);
+      cfgs.push(cfgB);
+    }
+    this.compare = wantCompare;
+    this.linkScenario = [a, wantCompare ? b : null];
+    this.resetPanes(cfgs);
+    this.controls.setCompareUI(wantCompare, [a, b]);
+    if (!wantCompare && a) this.controls.setActivePreset(a);
   }
 
   private updateHud(): void {

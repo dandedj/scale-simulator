@@ -10,9 +10,11 @@
  * selected with the SIM A / SIM B tabs.
  */
 
+import { PROBE_NUMBER, pathOfSetter } from '../../deeplink';
+import type { OptionDoc } from '../../optionDoc';
 import { compareSuccessRates } from '../../stats';
 import type { DnsSimulation } from '../engine/dnsSimulation';
-import { DNS_PRESETS } from '../engine/presets';
+import { baseConfig, DNS_PRESETS } from '../engine/presets';
 import type { DnsSimulationConfig, TrafficShape } from '../engine/types';
 import { DnsLegend } from './legend';
 import { DnsOverview } from './overview';
@@ -371,6 +373,43 @@ const TOTAL_METRICS: Array<{ key: string; color: string; value(t: Totals): strin
   { key: 'replacements', color: 'var(--info)', value: (t) => String(t.serverReplacements) },
   { key: 'fleet use', color: 'var(--ok)', value: (t) => `${(t.provisionedSeconds > 0 ? (t.servedSeconds / t.provisionedSeconds) * 100 : 0).toFixed(0)}%` },
 ];
+
+
+/**
+ * Every setting in this panel, described from the definitions it renders — the
+ * dot-path included, recovered by running each setter and seeing what moved.
+ */
+export function describeDnsOptions(): OptionDoc[] {
+  const base = baseConfig();
+  const out: OptionDoc[] = [];
+  for (const group of GROUPS) {
+    for (const k of group.knobs) {
+      const fmt = k.format ?? ((v: number) => String(v));
+      out.push({
+        group: group.name,
+        label: k.label,
+        path: pathOfSetter(base, k.set as (cfg: DnsSimulationConfig, v: never) => void, PROBE_NUMBER),
+        kind: 'range',
+        range: { min: k.min, max: k.max, step: k.step },
+        value: fmt(k.get(base)),
+        info: k.info,
+      });
+    }
+    for (const t of group.toggles) {
+      out.push({
+        group: group.name,
+        label: t.label,
+        // Probe with the opposite of the default, or nothing moves to detect.
+        path: pathOfSetter(base, t.set as (cfg: DnsSimulationConfig, v: never) => void, !t.get(base)),
+        kind: 'choice',
+        choices: ['on', 'off'],
+        value: t.get(base) ? 'on' : 'off',
+        info: t.info,
+      });
+    }
+  }
+  return out;
+}
 
 export class DnsControlPanel {
   private refreshers: Array<() => void> = [];
@@ -744,12 +783,13 @@ export class DnsControlPanel {
     for (const r of this.refreshers) r();
   }
 
-  setCompareUI(on: boolean): void {
+  /** `scenarios` restores the per-pane highlights, for a linked comparison. */
+  setCompareUI(on: boolean, scenarios?: Array<string | null>): void {
     this.compareBtn.classList.toggle('active', on);
     this.activePane = 0;
     this.syncPaneTabs();
-    this.setActiveScenario(0, null);
-    this.setActiveScenario(1, null);
+    this.setActiveScenario(0, scenarios?.[0] ?? null);
+    this.setActiveScenario(1, scenarios?.[1] ?? null);
     if (!on) this.setActivePreset(null);
     this.lastTotalsHtml = '';
     this.refreshKnobs();
