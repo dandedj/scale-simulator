@@ -260,8 +260,50 @@ export interface ScalingMetricsBucket {
   inFlight: number;
 }
 
+/** What an event is about — the timeline draws one lane per kind. */
+export type ScalingEventKind = 'demand' | 'scale' | 'slo' | 'info';
+
 export interface ScalingSimEventLog {
   time: number;
   severity: 'info' | 'warn' | 'critical';
+  kind: ScalingEventKind;
   message: string;
+  /** Magnitude for the timeline to size its marker by (instances added, TPS). */
+  value?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Timeline
+// ---------------------------------------------------------------------------
+
+/**
+ * A demand change that occupies a stretch of time rather than an instant — the
+ * scheduled shape, a triggered ▲ RAMP, or a ◉ SURGE window. Drawn as a bracket
+ * so "when the throughput was offered" is legible at a glance.
+ */
+export interface ScalingDemandSpan {
+  kind: 'ramp' | 'step' | 'surge';
+  label: string;
+  startMs: number;
+  /** Equal to `startMs` for an instantaneous step. */
+  endMs: number;
+  /** TPS the span adds at full effect (a surge reports its delta at trigger). */
+  amountTps: number;
+}
+
+/** A stretch of the run where availability sat under the SLO. */
+export interface ScalingBreachSpan {
+  startMs: number;
+  endMs: number;
+  /** Lowest availability reached inside the span (0..1). */
+  minAvailability: number;
+}
+
+/** Everything the timeline pane draws for one run. */
+export interface ScalingTimelineView {
+  /** Right edge — the current sim time. */
+  nowMs: number;
+  spans: ScalingDemandSpan[];
+  breaches: ScalingBreachSpan[];
+  events: ScalingSimEventLog[];
 }

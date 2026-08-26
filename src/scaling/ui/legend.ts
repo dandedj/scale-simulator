@@ -37,6 +37,23 @@ function meter(): string {
       `<line x1="17" y1="${c - 6}" x2="17" y2="${c + 6}" stroke="${SEMANTIC.timeout}" stroke-width="2"/>`,
   );
 }
+function bracket(): string {
+  return svg(
+    `<line x1="3" y1="${c}" x2="19" y2="${c}" stroke="${SEMANTIC.timeout}" stroke-width="2"/>` +
+      `<line x1="3" y1="${c - 4}" x2="3" y2="${c + 4}" stroke="${SEMANTIC.timeout}" stroke-width="2"/>` +
+      `<line x1="19" y1="${c - 4}" x2="19" y2="${c + 4}" stroke="${SEMANTIC.timeout}" stroke-width="2"/>`,
+  );
+}
+function markers(): string {
+  return svg(
+    ([[4, 6], [9, 12], [14, 4], [18, 9]] as const)
+      .map(([x, hgt]) => `<rect x="${x}" y="${S - 4 - hgt}" width="2.5" height="${hgt}" fill="${SEMANTIC.inFlight}"/>`)
+      .join(''),
+  );
+}
+function breachBand(): string {
+  return svg(`<rect x="4" y="3" width="${S - 8}" height="${S - 6}" fill="${alpha(SEMANTIC.timeout, 0.22)}"/>`);
+}
 function breakdown(): string {
   return svg(
     `<rect x="2" y="${c - 4}" width="6" height="8" fill="${alpha(SEMANTIC.inFlight, 0.85)}"/>` +
@@ -78,6 +95,14 @@ const SECTIONS: Section[] = [
     entries: [
       { swatch: meter(), label: 'Capacity meter', detail: 'Stacked usable (green) + ready-not-picked-up (blue) + provisioning (faint). The red ▲ marks offered demand; if it sits past the usable capacity, the red gap is dropped demand — the availability dip. A dashed pink line marks where the autoscaler thinks capacity ends: everything to its right is serving but still baking.' },
       { swatch: tile(alpha(SEMANTIC.timeout, 0.85)), label: 'Deficit / lost', detail: 'Offered beyond usable capacity: requests the fleet can’t serve until it scales. Shown red in the meter and the outcome bar; integrated as “lost req”.' },
+    ],
+  },
+  {
+    title: 'Timeline (⧗, single mode)',
+    entries: [
+      { swatch: bracket(), label: 'Demand bracket', detail: 'One demand change, spanning the time over which it arrived: the scheduled ramp in orange, a step in amber, a ◉ SURGE window in pink. An instant step draws as a caret instead. This is when the throughput was offered.' },
+      { swatch: markers(), label: 'Scale-out markers', detail: 'One bar per scale-out at the moment it fired, its height set by how many instances that step launched. Clustered bars mean the policy kept ordering; a long flat gap is a bake.' },
+      { swatch: breachBand(), label: 'Below-SLO band', detail: 'A red band marks every stretch where availability sat under the SLO; the header totals them. Hovering anywhere drops a cursor and reports the demand, capacity, availability and events at that moment.' },
     ],
   },
 ];

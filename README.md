@@ -495,12 +495,37 @@ much of the serving capacity is still uncounted, and the fleet by phase
 
 ### Demand
 
-The ramp is described as an **amount** (+250K … +3M TPS) and a **rate** (1 min,
-5, 10, 30, 1 hour), delivered as a `steady`, `ramp` or `step` shape — or fired
-on demand with **▲ RAMP**, which adds that amount at that rate on top of whatever
-demand is running. Triggered ramps stack and persist. The chart rail's view
-window grows with the run, so a 1-minute ramp and an hour-long one are both fully
-on screen.
+The ramp is described as an **amount** and a **rate**, delivered as a `steady`,
+`ramp` or `step` shape — or fired on demand with **▲ RAMP**, which adds that
+amount at that rate on top of whatever demand is running. Triggered ramps stack
+and persist. The quick-pick buttons cover the common cases (+250K … +3M TPS
+over 1 min … 1 hour); for anything else, type an exact figure into the value
+field — `1.75M`, `750k`, `1750000` and `90s`, `45m`, `2h` all parse. Base rate,
+capacity per instance and the fleet ceiling take exact values the same way. The
+chart rail's view window grows with the run, so a 1-minute ramp and an hour-long
+one are both fully on screen.
+
+### Timeline
+
+**⧗ TIMELINE** (single mode) opens an annotated strip below the stage: one axis
+for the whole run, so what happened and when reads directly instead of being
+reconstructed from the scrolling event ticker.
+
+- The **offered-demand curve** against usable capacity, with every **below-SLO
+  stretch** shaded red behind it and totalled in the header.
+- A lane of **demand brackets** — each one a change and the stretch over which it
+  arrived: the scheduled ramp, every triggered ▲ RAMP, every ◉ SURGE window.
+  This is the "when was the throughput offered" view.
+- A lane of **scale-out markers**, one per scaling activity, each sized by the
+  instances that step launched — so the cadence the bake imposes is visible as
+  the gaps between them.
+- **Hovering** drops a cursor and reports the demand, capacity, availability and
+  events at that moment.
+
+The axis spans the whole run and extends to a scheduled ramp that hasn't happened
+yet, so the plan is visible before the run starts. It stays single-mode only:
+two panes run one clock but tell two stories, and a shared axis would
+misrepresent both.
 
 ### Scenarios
 

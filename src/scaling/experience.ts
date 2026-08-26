@@ -10,6 +10,7 @@ import { cloneScalingConfig, scalingPresetById, SCALING_PRESETS } from './engine
 import type { ScalingSimulationConfig } from './engine/types';
 import { ScalingChartRail } from './render/charts';
 import { ScalingRenderer } from './render/renderer';
+import { ScalingTimeline } from './render/timeline';
 import { ScalingControlPanel, PANE_TAGS } from './ui/controls';
 
 /** Ramps here run for tens of minutes of sim time, so playback starts well dilated. */
@@ -57,6 +58,10 @@ export class ScalingExperience implements Experience {
   private helpEl!: HTMLElement;
   private hudAvail!: HTMLElement;
   private degradedBadge!: HTMLElement;
+  /** The annotated run timeline — single mode only, opened from the header. */
+  private timelineEl!: HTMLElement;
+  private timeline: ScalingTimeline | null = null;
+  private timelineOpen = false;
 
   mount(hosts: ExperienceHosts, playback: PlaybackController): void {
     this.hosts = hosts;
@@ -66,6 +71,7 @@ export class ScalingExperience implements Experience {
 
     this.buildHud();
     this.buildCompareHelp();
+    this.buildTimeline();
     this.buildPanes([cloneScalingConfig(SCALING_PRESETS[0].config)]);
 
     this.controls = new ScalingControlPanel(hosts.side, hosts.header, {
@@ -93,6 +99,8 @@ export class ScalingExperience implements Experience {
       setCompare: (on) => this.setCompare(on),
       isCompare: () => this.compare,
       showCompareHelp: () => this.helpEl.classList.remove('hidden'),
+      setTimelineOpen: (on) => this.setTimelineOpen(on),
+      isTimelineOpen: () => this.timelineOpen,
     });
 
     this.playback.setStartHint(SINGLE_HINT);
@@ -101,6 +109,8 @@ export class ScalingExperience implements Experience {
   unmount(): void {
     this.controls.destroy();
     this.appEl.classList.remove('compare');
+    this.timeline?.destroy();
+    this.timelineEl.remove();
     this.helpEl.remove();
     this.hosts.hud.replaceChildren();
     this.hosts.header.replaceChildren();
@@ -125,6 +135,7 @@ export class ScalingExperience implements Experience {
     } else {
       for (const p of this.panes) p.charts.draw(p.sim);
     }
+    if (this.timelineOpen && this.timeline && !this.compare) this.timeline.draw(this.panes[0].sim);
     this.controls.update();
     this.updateHud();
   }
@@ -134,6 +145,7 @@ export class ScalingExperience implements Experience {
       p.renderer.resize();
       p.charts.resize();
     }
+    this.timeline?.resize();
   }
 
   simTimeMs(): number {
@@ -151,6 +163,29 @@ export class ScalingExperience implements Experience {
     this.hudAvail = el('span', 'amp-ok', '100%');
     availItem.append(this.hudAvail, labelEl('availability'));
     this.hosts.hud.append(this.degradedBadge, availItem);
+  }
+
+  /**
+   * The timeline lives below the panes rather than inside one: it is a view of
+   * the whole run on one axis, so it wants the full stage width.
+   */
+  private buildTimeline(): void {
+    this.timelineEl = el('div', 'timeline-pane hidden');
+    this.timelineEl.id = 'scaling-timeline';
+    const canvas = document.createElement('canvas');
+    this.timelineEl.appendChild(canvas);
+    this.hosts.stageCol.appendChild(this.timelineEl);
+    this.timeline = new ScalingTimeline(canvas);
+  }
+
+  private setTimelineOpen(on: boolean): void {
+    // Two panes, two clocks — one shared axis would misrepresent both.
+    this.timelineOpen = on && !this.compare;
+    this.timelineEl.classList.toggle('hidden', !this.timelineOpen);
+    this.controls?.setTimelineUI(this.timelineOpen);
+    if (this.timelineOpen) this.timeline?.resize();
+    // The panes lose height to the timeline, so every canvas needs re-measuring.
+    this.resize();
   }
 
   private buildCompareHelp(): void {
@@ -215,6 +250,7 @@ export class ScalingExperience implements Experience {
 
   private setCompare(on: boolean): void {
     if (this.compare === on) return;
+    if (on && this.timelineOpen) this.setTimelineOpen(false);
     this.compare = on;
     const cfgA = cloneScalingConfig(this.panes[0].sim.cfg);
     this.resetPanes(on ? [cfgA, cloneScalingConfig(cfgA)] : [cfgA]);

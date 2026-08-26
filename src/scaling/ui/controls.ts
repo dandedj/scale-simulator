@@ -38,6 +38,9 @@ export interface ScalingControlHooks {
   setCompare(on: boolean): void;
   isCompare(): boolean;
   showCompareHelp(): void;
+  /** Open/close the annotated run timeline below the stage (single mode only). */
+  setTimelineOpen(on: boolean): void;
+  isTimelineOpen(): boolean;
 }
 
 interface SettingInfo {
@@ -56,7 +59,23 @@ interface KnobDef {
   format?(v: number): string;
   /** Hide the row when it does not apply to the selected policy. */
   when?(c: ScalingSimulationConfig): boolean;
+  /** Let the value be typed exactly, not just dragged to the nearest step. */
+  entry?: EntryDef;
   info?: SettingInfo;
+}
+
+/**
+ * A typed-in exact value. Sliders and quick-picks are for reaching a number
+ * fast; this is for reaching a *specific* one — "offer exactly 1.75M TPS".
+ */
+interface EntryDef {
+  /** Bounds the typed value is clamped into (wider than any quick-pick). */
+  min: number;
+  max: number;
+  /** Text → value; null rejects the edit and restores the current value. */
+  parse(text: string): number | null;
+  /** Value → the text shown in the field. */
+  format(v: number): string;
 }
 /** A segmented selector — a fixed set of choices rather than a continuous range. */
 interface ChoiceDef {
@@ -66,12 +85,49 @@ interface ChoiceDef {
   get(c: ScalingSimulationConfig): string | number;
   set(c: ScalingSimulationConfig, v: string | number): void;
   when?(c: ScalingSimulationConfig): boolean;
+  /** Present for numeric choices: quick-picks plus an exact typed value. */
+  entry?: EntryDef;
   info?: SettingInfo;
 }
 type ControlDef = KnobDef | ChoiceDef;
 
 const tps = (v: number) => (v >= 1e6 ? `${(v / 1e6).toFixed(2)}M/s` : v >= 1e3 ? `${Math.round(v / 1e3)}K/s` : `${Math.round(v)}/s`);
 const secs = (v: number) => `${Math.round(v / 1000)}s`;
+/**
+ * Accepts what someone would actually type for a throughput: `1500000`,
+ * `1,500,000`, `1.5M`, `750k`, `2 m`. Returns null on anything else so the
+ * field can refuse the edit rather than silently reading it as zero.
+ */
+function parseTps(text: string): number | null {
+  const m = /^\s*([\d,]*\.?\d+)\s*([kKmM])?\s*(?:\/\s*s|tps)?\s*$/.exec(text);
+  if (!m) return null;
+  const n = parseFloat(m[1].replace(/,/g, ''));
+  if (!Number.isFinite(n)) return null;
+  const scale = m[2] ? (m[2].toLowerCase() === 'm' ? 1e6 : 1e3) : 1;
+  return n * scale;
+}
+
+/** `90s`, `4m`, `1.5h`, or a bare number read as minutes. */
+function parseDuration(text: string): number | null {
+  const m = /^\s*(\d*\.?\d+)\s*(ms|s|m|h|min|hr)?\s*$/i.exec(text);
+  if (!m) return null;
+  const n = parseFloat(m[1]);
+  if (!Number.isFinite(n)) return null;
+  switch ((m[2] ?? 'm').toLowerCase()) {
+    case 'ms':
+      return n;
+    case 's':
+      return n * 1000;
+    case 'h':
+    case 'hr':
+      return n * 3_600_000;
+    default:
+      return n * 60_000;
+  }
+}
+
+const TPS_ENTRY = (min: number, max: number): EntryDef => ({ min, max, parse: parseTps, format: tps });
+
 /** Compact duration: 45s · 5m · 7.5m · 1h · 1.5h. */
 const mins = (v: number) => {
   if (v < 60_000) return `${Math.round(v / 1000)}s`;
@@ -140,9 +196,10 @@ const GROUPS: Array<{ name: string; scope: KnobScope; open?: boolean; controls: 
       {
         kind: 'knob',
         label: 'Base rate', min: 20_000, max: 1_000_000, step: 10_000, get: (c) => c.traffic.baseRateTps, set: (c, v) => (c.traffic.baseRateTps = v), format: tps,
+        entry: TPS_ENTRY(1_000, 20_000_000),
         info: {
           what: 'Steady demand and the floor of the ramp (TPS).',
-          how: 'The fleet is pre-warmed to serve this at the target utilization, so the run starts calm.',
+          how: 'The fleet is pre-warmed to serve this at the target utilization, so the run starts calm. Type an exact figure into the value field — the slider is only a quick way to get near one.',
           expect: 'Sets the baseline the ramp climbs from.',
         },
       },
@@ -152,10 +209,11 @@ const GROUPS: Array<{ name: string; scope: KnobScope; open?: boolean; controls: 
         options: RAMP_AMOUNTS.map((v) => ({ value: v, label: v >= 1e6 ? `+${v / 1e6}M` : `+${v / 1e3}K` })),
         get: (c) => c.traffic.rampAmountTps,
         set: (c, v) => (c.traffic.rampAmountTps = v as number),
+        entry: TPS_ENTRY(1_000, 20_000_000),
         info: {
           what: 'How much demand the ramp adds on top of base (TPS).',
-          how: 'The scheduled shape climbs base → base + this; ▲ RAMP adds this much from wherever demand currently sits, and stacks. At 50K/instance a +1M add needs 20 more instances at 100% util, ≈33 at a 60% buffer — +3M needs ≈100.',
-          expect: 'Larger adds need more scale-out steps, and every step costs a full pipeline + bake — so the recovery time grows faster than the amount does.',
+          how: 'The buttons are quick picks; type an exact figure into the value field for anything else (“1.75M”, “750k”, “1750000” all work). The scheduled shape climbs base → base + this; ▲ RAMP adds this much from wherever demand currently sits, and stacks. At 50K/instance a +1M add needs 20 more instances at 100% util, ≈33 at a 60% buffer — +3M needs ≈100.',
+          expect: 'Larger adds need more scale-out steps, and every step costs a full pipeline + bake — so the recovery time grows faster than the amount does. Check the fleet ceiling covers the add, or the run can never fully recover.',
         },
       },
       {
@@ -166,9 +224,10 @@ const GROUPS: Array<{ name: string; scope: KnobScope; open?: boolean; controls: 
         options: RAMP_RATES.map((v) => ({ value: v, label: v >= 3_600_000 ? '1hr' : `${v / 60_000}min` })),
         get: (c) => c.traffic.rampDurationMs,
         set: (c, v) => (c.traffic.rampDurationMs = v as number),
+        entry: { min: 1_000, max: 14_400_000, parse: parseDuration, format: mins },
         info: {
           what: 'How long the ramp amount takes to arrive.',
-          how: 'The offered ramp rate is amount ÷ this. Compare it against the max sustainable ramp in the readout (max step × capacity ÷ decision interval).',
+          how: 'The buttons are quick picks; type an exact duration into the value field (“90s”, “45m”, “2h”). The offered ramp rate is amount ÷ this. Compare it against the max sustainable ramp in the readout (max step × capacity ÷ decision interval).',
           expect: 'Faster than the fleet can add capacity and availability dips until it catches up. Slow enough — an hour for +1M — and the scale-out keeps pace with no visible dip at all.',
         },
       },
@@ -191,6 +250,7 @@ const GROUPS: Array<{ name: string; scope: KnobScope; open?: boolean; controls: 
       {
         kind: 'knob',
         label: 'Capacity / instance', min: 5_000, max: 200_000, step: 5_000, get: (c) => c.capacity.capacityPerInstanceTps, set: (c, v) => (c.capacity.capacityPerInstanceTps = v), format: tps,
+        entry: TPS_ENTRY(500, 1_000_000),
         info: {
           what: 'TPS one instance serves at 100%.',
           how: 'Reference: 50K on a c7g.2xlarge (100K on two). Fleet capacity = instances × this.',
@@ -327,9 +387,10 @@ const GROUPS: Array<{ name: string; scope: KnobScope; open?: boolean; controls: 
       {
         kind: 'knob',
         label: 'Max instances', min: 1, max: 400, step: 1, get: (c) => c.launch.maxInstances, set: (c, v) => (c.launch.maxInstances = v), format: (v) => String(Math.round(v)),
+        entry: { min: 1, max: 5_000, parse: parseTps, format: (v) => String(Math.round(v)) },
         info: {
           what: 'Ceiling on fleet size.',
-          how: 'Scale-out stops here; the FLEET panel turns red at the ceiling.',
+          how: 'Scale-out stops here; the FLEET panel turns red at the ceiling. Peak demand ÷ (target util × capacity per instance) is what the run actually needs — a +3M add on the defaults wants ≈104.',
           expect: 'Below what the peak needs and availability can never fully recover.',
         },
       },
@@ -413,6 +474,7 @@ export class ScalingControlPanel {
   private pauseBtn!: HTMLButtonElement;
   private rampBtn!: HTMLButtonElement;
   private compareBtn!: HTMLButtonElement;
+  private timelineBtn!: HTMLButtonElement;
   private paneTabBtns: HTMLButtonElement[] = [];
   private activePane = 0;
   private side: HTMLElement;
@@ -494,6 +556,12 @@ export class ScalingControlPanel {
     this.compareBtn.title = 'Run two configs side by side under the same demand';
     this.compareBtn.addEventListener('click', () => this.hooks.setCompare(!this.hooks.isCompare()));
     wrap.appendChild(this.compareBtn);
+
+    // Single mode only: two panes on one shared axis would misrepresent both.
+    this.timelineBtn = el('button', 'btn single-only', '⧗ TIMELINE') as HTMLButtonElement;
+    this.timelineBtn.title = 'Open an annotated timeline of the run — when demand was offered, and what the fleet did about it';
+    this.timelineBtn.addEventListener('click', () => this.hooks.setTimelineOpen(!this.hooks.isTimelineOpen()));
+    wrap.appendChild(this.timelineBtn);
 
     this.overview = new ScalingOverview(wrap, () => this.cfgFor('sim'));
     this.legend = new ScalingLegend(wrap);
@@ -592,26 +660,29 @@ export class ScalingControlPanel {
 
   private buildKnobRow(scope: KnobScope, knob: KnobDef): HTMLElement {
     const row = el('div', 'knob-row');
-    const valueEl = el('div', 'knob-value');
+    const fmt = knob.format ?? ((v: number) => String(Math.round(v * 100) / 100));
     const input = document.createElement('input');
     input.type = 'range';
     input.min = String(knob.min);
     input.max = String(knob.max);
     input.step = String(knob.step);
-    const fmt = knob.format ?? ((v: number) => String(Math.round(v * 100) / 100));
+    const read = () => knob.get(this.cfgFor(scope));
+    const write = (v: number) => this.applyControl(scope, (c, x) => knob.set(c, x as number), v);
+    const value = this.valueField(knob.entry, fmt, read, write);
     const sync = () => {
       const cfg = this.cfgFor(scope);
       row.classList.toggle('hidden', knob.when ? !knob.when(cfg) : false);
       const v = knob.get(cfg);
-      input.value = String(v);
-      valueEl.textContent = fmt(v);
+      // A typed value can sit outside the slider's range; pin the thumb to the end.
+      input.value = String(Math.min(knob.max, Math.max(knob.min, v)));
+      value.set(v);
     };
     input.addEventListener('input', () => {
-      this.applyControl(scope, (c, v) => knob.set(c, v as number), parseFloat(input.value));
-      valueEl.textContent = fmt(knob.get(this.cfgFor(scope)));
+      write(parseFloat(input.value));
+      value.set(knob.get(this.cfgFor(scope)));
     });
     this.refreshers.push(sync);
-    row.append(this.rowTop(knob.label, valueEl, knob.info, row), input);
+    row.append(this.rowTop(knob.label, value.el, knob.info, row), input);
     sync();
     return row;
   }
@@ -620,11 +691,16 @@ export class ScalingControlPanel {
     const row = el('div', 'knob-row');
     const seg = el('div', 'shape-seg');
     const btns: HTMLButtonElement[] = [];
+    const read = () => Number(choice.get(this.cfgFor(scope)));
+    const write = (v: number) => this.applyControl(scope, (c, x) => choice.set(c, x), v);
+    const value = choice.entry ? this.valueField(choice.entry, choice.entry.format, read, write) : null;
     const sync = () => {
       const cfg = this.cfgFor(scope);
       row.classList.toggle('hidden', choice.when ? !choice.when(cfg) : false);
-      const cur = String(choice.get(cfg));
-      btns.forEach((b) => b.classList.toggle('active', b.dataset.value === cur));
+      const cur = choice.get(cfg);
+      // A typed value that matches no quick-pick simply leaves them all inactive.
+      btns.forEach((b) => b.classList.toggle('active', b.dataset.value === String(cur)));
+      value?.set(Number(cur));
     };
     for (const opt of choice.options) {
       const b = el('button', 'shape-btn', opt.label) as HTMLButtonElement;
@@ -638,9 +714,55 @@ export class ScalingControlPanel {
       seg.appendChild(b);
     }
     this.refreshers.push(sync);
-    row.append(this.rowTop(choice.label, null, choice.info, row), seg);
+    row.append(this.rowTop(choice.label, value?.el ?? null, choice.info, row), seg);
     sync();
     return row;
+  }
+
+  /**
+   * The row's value readout. Without an `entry` it is static text; with one it
+   * is a field you can type an exact value into — committed on Enter or blur,
+   * reverted on Escape or on anything that doesn't parse.
+   */
+  private valueField(
+    entry: EntryDef | undefined,
+    fmt: (v: number) => string,
+    read: () => number,
+    write: (v: number) => void,
+  ): { el: HTMLElement; set(v: number): void } {
+    if (!entry) {
+      const node = el('div', 'knob-value');
+      return { el: node, set: (v) => (node.textContent = fmt(v)) };
+    }
+    const field = document.createElement('input');
+    field.type = 'text';
+    field.className = 'knob-value knob-entry';
+    field.spellcheck = false;
+    field.title = 'Type an exact value';
+    let editing = false;
+    const commit = () => {
+      const parsed = entry.parse(field.value);
+      if (parsed !== null) write(Math.min(entry.max, Math.max(entry.min, parsed)));
+      editing = false;
+      field.value = fmt(read());
+      this.refreshKnobs();
+    };
+    field.addEventListener('focus', () => {
+      editing = true;
+      field.select();
+    });
+    field.addEventListener('blur', commit);
+    field.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') field.blur();
+      else if (e.key === 'Escape') {
+        editing = false;
+        field.value = fmt(read());
+        field.blur();
+      }
+      e.stopPropagation(); // the shell binds space to pause
+    });
+    // While the field has focus the user's own text wins over the live value.
+    return { el: field, set: (v) => !editing && (field.value = fmt(v)) };
   }
 
   /** Label + optional live value + the ⓘ disclosure, shared by both row kinds. */
@@ -725,6 +847,10 @@ export class ScalingControlPanel {
 
   refreshKnobs(): void {
     for (const r of this.refreshers) r();
+  }
+
+  setTimelineUI(on: boolean): void {
+    this.timelineBtn.classList.toggle('active', on);
   }
 
   setCompareUI(on: boolean): void {

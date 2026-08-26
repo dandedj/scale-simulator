@@ -22,15 +22,18 @@
  */
 
 import { EventQueue, type ScheduledEvent } from '../../engine/eventQueue';
-import { type ScalingGauges, ScalingMetricsCollector, type ScalingRates } from './metrics';
+import { BUCKET_MS, type ScalingGauges, ScalingMetricsCollector, type ScalingRates } from './metrics';
 import {
   PIPELINE_STAGES,
+  type ScalingBreachSpan,
+  type ScalingDemandSpan,
   type ScalingDemandView,
   type ScalingInstanceView,
   type ScalingPolicyType,
   type ScalingReadout,
   type ScalingSimulationConfig,
   type ScalingStageView,
+  type ScalingTimelineView,
 } from './types';
 
 /** Autoscaler evaluation + demand-ramp refresh cadence (ms). */
@@ -89,6 +92,8 @@ export class ScalingSimulation {
   private pulseEndEvent: ScheduledEvent | null = null;
   // Triggered ramps (additive, persistent) via the ▲ RAMP button.
   private ramps: { startAt: number; amount: number; durMs: number }[] = [];
+  // Surge windows, kept after they end so the timeline can still show them.
+  private surges: ScalingDemandSpan[] = [];
 
   private rates: ScalingRates = { offered: 0, served: 0 };
   private breachSince = -1;
@@ -145,15 +150,23 @@ export class ScalingSimulation {
 
   /** Manual step surge: multiply demand by `factor` for `durationMs`. */
   triggerSurge(factor: number, durationMs: number): void {
+    const added = this.totalOffered() * (factor - 1);
     this.pulseFactor = factor;
     this.pulseUntil = this.now + durationMs;
     if (this.pulseEndEvent) this.pulseEndEvent.active = false;
     this.pulseEndEvent = this.queue.schedule(this.pulseUntil, () => {
       this.pulseFactor = 1;
       this.pulseEndEvent = null;
-      this.metrics.log(this.now, 'info', 'Manual surge ended');
+      this.metrics.log(this.now, 'info', 'demand', 'Manual surge ended');
     });
-    this.metrics.log(this.now, 'warn', `Manual surge: ${factor}× for ${(durationMs / 1000).toFixed(0)}s`);
+    this.surges.push({
+      kind: 'surge',
+      label: `surge ×${factor.toFixed(1)}`,
+      startMs: this.now,
+      endMs: this.pulseUntil,
+      amountTps: added,
+    });
+    this.metrics.log(this.now, 'warn', 'demand', `Manual surge: ${factor}× for ${(durationMs / 1000).toFixed(0)}s`);
     this.rebalance();
   }
 
@@ -164,7 +177,13 @@ export class ScalingSimulation {
    */
   triggerRamp(amountTps: number, durationMs: number): void {
     this.ramps.push({ startAt: this.now, amount: amountTps, durMs: Math.max(1, durationMs) });
-    this.metrics.log(this.now, 'warn', `Scheduled ramp: +${fmtTps(amountTps)} over ${(durationMs / 1000).toFixed(0)}s`);
+    this.metrics.log(
+      this.now,
+      'warn',
+      'demand',
+      `Triggered ramp: +${fmtTps(amountTps)} over ${fmtDurShort(durationMs)}`,
+      amountTps,
+    );
     this.rebalance();
   }
 
@@ -224,7 +243,9 @@ export class ScalingSimulation {
     this.metrics.log(
       this.now,
       'warn',
-      `Scale-out (${POLICY_LABEL[c.policy.type]}): +${n} instance(s) → ${this.instances.length} — util ${Math.round(util * 100)}%`,
+      'scale',
+      `Scale-out (${POLICY_LABEL[c.policy.type]}): +${n} → ${this.instances.length} instances — util ${Math.round(util * 100)}%`,
+      n,
     );
   }
 
@@ -431,6 +452,81 @@ export class ScalingSimulation {
     return { remainingMs: end - this.now, reason: cooldownEnd > bakeEnd ? 'cooldown' : 'bake' };
   }
 
+  // -- Timeline ----------------------------------------------------------------
+
+  /**
+   * Everything the timeline pane draws: the demand changes as brackets, the
+   * below-SLO stretches as shaded bands, and the tagged event log. Derived on
+   * demand — nothing here is retained beyond what the sim already keeps.
+   */
+  timelineView(): ScalingTimelineView {
+    return {
+      nowMs: this.now,
+      spans: this.demandSpans(),
+      breaches: this.breachSpans(),
+      events: this.metrics.events,
+    };
+  }
+
+  /** The scheduled shape plus every triggered ramp and surge, in time order. */
+  private demandSpans(): ScalingDemandSpan[] {
+    const t = this.cfg.traffic;
+    const spans: ScalingDemandSpan[] = [];
+    if (t.shape === 'ramp') {
+      spans.push({
+        kind: 'ramp',
+        label: `ramp +${fmtTps(t.rampAmountTps)}`,
+        startMs: t.rampStartMs,
+        endMs: t.rampStartMs + t.rampDurationMs,
+        amountTps: t.rampAmountTps,
+      });
+    } else if (t.shape === 'step') {
+      spans.push({
+        kind: 'step',
+        label: `step +${fmtTps(t.rampAmountTps)}`,
+        startMs: t.rampStartMs,
+        endMs: t.rampStartMs,
+        amountTps: t.rampAmountTps,
+      });
+    }
+    for (const r of this.ramps) {
+      spans.push({
+        kind: 'ramp',
+        label: `+${fmtTps(r.amount)}`,
+        startMs: r.startAt,
+        endMs: r.startAt + r.durMs,
+        amountTps: r.amount,
+      });
+    }
+    spans.push(...this.surges);
+    return spans.sort((a, b) => a.startMs - b.startMs);
+  }
+
+  /**
+   * Stretches where bucketed availability sat under the SLO. Read off the
+   * closed metric buckets, so the bands line up with the charts exactly.
+   */
+  private breachSpans(): ScalingBreachSpan[] {
+    const slo = this.cfg.slaTarget;
+    const spans: ScalingBreachSpan[] = [];
+    let open: ScalingBreachSpan | null = null;
+    for (const b of this.metrics.buckets) {
+      const avail = b.offered > 1e-9 ? Math.min(1, b.served / b.offered) : 1;
+      if (avail < slo - 1e-9) {
+        if (!open) open = { startMs: b.time, endMs: b.time + BUCKET_MS, minAvailability: avail };
+        else {
+          open.endMs = b.time + BUCKET_MS;
+          open.minAvailability = Math.min(open.minAvailability, avail);
+        }
+      } else if (open) {
+        spans.push(open);
+        open = null;
+      }
+    }
+    if (open) spans.push(open);
+    return spans;
+  }
+
   // -- Views + conditions ------------------------------------------------------
 
   private gauges(): ScalingGauges {
@@ -464,16 +560,28 @@ export class ScalingSimulation {
     const avail = this.metrics.availability(10_000);
     const degraded = avail < this.cfg.slaTarget;
     if (degraded && !this.degradedWas) {
-      this.throttledLog('degraded', 5000, 'critical', `Availability below SLO: ${(avail * 100).toFixed(1)}% — capacity can't keep up with demand`);
+      this.throttledLog(
+        'degraded',
+        5000,
+        'critical',
+        'slo',
+        `Availability below SLO: ${(avail * 100).toFixed(1)}% — capacity can't keep up with demand`,
+      );
     }
     this.degradedWas = degraded;
   }
 
-  private throttledLog(key: string, intervalMs: number, severity: 'info' | 'warn' | 'critical', message: string): void {
+  private throttledLog(
+    key: string,
+    intervalMs: number,
+    severity: 'info' | 'warn' | 'critical',
+    kind: 'demand' | 'scale' | 'slo' | 'info',
+    message: string,
+  ): void {
     const last = this.lastLogAt[key] ?? -Infinity;
     if (this.now - last < intervalMs) return;
     this.lastLogAt[key] = this.now;
-    this.metrics.log(this.now, severity, message);
+    this.metrics.log(this.now, severity, kind, message);
   }
 
   availability(windowMs = 10_000): number {
@@ -555,4 +663,10 @@ function fmtTps(v: number): string {
   if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
   if (v >= 1e3) return `${Math.round(v / 1e3)}K`;
   return String(Math.round(v));
+}
+
+function fmtDurShort(ms: number): string {
+  if (ms >= 3_600_000) return `${+(ms / 3_600_000).toFixed(1)}h`;
+  if (ms >= 60_000) return `${+(ms / 60_000).toFixed(1)}m`;
+  return `${Math.round(ms / 1000)}s`;
 }

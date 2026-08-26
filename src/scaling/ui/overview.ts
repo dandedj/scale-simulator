@@ -74,6 +74,11 @@ const POLICY = {
   body: 'Each decision computes newDesired = max(what has already been requested, the capacity the policy counts + the adjustment). Target tracking\u2019s adjustment is the gap to the capacity that holds utilization at target; step scaling reads it off a ladder keyed on breach depth; simple scaling uses one fixed number. The capacity the policy counts excludes anything still baking, which is what stops two breaches of the same size from launching the same capacity twice — and what makes the bake, not the cooldown, the thing that paces a target-tracking or step policy. AWS accepts a Cooldown only on simple scaling.',
 };
 
+const TIMELINE = {
+  title: 'Reading the run back',
+  body: 'The board and charts show the present; ⧗ TIMELINE (single mode) shows the whole run on one axis. Demand brackets mark when throughput was offered and over how long — the scheduled ramp, every triggered ▲ RAMP, every ◉ SURGE. Scale-out markers sit at the moment each scaling activity fired, sized by the instances it launched, so the cadence the bake imposes shows up as the gaps between them. Below-SLO stretches are shaded behind everything and totalled in the header, and hovering reports the demand, capacity, availability and events at that moment.',
+};
+
 const READOUT = {
   title: 'The scale-rate readout',
   body: 'Recover time = from the first SLO breach until usable capacity catches demand. Effective add-rate = demand added ÷ recover time. Decision interval = pipeline + bake (plus the cooldown, for simple scaling) — how often a scale-out can build on the last one. Max sustainable ramp = max step × capacity ÷ decision interval (the throughput ceiling). Pipeline latency = detection + Σ per-instance stages (the floor before any new capacity lands). Overshoot = instances beyond what the peak demand needed at target. Lost req = the integral of (offered − served) — the area of the dip.',
@@ -160,6 +165,7 @@ export class ScalingOverview {
     parts.push('<div class="ov-panels">');
     parts.push(`<div class="ov-panel ov-engine"><h3>${POLICY.title}</h3><p>${POLICY.body}</p></div>`);
     parts.push(`<div class="ov-panel"><h3>${READOUT.title}</h3><p>${READOUT.body}</p></div>`);
+    parts.push(`<div class="ov-panel"><h3>${TIMELINE.title}</h3><p>${TIMELINE.body}</p></div>`);
     const items = ASSUMPTIONS.map((a) => `<li>${a}</li>`).join('');
     parts.push(`<div class="ov-panel"><h3>Modeling assumptions</h3><ul class="ov-assume">${items}</ul></div>`);
     parts.push('</div>');

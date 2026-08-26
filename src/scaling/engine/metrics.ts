@@ -11,6 +11,8 @@ import type { ScalingMetricsBucket, ScalingSimEventLog } from './types';
 export const BUCKET_MS = 2000;
 export const HISTORY_MS = 7_200_000;
 const MAX_BUCKETS = Math.ceil(HISTORY_MS / BUCKET_MS);
+/** Event retention — the ticker shows the tail, the timeline pane plots them all. */
+const MAX_EVENTS = 500;
 
 /** The piecewise-constant rate field (TPS) integrated between events. */
 export interface ScalingRates {
@@ -84,10 +86,16 @@ export class ScalingMetricsCollector {
     }
   }
 
-  log(time: number, severity: ScalingSimEventLog['severity'], message: string): void {
-    this.events.push({ time, severity, message });
+  log(
+    time: number,
+    severity: ScalingSimEventLog['severity'],
+    kind: ScalingSimEventLog['kind'],
+    message: string,
+    value?: number,
+  ): void {
+    this.events.push({ time, severity, kind, message, value });
     this.totalLogged++;
-    if (this.events.length > 200) this.events.shift();
+    if (this.events.length > MAX_EVENTS) this.events.shift();
   }
 
   /** Rolling availability (served ÷ offered) over the last windowMs of closed buckets. */

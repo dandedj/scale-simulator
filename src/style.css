@@ -771,6 +771,32 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
+/* Rows whose value can be typed exactly, not just dragged to the nearest step. */
+.knob-entry {
+  width: 72px;
+  padding: 1px 4px;
+  text-align: right;
+  font-family: var(--font-mono);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  cursor: text;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
+}
+
+.knob-entry:hover {
+  border-color: var(--border);
+}
+
+.knob-entry:focus {
+  outline: none;
+  color: var(--text);
+  background: var(--panel-raised);
+  border-color: var(--info);
+}
+
 .knob-meta {
   display: flex;
   align-items: center;
@@ -1639,6 +1665,24 @@ input[type='range']::-moz-range-thumb {
 }
 
 /* ---------- DNS distribution mode ---------- */
+
+/* The annotated run timeline: a full-stage-width strip under the panes. */
+.timeline-pane {
+  height: 178px;
+  flex-shrink: 0;
+  margin: 0 10px 10px;
+}
+
+.timeline-pane.hidden {
+  display: none;
+}
+
+.timeline-pane canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+}
 
 /* Rows a control group hides when they don't apply to the selected policy. */
 .knob-row.hidden {

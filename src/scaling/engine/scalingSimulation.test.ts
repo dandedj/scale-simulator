@@ -263,6 +263,56 @@ describe('policy arithmetic', () => {
   });
 });
 
+describe('timeline', () => {
+  it('brackets the scheduled ramp, and extends the axis to it before the run starts', () => {
+    const sim = newSim();
+    const v = sim.timelineView();
+    expect(v.nowMs).toBe(0);
+    const ramp = v.spans.find((s) => s.kind === 'ramp');
+    expect(ramp).toBeDefined();
+    expect(ramp!.startMs).toBe(15_000);
+    expect(ramp!.endMs).toBe(75_000); // rampStart + rampDuration
+    expect(ramp!.amountTps).toBe(1_000_000);
+  });
+
+  it('records a triggered ramp and a surge as spans, in time order', () => {
+    const sim = newSim((c) => (c.traffic.shape = 'steady'));
+    run(sim, 30_000);
+    sim.triggerRamp(500_000, 60_000);
+    run(sim, 30_000);
+    sim.triggerSurge(2, 20_000);
+    run(sim, 60_000);
+    const spans = sim.timelineView().spans;
+    expect(spans.map((s) => s.kind)).toEqual(['ramp', 'surge']);
+    expect(spans[0].startMs).toBe(30_000);
+    expect(spans[0].endMs).toBe(90_000);
+    // The surge span keeps its window after it ends, so the run stays readable.
+    expect(spans[1].endMs).toBe(80_000);
+  });
+
+  it('reports below-SLO stretches as breach spans', () => {
+    const sim = newSim();
+    run(sim, 900_000);
+    const { breaches } = sim.timelineView();
+    expect(breaches.length).toBeGreaterThan(0);
+    const worst = breaches.reduce((a, b) => (b.minAvailability < a.minAvailability ? b : a));
+    expect(worst.minAvailability).toBeLessThan(sim.cfg.slaTarget);
+    expect(worst.endMs).toBeGreaterThan(worst.startMs);
+    // Every span sits inside the run and none overlap.
+    for (let i = 1; i < breaches.length; i++) expect(breaches[i].startMs).toBeGreaterThanOrEqual(breaches[i - 1].endMs);
+  });
+
+  it('tags events by kind and carries the instances each scale-out added', () => {
+    const sim = newSim();
+    run(sim, 900_000);
+    const events = sim.timelineView().events;
+    const scale = events.filter((e) => e.kind === 'scale');
+    expect(scale.length).toBe(sim.metrics.totals.launches);
+    expect(scale.reduce((a, e) => a + (e.value ?? 0), 0)).toBe(sim.metrics.totals.instancesLaunched);
+    expect(events.some((e) => e.kind === 'slo')).toBe(true);
+  });
+});
+
 describe('playback determinism', () => {
   it('availability is identical regardless of step granularity', () => {
     const build = () => new ScalingSimulation(cloneScalingConfig(baseConfig()));
