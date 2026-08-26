@@ -50,6 +50,9 @@ export class Shell {
 
   private appEl = document.getElementById('app')!;
   private modeSwitchEl = document.getElementById('mode-switch')!;
+  private modeTrigger: HTMLButtonElement | null = null;
+  private modeMenu: HTMLElement | null = null;
+  private modeMenuOpen = false;
   private startGate = document.getElementById('start-gate')!;
   private startBtn = document.getElementById('start-btn')!;
   private startHint = document.getElementById('start-hint')!;
@@ -112,15 +115,57 @@ export class Shell {
     });
   }
 
+  /**
+   * The mode switch is a collapsed nav rather than a row of tabs: which
+   * simulator you are in is a different kind of choice from the per-mode
+   * controls beside it, and three always-on tabs made the header read as one
+   * undifferentiated strip. The trigger names the current mode, so the state is
+   * still visible with the menu shut.
+   */
   private buildModeSwitch(): void {
+    const trigger = document.createElement('button');
+    trigger.className = 'btn mode-trigger';
+    trigger.setAttribute('aria-haspopup', 'menu');
+    trigger.setAttribute('aria-expanded', 'false');
+    trigger.title = 'Switch simulator';
+    this.modeTrigger = trigger;
+
+    const menu = document.createElement('div');
+    menu.className = 'mode-menu';
+    menu.setAttribute('role', 'menu');
     for (const def of EXPERIENCES) {
-      const btn = document.createElement('button');
-      btn.className = 'btn mode-tab';
-      btn.textContent = def.label;
-      btn.addEventListener('click', () => this.switchTo(def.id));
-      this.modeTabs.set(def.id, btn);
-      this.modeSwitchEl.appendChild(btn);
+      const item = document.createElement('button');
+      item.className = 'mode-item';
+      item.setAttribute('role', 'menuitem');
+      item.innerHTML = `<span class="mode-item-label">${def.label}</span><span class="mode-item-sub">${def.subtitle}</span>`;
+      item.addEventListener('click', () => {
+        this.setModeMenu(false);
+        this.switchTo(def.id);
+      });
+      this.modeTabs.set(def.id, item);
+      menu.appendChild(item);
     }
+    this.modeMenu = menu;
+
+    trigger.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.setModeMenu(!this.modeMenuOpen);
+    });
+    // Any click elsewhere, or Escape, closes it.
+    document.addEventListener('click', () => this.setModeMenu(false));
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.modeMenuOpen) this.setModeMenu(false);
+    });
+    menu.addEventListener('click', (e) => e.stopPropagation());
+
+    this.modeSwitchEl.append(trigger, menu);
+  }
+
+  private setModeMenu(open: boolean): void {
+    this.modeMenuOpen = open;
+    this.modeMenu?.classList.toggle('open', open);
+    this.modeTrigger?.classList.toggle('active', open);
+    this.modeTrigger?.setAttribute('aria-expanded', String(open));
   }
 
   private mountExperience(def: ExperienceDef): void {
@@ -148,6 +193,8 @@ export class Shell {
 
   private syncModeTabs(): void {
     for (const [id, btn] of this.modeTabs) btn.classList.toggle('active', id === this.activeId);
+    const def = EXPERIENCES.find((d) => d.id === this.activeId);
+    if (this.modeTrigger && def) this.modeTrigger.textContent = `☰  ${def.label}`;
   }
 
   private setPaused(p: boolean): void {

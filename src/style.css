@@ -124,27 +124,76 @@ body {
 
 /* ---------- Mode switch (Connection Storm / DNS Distribution) ---------- */
 
+/* The simulator switch: a collapsed nav, kept visually distinct from the
+   per-mode controls that sit beside it in the header. */
 #mode-switch {
-  display: flex;
-  gap: 6px;
+  position: relative;
   flex-shrink: 0;
+  padding-right: 14px;
+  border-right: 1px solid var(--border);
 }
 
-.mode-tab {
-  font-size: 12px;
-  padding: 6px 11px;
-  opacity: 0.7;
+.mode-trigger {
+  white-space: nowrap;
 }
 
-.mode-tab:hover {
-  opacity: 1;
+.mode-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  display: none;
+  flex-direction: column;
+  min-width: 240px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
 }
 
-.mode-tab.active {
-  opacity: 1;
-  background: var(--info);
-  color: #0a0b0e;
+.mode-menu.open {
+  display: flex;
+}
+
+.mode-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 7px 9px;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.mode-item:hover {
+  background: var(--panel-raised);
+  border-color: var(--border);
+}
+
+.mode-item.active {
+  background: var(--panel-raised);
   border-color: var(--info);
+}
+
+.mode-item-label {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.mode-item.active .mode-item-label {
+  color: var(--info);
+}
+
+.mode-item-sub {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-faint);
 }
 
 .btn-pulse {

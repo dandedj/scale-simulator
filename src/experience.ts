@@ -2,7 +2,8 @@
  * The shell/experience seam.
  *
  * The app hosts two independent simulators — the connection storm and the DNS
- * load-distribution model — and switches between them with a header mode toggle.
+ * load-distribution model, and the autoscaling ramp-up model — and switches
+ * between them with the collapsed ☰ nav in the header.
  * Each is a self-contained `Experience` that builds its own stage + control DOM;
  * the single `Shell` (shell.ts) owns the one requestAnimationFrame loop, the
  * time-dilation clock, the pause/start-gate, and the mode switch, and drives
