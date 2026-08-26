@@ -62,6 +62,8 @@ export class ScalingExperience implements Experience {
   private timelineEl!: HTMLElement;
   private timeline: ScalingTimeline | null = null;
   private timelineOpen = false;
+  private timelineMax = false;
+  private onKeyDown!: (e: KeyboardEvent) => void;
 
   mount(hosts: ExperienceHosts, playback: PlaybackController): void {
     this.hosts = hosts;
@@ -108,7 +110,8 @@ export class ScalingExperience implements Experience {
 
   unmount(): void {
     this.controls.destroy();
-    this.appEl.classList.remove('compare');
+    window.removeEventListener('keydown', this.onKeyDown);
+    this.appEl.classList.remove('compare', 'timeline-max');
     this.timeline?.destroy();
     this.timelineEl.remove();
     this.helpEl.remove();
@@ -123,6 +126,12 @@ export class ScalingExperience implements Experience {
   }
 
   render(): void {
+    if (this.timelineMax) {
+      this.timeline?.draw(this.panes[0].sim);
+      this.controls.update();
+      this.updateHud();
+      return;
+    }
     for (const p of this.panes) p.renderer.draw(p.sim);
     if (this.compare && this.panes.length === 2) {
       // Share a y-axis per chart so magnitude differences between the two
@@ -141,9 +150,11 @@ export class ScalingExperience implements Experience {
   }
 
   resize(): void {
-    for (const p of this.panes) {
-      p.renderer.resize();
-      p.charts.resize();
+    if (!this.timelineMax) {
+      for (const p of this.panes) {
+        p.renderer.resize();
+        p.charts.resize();
+      }
     }
     this.timeline?.resize();
   }
@@ -173,9 +184,16 @@ export class ScalingExperience implements Experience {
     this.timelineEl = el('div', 'timeline-pane hidden');
     this.timelineEl.id = 'scaling-timeline';
     const canvas = document.createElement('canvas');
-    this.timelineEl.appendChild(canvas);
+    const maxBtn = el('button', 'timeline-max-btn', '⤢') as HTMLButtonElement;
+    maxBtn.title = 'Maximize the timeline (Esc to restore)';
+    maxBtn.addEventListener('click', () => this.setTimelineMax(!this.timelineMax));
+    this.timelineEl.append(canvas, maxBtn);
     this.hosts.stageCol.appendChild(this.timelineEl);
     this.timeline = new ScalingTimeline(canvas);
+    this.onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && this.timelineMax) this.setTimelineMax(false);
+    };
+    window.addEventListener('keydown', this.onKeyDown);
   }
 
   private setTimelineOpen(on: boolean): void {
@@ -183,8 +201,18 @@ export class ScalingExperience implements Experience {
     this.timelineOpen = on && !this.compare;
     this.timelineEl.classList.toggle('hidden', !this.timelineOpen);
     this.controls?.setTimelineUI(this.timelineOpen);
-    if (this.timelineOpen) this.timeline?.resize();
+    if (!this.timelineOpen) this.setTimelineMax(false);
     // The panes lose height to the timeline, so every canvas needs re-measuring.
+    this.resize();
+  }
+
+  /** Hand the whole stage to the timeline — the board and charts step aside. */
+  private setTimelineMax(on: boolean): void {
+    this.timelineMax = on && this.timelineOpen;
+    this.appEl.classList.toggle('timeline-max', this.timelineMax);
+    this.timelineEl.classList.toggle('maximized', this.timelineMax);
+    const btn = this.timelineEl.querySelector('.timeline-max-btn');
+    if (btn) btn.textContent = this.timelineMax ? '⤡' : '⤢';
     this.resize();
   }
 

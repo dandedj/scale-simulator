@@ -25,7 +25,10 @@ import { EventQueue, type ScheduledEvent } from '../../engine/eventQueue';
 import { BUCKET_MS, type ScalingGauges, ScalingMetricsCollector, type ScalingRates } from './metrics';
 import {
   PIPELINE_STAGES,
+  type ScalingAlarmSpan,
+  type ScalingBatch,
   type ScalingBreachSpan,
+  type ScalingDecision,
   type ScalingDemandSpan,
   type ScalingDemandView,
   type ScalingInstanceView,
@@ -105,6 +108,10 @@ export class ScalingSimulation {
   /** Last time the policy evaluated a datapoint (fired or not). */
   private lastDecisionAt = -Infinity;
   private peakOfferedTps = 0;
+  /** Launched batches with their pipeline plans — the timeline's Gantt rows. */
+  private batches: ScalingBatch[] = [];
+  /** Alarm windows: when the metric went over target, and when it fired. */
+  private alarms: ScalingAlarmSpan[] = [];
 
   // Scale-event readout tracking.
   private eventStart = -1;
@@ -224,8 +231,16 @@ export class ScalingSimulation {
     // in-service instance carries load, baking or not.
     const util = offered / Math.max(1, this.usableCapacityTps());
     if (util > target) {
-      if (this.breachSince < 0) this.breachSince = this.now;
+      if (this.breachSince < 0) {
+        this.breachSince = this.now;
+        this.alarms.push({
+          startMs: this.now,
+          firedAtMs: this.now + c.stages.detectionMs,
+          endMs: Infinity,
+        });
+      }
     } else {
+      if (this.breachSince >= 0) this.closeAlarm();
       this.breachSince = -1;
       return;
     }
@@ -241,9 +256,11 @@ export class ScalingSimulation {
 
     this.lastDecisionAt = this.now;
     const tier = this.stepTier(util / target - 1);
-    const n = this.scaleOutSize(util, tier);
+    const decision = this.decide(util, tier);
+    const n = decision.launched;
     if (n <= 0) return;
     for (let i = 0; i < n; i++) this.launchInstance();
+    this.recordBatch(n, decision);
     this.lastLaunchAt = this.now;
     this.metrics.totals.launches++;
     this.metrics.totals.instancesLaunched += n;
@@ -258,17 +275,28 @@ export class ScalingSimulation {
   }
 
   /**
-   * Instances to launch now. `metered` is the capacity the policy scales from —
-   * in-service instances past their bake — while `currentDesired` counts
-   * everything already requested, so capacity in flight is never re-requested.
+   * Work out this step, keeping every intermediate so the timeline can explain
+   * it. `metered` is the capacity the policy scales from — in-service instances
+   * past their bake — while `currentDesired` counts everything already
+   * requested, so capacity in flight is never re-requested.
    */
-  private scaleOutSize(util: number, tier: number): number {
+  private decide(util: number, tier: number): ScalingDecision {
     const c = this.cfg;
     const p = c.policy;
     const currentDesired = this.instances.length;
-    const room = c.launch.maxInstances - currentDesired;
-    if (room <= 0) return 0;
     const metered = this.meteredInstances();
+    const base: Omit<ScalingDecision, 'want' | 'newDesired' | 'launched' | 'clampedBy'> = {
+      timeMs: this.now,
+      policy: p.type,
+      utilization: util,
+      targetUtilization: c.capacity.targetUtilization,
+      metered,
+      currentDesired,
+      tier: p.type === 'step' ? tier : null,
+      adjustment: p.type === 'step' ? (p.steps[tier]?.adjustment ?? 0) : p.type === 'simple' ? p.simpleAdjustment : null,
+      adjustmentType: p.type === 'target-tracking' ? null : p.adjustmentType,
+      gain: p.type === 'target-tracking' ? p.scaleOutGain : null,
+    };
 
     let want: number;
     if (p.type === 'target-tracking') {
@@ -276,13 +304,54 @@ export class ScalingSimulation {
       want = metered * (util / c.capacity.targetUtilization) * p.scaleOutGain;
     } else {
       const from = p.type === 'simple' ? currentDesired : metered;
-      const adj = p.type === 'simple' ? p.simpleAdjustment : (p.steps[tier]?.adjustment ?? 0);
+      const adj = base.adjustment ?? 0;
       want = from + (p.adjustmentType === 'percent-change-in-capacity' ? roundPercentAdjustment(from, adj) : adj);
     }
     const newDesired = Math.max(currentDesired, Math.ceil(want - 1e-9));
-    const n = newDesired - currentDesired;
-    if (n <= 0) return 0;
-    return Math.min(Math.max(n, c.launch.minStepSize), c.launch.maxStepSize, room);
+    const asked = newDesired - currentDesired;
+    const room = c.launch.maxInstances - currentDesired;
+    let launched = asked;
+    let clampedBy: ScalingDecision['clampedBy'] = null;
+    if (launched > 0) {
+      if (launched < c.launch.minStepSize) {
+        launched = c.launch.minStepSize;
+        clampedBy = 'min step';
+      }
+      if (launched > c.launch.maxStepSize) {
+        launched = c.launch.maxStepSize;
+        clampedBy = 'max step';
+      }
+      if (launched > room) {
+        launched = Math.max(0, room);
+        clampedBy = 'fleet ceiling';
+      }
+    } else {
+      launched = 0;
+    }
+    return { ...base, want, newDesired, launched, clampedBy };
+  }
+
+  /** Capture the batch's whole pipeline plan — every boundary is known at launch. */
+  private recordBatch(count: number, decision: ScalingDecision): void {
+    const c = this.cfg;
+    const stageEndsAt: number[] = [];
+    let t = this.now;
+    for (const stage of PIPELINE_STAGES) {
+      t += c.stages[stage.key];
+      stageEndsAt.push(t);
+    }
+    const inServiceAt = t;
+    const countedAt = (c.launch.warmupMode === 'ecs' ? this.now : inServiceAt) + c.launch.bakeMs;
+    this.batches.push({ launchedAt: this.now, count, stageEndsAt, inServiceAt, countedAt, decision });
+  }
+
+  private closeAlarm(): void {
+    const open = this.alarms[this.alarms.length - 1];
+    if (open && open.endMs === Infinity) {
+      open.endMs = this.now;
+      // It cleared before the alarm ever fired — a breach that never scaled.
+      if (open.firedAtMs > this.now) open.firedAtMs = -1;
+    }
   }
 
   /**
@@ -496,8 +565,13 @@ export class ScalingSimulation {
   timelineView(): ScalingTimelineView {
     return {
       nowMs: this.now,
+      metricPeriodMs: METRIC_PERIOD_MS,
       spans: this.demandSpans(),
       breaches: this.breachSpans(),
+      // The open alarm's end is unbounded until it clears; clip it to now so the
+      // renderer never has to reason about an infinity.
+      alarms: this.alarms.map((a) => ({ ...a, endMs: Math.min(a.endMs, this.now) })),
+      batches: this.batches,
       events: this.metrics.events,
     };
   }

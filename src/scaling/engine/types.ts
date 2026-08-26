@@ -319,11 +319,72 @@ export interface ScalingBreachSpan {
   minAvailability: number;
 }
 
+/** A stretch where the alarm metric sat above target, and when it fired. */
+export interface ScalingAlarmSpan {
+  /** When utilization first crossed the target. */
+  startMs: number;
+  /** startMs + detection: when the alarm actually fired. -1 if it cleared first. */
+  firedAtMs: number;
+  /** When utilization fell back to target; the run's end while still breaching. */
+  endMs: number;
+}
+
+/**
+ * The arithmetic behind one scale-out, kept so the timeline can show *why* a
+ * step was the size it was rather than just that it happened.
+ */
+export interface ScalingDecision {
+  timeMs: number;
+  policy: ScalingPolicyType;
+  utilization: number;
+  targetUtilization: number;
+  /** In-service instances past their bake — the capacity the policy scales from. */
+  metered: number;
+  /** Everything already requested, in flight included. */
+  currentDesired: number;
+  /** What the policy's arithmetic asked for, before any clamp. */
+  want: number;
+  /** max(currentDesired, ceil(want)) — the capacity it settled on. */
+  newDesired: number;
+  /** Instances actually launched, after the step clamps and the fleet ceiling. */
+  launched: number;
+  /** Which limit bound the step, if any did. */
+  clampedBy: 'min step' | 'max step' | 'fleet ceiling' | null;
+  /** Step scaling only: the rung that fired. */
+  tier: number | null;
+  /** The adjustment applied, for step and simple policies. */
+  adjustment: number | null;
+  adjustmentType: ScalingAdjustmentType | null;
+  /** Target tracking only: the multiplier on the computed capacity. */
+  gain: number | null;
+}
+
+/**
+ * One launched batch, with the pipeline plan it will follow. Stage durations are
+ * fixed and deterministic at launch, so every boundary is known up front — which
+ * is what lets the timeline draw the whole scale process as a Gantt row.
+ */
+export interface ScalingBatch {
+  launchedAt: number;
+  count: number;
+  /** Absolute end time of each PIPELINE_STAGES entry, in order. */
+  stageEndsAt: number[];
+  /** When the batch finished the pipeline and began serving. */
+  inServiceAt: number;
+  /** When its bake expires and the autoscaler starts counting it. */
+  countedAt: number;
+  decision: ScalingDecision;
+}
+
 /** Everything the timeline pane draws for one run. */
 export interface ScalingTimelineView {
   /** Right edge — the current sim time. */
   nowMs: number;
+  /** How often the scaling metric is published (ms) — the decision floor. */
+  metricPeriodMs: number;
   spans: ScalingDemandSpan[];
   breaches: ScalingBreachSpan[];
+  alarms: ScalingAlarmSpan[];
+  batches: ScalingBatch[];
   events: ScalingSimEventLog[];
 }

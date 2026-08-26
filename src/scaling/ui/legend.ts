@@ -4,7 +4,7 @@
  * demand-vs-capacity meter.
  */
 
-import { SEMANTIC } from '../../render/colors';
+import { SEMANTIC, SURFACE } from '../../render/colors';
 
 const S = 22;
 const c = S / 2;
@@ -44,11 +44,20 @@ function bracket(): string {
       `<line x1="19" y1="${c - 4}" x2="19" y2="${c + 4}" stroke="${SEMANTIC.timeout}" stroke-width="2"/>`,
   );
 }
-function markers(): string {
+function gantt(): string {
   return svg(
-    ([[4, 6], [9, 12], [14, 4], [18, 9]] as const)
-      .map(([x, hgt]) => `<rect x="${x}" y="${S - 4 - hgt}" width="2.5" height="${hgt}" fill="${SEMANTIC.inFlight}"/>`)
-      .join(''),
+    `<rect x="2" y="${c - 5}" width="6" height="5" fill="${alpha(SEMANTIC.inFlight, 0.85)}"/>` +
+      `<rect x="8" y="${c - 5}" width="5" height="5" fill="${alpha(SEMANTIC.inFlight, 0.55)}"/>` +
+      `<rect x="13" y="${c - 5}" width="4" height="5" fill="${alpha(SEMANTIC.success, 0.85)}"/>` +
+      `<rect x="2" y="${c + 1}" width="14" height="2.5" fill="${alpha(SEMANTIC.retry, 0.8)}"/>` +
+      `<line x1="17" y1="${c - 2.5}" x2="20" y2="${c - 2.5}" stroke="${alpha(SEMANTIC.success, 0.6)}" stroke-width="1"/>`,
+  );
+}
+function alarmBar(): string {
+  return svg(
+    `<rect x="2" y="${c - 4}" width="6" height="5" fill="${alpha(SEMANTIC.shed, 0.8)}"/>` +
+      `<rect x="8" y="${c - 4}" width="12" height="5" fill="${alpha(SEMANTIC.timeout, 0.8)}"/>` +
+      [3, 8, 13, 18].map((x) => `<rect x="${x}" y="${c + 3}" width="1" height="4" fill="${alpha(SEMANTIC.tlsPulse, 0.6)}"/>`).join(''),
   );
 }
 function breachBand(): string {
@@ -101,7 +110,9 @@ const SECTIONS: Section[] = [
     title: 'Timeline (⧗, single mode)',
     entries: [
       { swatch: bracket(), label: 'Demand bracket', detail: 'One demand change, spanning the time over which it arrived: the scheduled ramp in orange, a step in amber, a ◉ SURGE window in pink. An instant step draws as a caret instead. This is when the throughput was offered.' },
-      { swatch: markers(), label: 'Scale-out markers', detail: 'One bar per scale-out at the moment it fired, its height set by how many instances that step launched. Clustered bars mean the policy kept ordering; a long flat gap is a bake.' },
+      { swatch: gantt(), label: 'Scale-out row', detail: 'One Gantt row per scaling activity: the pipeline stage by stage (green where the instance becomes serving), the bake as a bar beneath it, then a hairline from the point the batch starts counting as capacity. Under ECS rules the bake starts at the launch and runs alongside the stages; under ASG rules it follows them.' },
+      { swatch: alarmBar(), label: 'Alarm lane', detail: 'Amber while the breach is accumulating datapoints, red once the alarm has fired — the amber stretch is the detection lag. Below it, a tick per metric publish: nothing can be decided between two of them.' },
+      { swatch: tile(alpha(SURFACE.text, 0.5)), label: 'Row hover', detail: 'Hovering a scale-out row shows why it chose that size — the metric it measured, the capacity it scaled from, the policy arithmetic, the netting against what was already requested, any clamp that bound it, and when the capacity lands and starts counting.' },
       { swatch: breachBand(), label: 'Below-SLO band', detail: 'A red band marks every stretch where availability sat under the SLO; the header totals them. Hovering anywhere drops a cursor and reports the demand, capacity, availability and events at that moment.' },
     ],
   },

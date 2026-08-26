@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import { baseConfig, cloneScalingConfig, SCALING_PRESETS, scalingPresetById } from './presets';
 import { ScalingSimulation } from './scalingSimulation';
-import type { ScalingSimulationConfig } from './types';
+import { PIPELINE_STAGES, type ScalingSimulationConfig } from './types';
 
 function run(sim: ScalingSimulation, durationMs: number, stepMs = 1000): void {
   let elapsed = 0;
@@ -349,6 +349,46 @@ describe('timeline', () => {
     expect(worst.endMs).toBeGreaterThan(worst.startMs);
     // Every span sits inside the run and none overlap.
     for (let i = 1; i < breaches.length; i++) expect(breaches[i].startMs).toBeGreaterThanOrEqual(breaches[i - 1].endMs);
+  });
+
+  it('records every scale-out as a batch with its full pipeline plan', () => {
+    const sim = newSim();
+    run(sim, 900_000);
+    const { batches } = sim.timelineView();
+    expect(batches.length).toBe(sim.metrics.totals.launches);
+    for (const b of batches) {
+      expect(b.stageEndsAt.length).toBe(PIPELINE_STAGES.length);
+      // Stage boundaries ascend and land exactly on the pipeline total.
+      for (let i = 1; i < b.stageEndsAt.length; i++) expect(b.stageEndsAt[i]).toBeGreaterThan(b.stageEndsAt[i - 1]);
+      expect(b.inServiceAt).toBe(b.stageEndsAt[b.stageEndsAt.length - 1]);
+      // ECS times the bake from the launch, so it can expire before the batch lands.
+      expect(b.countedAt).toBe(b.launchedAt + sim.cfg.launch.bakeMs);
+    }
+  });
+
+  it('keeps the arithmetic behind each scale-out, and it reconciles', () => {
+    const sim = newSim();
+    run(sim, 900_000);
+    for (const b of sim.timelineView().batches) {
+      const d = b.decision;
+      expect(d.launched).toBe(b.count);
+      expect(d.newDesired).toBe(Math.max(d.currentDesired, Math.ceil(d.want - 1e-9)));
+      // Target tracking's own formula, recomputed from the recorded inputs.
+      expect(d.want).toBeCloseTo(d.metered * (d.utilization / d.targetUtilization) * (d.gain ?? 1), 6);
+      // A step is either exactly what was asked for, or it names the clamp.
+      const asked = d.newDesired - d.currentDesired;
+      if (d.launched !== asked) expect(d.clampedBy).not.toBeNull();
+    }
+  });
+
+  it('reports alarm windows, with the detection lag before each firing', () => {
+    const sim = newSim();
+    run(sim, 900_000);
+    const { alarms } = sim.timelineView();
+    expect(alarms.length).toBeGreaterThan(0);
+    const fired = alarms.filter((a) => a.firedAtMs >= 0);
+    expect(fired.length).toBeGreaterThan(0);
+    for (const a of fired) expect(a.firedAtMs - a.startMs).toBe(sim.cfg.stages.detectionMs);
   });
 
   it('tags events by kind and carries the instances each scale-out added', () => {

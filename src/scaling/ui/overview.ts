@@ -81,7 +81,7 @@ const POLICY = {
 
 const TIMELINE = {
   title: 'Reading the run back',
-  body: 'The board and charts show the present; ⧗ TIMELINE (single mode) shows the whole run on one axis. Demand brackets mark when throughput was offered and over how long — the scheduled ramp, every triggered ▲ RAMP, every ◉ SURGE. Scale-out markers sit at the moment each scaling activity fired, sized by the instances it launched, so the cadence the bake imposes shows up as the gaps between them. Below-SLO stretches are shaded behind everything and totalled in the header, and hovering reports the demand, capacity, availability and events at that moment.',
+  body: 'The board and charts show the present; ⧗ TIMELINE (single mode) shows the whole run on one axis, and ⤢ hands it the entire stage. Demand brackets mark when throughput was offered and over how long. An alarm lane runs amber while a breach accumulates datapoints and red once it fires, so the detection lag is literal. Each scaling activity gets a Gantt row covering the whole scale process — every pipeline stage, the bake beneath it, and the point the batch starts counting as capacity — and hovering that row shows why the step was the size it was: the metric measured, the capacity scaled from, the policy arithmetic, the netting against what was already requested, any clamp that bound it, and when the capacity lands. A tick lane marks every metric publish, since nothing can be decided between two of them.',
 };
 
 const READOUT = {

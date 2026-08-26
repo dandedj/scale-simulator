@@ -1666,8 +1666,10 @@ input[type='range']::-moz-range-thumb {
 
 /* ---------- DNS distribution mode ---------- */
 
-/* The annotated run timeline: a full-stage-width strip under the panes. */
+/* The annotated run timeline: a full-stage-width strip under the panes, or the
+   whole stage once maximized. */
 .timeline-pane {
+  position: relative;
   height: 178px;
   flex-shrink: 0;
   margin: 0 10px 10px;
@@ -1677,11 +1679,46 @@ input[type='range']::-moz-range-thumb {
   display: none;
 }
 
+/* Maximized: the panes step aside and the timeline takes the column. */
+.timeline-pane.maximized {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+  margin-top: 10px;
+}
+
+#app.timeline-max #panes {
+  display: none;
+}
+
 .timeline-pane canvas {
   display: block;
   width: 100%;
   height: 100%;
   cursor: crosshair;
+}
+
+.timeline-max-btn {
+  position: absolute;
+  top: 5px;
+  right: 8px;
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--text-dim);
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
+}
+
+.timeline-max-btn:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
 }
 
 /* Rows a control group hides when they don't apply to the selected policy. */
