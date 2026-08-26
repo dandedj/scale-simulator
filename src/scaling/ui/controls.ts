@@ -617,8 +617,7 @@ export class ScalingControlPanel {
     this.compareBtn.addEventListener('click', () => this.hooks.setCompare(!this.hooks.isCompare()));
     wrap.appendChild(this.compareBtn);
 
-    // Single mode only: two panes on one shared axis would misrepresent both.
-    this.timelineBtn = el('button', 'btn single-only', '⧗ TIMELINE') as HTMLButtonElement;
+    this.timelineBtn = el('button', 'btn', '⧗ TIMELINE') as HTMLButtonElement;
     this.timelineBtn.title = 'Open an annotated timeline of the run — when demand was offered, and what the fleet did about it';
     this.timelineBtn.addEventListener('click', () => this.hooks.setTimelineOpen(!this.hooks.isTimelineOpen()));
     wrap.appendChild(this.timelineBtn);

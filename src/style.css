@@ -581,6 +581,12 @@ main {
   height: 84px;
 }
 
+/* With a timeline per pane as well, the boards give up more height — the
+   renderer drops its pipeline column once the board gets this short. */
+#app.compare.timeline-open .pane-stage {
+  min-height: 150px;
+}
+
 /* Narrow screens: one row of eight would be unreadable, so let them wrap. */
 @media (max-width: 1080px) {
   #app:not(.compare) .pane-charts {
@@ -1772,29 +1778,34 @@ input[type='range']::-moz-range-thumb {
 
 /* ---------- DNS distribution mode ---------- */
 
-/* The annotated run timeline: a full-stage-width strip under the panes, or the
-   whole stage once maximized. */
+/* The annotated run timeline: one per pane, below that pane's charts. Both share
+   a window, so in comparison mode the two sit on the same axis. */
 .timeline-pane {
   position: relative;
+  display: none;
   height: 178px;
   flex-shrink: 0;
-  margin: 0 10px 10px;
 }
 
-.timeline-pane.hidden {
+#app.timeline-open .timeline-pane {
+  display: block;
+}
+
+/* Two panes have to share the column, so each timeline takes less. */
+#app.compare .timeline-pane {
+  height: 132px;
+}
+
+/* Maximized: the board and charts step aside and the timelines take the stage. */
+#app.timeline-max .pane-stage,
+#app.timeline-max .pane-charts {
   display: none;
 }
 
-/* Maximized: the panes step aside and the timeline takes the column. */
-.timeline-pane.maximized {
+#app.timeline-max .timeline-pane {
   flex: 1;
   height: auto;
   min-height: 0;
-  margin-top: 10px;
-}
-
-#app.timeline-max #panes {
-  display: none;
 }
 
 .timeline-pane canvas {

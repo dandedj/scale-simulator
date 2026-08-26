@@ -80,16 +80,14 @@ interface BatchRow {
   y1: number;
 }
 
-export class ScalingTimeline {
-  private canvas: HTMLCanvasElement;
-  private ctx: CanvasRenderingContext2D;
-  private cssW = 0;
-  private cssH = 0;
-  private hoverX: number | null = null;
-  private hoverY = 0;
-  private rows: BatchRow[] = [];
+/**
+ * The visible span and where it sits — pan, zoom, hold, fit-all. Held apart from
+ * the renderer so comparison mode's two timelines can share one window and stay
+ * on the same axis, and so the state machine is testable without a canvas.
+ */
+export class TimelineWindow {
   /** Visible span while windowed. */
-  private windowMs = DEFAULT_WINDOW_MS;
+  windowMs = DEFAULT_WINDOW_MS;
   /** Show the whole run on one axis instead of a fixed window. */
   private fitAll = false;
   /** Left edge of the window (sim ms); only meaningful when not following. */
@@ -102,6 +100,106 @@ export class ScalingTimeline {
    * to and re-pin the moment it arrived.
    */
   private held = false;
+  /** Rightmost time the window may reach; set from the view each frame. */
+  private contentEnd = 0;
+
+  isFollowing(): boolean {
+    return this.fitAll || (this.following && !this.held);
+  }
+
+  goLive(): void {
+    this.held = false;
+    this.following = true;
+  }
+
+  isHeld(): boolean {
+    return this.held;
+  }
+
+  setHeld(on: boolean): void {
+    if (on === this.held) return;
+    // Freeze from wherever the view is right now, live edge included.
+    if (on) this.windowStart = this.resolve(this.contentEnd);
+    this.held = on;
+    if (!on) this.following = true;
+  }
+
+  isFitAll(): boolean {
+    return this.fitAll;
+  }
+
+  setWindow(ms: number | 'all'): void {
+    if (ms === 'all') {
+      this.fitAll = true;
+      return;
+    }
+    // Keep the middle of the view put when the span changes under it.
+    const mid = this.windowStart + this.windowMs / 2;
+    this.fitAll = false;
+    this.windowMs = ms;
+    if (!this.following) this.windowStart = mid - ms / 2;
+  }
+
+  pageBy(fraction: number): void {
+    if (this.fitAll) return;
+    this.panBy(fraction * this.windowMs);
+  }
+
+  canPageBack(): boolean {
+    return !this.fitAll && this.windowStart > 0;
+  }
+
+  /** Zoom one stop, keeping whatever sits at `frac` across the plot put. */
+  zoom(dir: -1 | 1, frac: number): void {
+    if (this.fitAll) return;
+    const anchor = this.windowStart + frac * this.windowMs;
+    const i = WINDOW_STOPS.indexOf(this.windowMs);
+    const next = WINDOW_STOPS[clampInt(i + dir, 0, WINDOW_STOPS.length - 1)];
+    if (next === this.windowMs) return;
+    this.windowMs = next;
+    if (!this.following) this.windowStart = anchor - frac * next;
+  }
+
+  /** Scrolling away from the right edge drops the live pin. */
+  panBy(dtMs: number): void {
+    if (dtMs === 0 || this.fitAll) return;
+    if (this.following) this.windowStart = Math.max(0, this.contentEnd - this.windowMs);
+    this.following = false;
+    this.windowStart += dtMs;
+  }
+
+  /** Where the window sits this frame, given how far the run has reached. */
+  resolve(contentEnd: number): number {
+    this.contentEnd = contentEnd;
+    if (this.fitAll) {
+      this.windowMs = contentEnd;
+      this.windowStart = 0;
+      return 0;
+    }
+    const max = Math.max(0, contentEnd - this.windowMs);
+    if (this.held) {
+      // Held: stay put, but never past the end of what exists.
+      this.windowStart = Math.min(Math.max(0, this.windowStart), max);
+      return this.windowStart;
+    }
+    if (this.following) this.windowStart = max;
+    else this.windowStart = Math.min(Math.max(0, this.windowStart), max);
+    // Dragging back to the right edge re-pins, so the button isn't the only way.
+    if (!this.following && this.windowStart >= max - 1e-6) this.following = true;
+    return this.windowStart;
+  }
+}
+
+export class ScalingTimeline {
+  private canvas: HTMLCanvasElement;
+  private ctx: CanvasRenderingContext2D;
+  private cssW = 0;
+  private cssH = 0;
+  private hoverX: number | null = null;
+  private hoverY = 0;
+  private rows: BatchRow[] = [];
+  /** Shared with the other pane in comparison mode, so both stay on one axis. */
+  private win: TimelineWindow;
   /** Plot geometry from the last draw, so pointer deltas can be read as time. */
   private geom = { plotX: 10, plotW: 1 };
   /** Right-hand space the DOM control bar occupies, so the header clears it. */
@@ -113,22 +211,23 @@ export class ScalingTimeline {
   private onUp: (e: PointerEvent) => void;
   private onWheel: (e: WheelEvent) => void;
 
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(canvas: HTMLCanvasElement, win: TimelineWindow) {
     this.canvas = canvas;
+    this.win = win;
     this.ctx = canvas.getContext('2d')!;
     this.onMove = (e: PointerEvent) => {
       const rect = this.canvas.getBoundingClientRect();
       this.hoverX = e.clientX - rect.left;
       this.hoverY = e.clientY - rect.top;
       const d = this.dragging;
-      if (d && e.pointerId === d.pointerId && !this.fitAll) {
+      if (d && e.pointerId === d.pointerId && !this.win.isFitAll()) {
         // Ignore pointer slop, so moving onto a row to read it never scrolls.
         if (!d.live && Math.abs(e.clientX - d.startX) < DRAG_DEADZONE_PX) return;
         d.live = true;
         const dx = e.clientX - d.lastX;
         d.lastX = e.clientX;
         // Content follows the finger: dragging right walks back in time.
-        this.panBy(-(dx / this.geom.plotW) * this.windowMs);
+        this.win.panBy(-(dx / this.geom.plotW) * this.win.windowMs);
       }
     };
     this.onLeave = () => {
@@ -156,17 +255,12 @@ export class ScalingTimeline {
       this.canvas.classList.remove('dragging');
     };
     this.onWheel = (e: WheelEvent) => {
-      if (this.fitAll) return;
+      if (this.win.isFitAll()) return;
       e.preventDefault();
       // Zoom about the cursor so whatever is under it stays put.
       const rect = this.canvas.getBoundingClientRect();
       const frac = clamp01((e.clientX - rect.left - this.geom.plotX) / this.geom.plotW);
-      const anchor = this.windowStart + frac * this.windowMs;
-      const i = WINDOW_STOPS.indexOf(this.windowMs);
-      const next = WINDOW_STOPS[clampInt(i + (e.deltaY > 0 ? 1 : -1), 0, WINDOW_STOPS.length - 1)];
-      if (next === this.windowMs) return;
-      this.windowMs = next;
-      if (!this.following) this.windowStart = anchor - frac * next;
+      this.win.zoom(e.deltaY > 0 ? 1 : -1, frac);
     };
     canvas.addEventListener('pointermove', this.onMove);
     canvas.addEventListener('pointerleave', this.onLeave);
@@ -186,79 +280,15 @@ export class ScalingTimeline {
     this.canvas.removeEventListener('wheel', this.onWheel);
   }
 
-  /** True while the window is pinned to the live edge (always so when fitting all). */
-  isFollowing(): boolean {
-    return this.fitAll || (this.following && !this.held);
-  }
-
-  /** Re-pin to the live edge — what the ● LIVE button does. */
-  goLive(): void {
-    this.held = false;
-    this.following = true;
-  }
-
-  isHeld(): boolean {
-    return this.held;
-  }
-
-  /** Freeze the window where it currently sits, or let it follow again. */
-  setHeld(on: boolean): void {
-    if (on === this.held) return;
-    // Freeze from wherever the view is right now, live edge included.
-    if (on) this.windowStart = this.resolveWindowStart();
-    this.held = on;
-    if (!on) this.following = true;
+  /** The shared window, for the controls that drive it. */
+  window(): TimelineWindow {
+    return this.win;
   }
 
   /** Reserve room on the header row for the control bar drawn over the canvas. */
   setHeaderInset(px: number): void {
     this.headerInset = px;
   }
-
-  /** Whether the whole run is on screen rather than a fixed window. */
-  isFitAll(): boolean {
-    return this.fitAll;
-  }
-
-  /** The visible span while windowed, for matching the span buttons. */
-  currentWindowMs(): number {
-    return this.windowMs;
-  }
-
-  /** Pick a fixed span, or `'all'` to put the whole run on one axis. */
-  setWindow(ms: number | 'all'): void {
-    if (ms === 'all') {
-      this.fitAll = true;
-      return;
-    }
-    // Keep the middle of the view put when the span changes under it.
-    const mid = this.windowStart + this.windowMs / 2;
-    this.fitAll = false;
-    this.windowMs = ms;
-    if (!this.following) this.windowStart = mid - ms / 2;
-  }
-
-  /** Page through history by a fraction of the window — what ◀ ▶ do. */
-  pageBy(fraction: number): void {
-    if (this.fitAll) return;
-    this.panBy(fraction * this.windowMs);
-  }
-
-  /** True when there is history to the left of the window to page back into. */
-  canPageBack(): boolean {
-    return !this.fitAll && this.windowStart > 0;
-  }
-
-  /** Scrolling away from the right edge drops the live pin. */
-  private panBy(dtMs: number): void {
-    if (dtMs === 0) return;
-    if (this.following) this.windowStart = Math.max(0, this.contentEnd - this.windowMs);
-    this.following = false;
-    this.windowStart += dtMs;
-  }
-
-  /** Rightmost time the window may reach — set in draw from the current view. */
-  private contentEnd = 0;
 
   resize(): void {
     const dpr = window.devicePixelRatio || 1;
@@ -279,19 +309,19 @@ export class ScalingTimeline {
 
     const view = sim.timelineView();
     // The window may reach past `now` to a ramp that is scheduled but hasn't run.
-    this.contentEnd = Math.max(
+    const contentEnd = Math.max(
       view.nowMs,
       ...view.spans.map((s) => s.endMs),
-      this.fitAll ? MIN_SPAN_MS : this.windowMs,
+      this.win.isFitAll() ? MIN_SPAN_MS : this.win.windowMs,
     );
-    const start = this.resolveWindowStart();
-    const end = start + this.windowMs;
+    const start = this.win.resolve(contentEnd);
+    const end = start + this.win.windowMs;
     // Only batches active inside the window get a row, so the rows stay large
     // and about what is on screen rather than the whole run.
     const visible = view.batches.filter((b) => b.countedAt >= start && b.launchedAt <= end);
     const l = layout(w, h, visible.length);
     this.geom = { plotX: l.plotX, plotW: l.plotW };
-    const xFor = (t: number) => l.plotX + ((t - start) / this.windowMs) * l.plotW;
+    const xFor = (t: number) => l.plotX + ((t - start) / this.win.windowMs) * l.plotW;
 
     this.drawFrame(w, h, view, start);
     // Everything time-mapped is clipped to the plot so nothing spills into the
@@ -310,26 +340,6 @@ export class ScalingTimeline {
     ctx.restore();
     this.drawAxis(l, start, xFor);
     this.drawHover(sim, view, l, start);
-  }
-
-  /** Where the window sits: pinned to the live edge, or wherever it was dragged. */
-  private resolveWindowStart(): number {
-    if (this.fitAll) {
-      this.windowMs = this.contentEnd;
-      this.windowStart = 0;
-      return 0;
-    }
-    const max = Math.max(0, this.contentEnd - this.windowMs);
-    if (this.held) {
-      // Held: stay put, but never past the end of what exists.
-      this.windowStart = Math.min(Math.max(0, this.windowStart), max);
-      return this.windowStart;
-    }
-    if (this.following) this.windowStart = max;
-    else this.windowStart = Math.min(Math.max(0, this.windowStart), max);
-    // Dragging back to the right edge re-pins, so the button isn't the only way.
-    if (!this.following && this.windowStart >= max - 1e-6) this.following = true;
-    return this.windowStart;
   }
 
   // -- Chrome ----------------------------------------------------------------
@@ -364,15 +374,15 @@ export class ScalingTimeline {
     ctx.fillStyle = SEMANTIC.inFlight;
     ctx.fillText(outs, x, 14);
     x -= ctx.measureText(outs).width + 10;
-    ctx.fillStyle = this.isFollowing() ? SURFACE.textFaint : SEMANTIC.shed;
-    const state = this.held ? ' — held' : this.following ? '' : ' — scrolled back';
-    const win = this.fitAll
+    ctx.fillStyle = this.win.isFollowing() ? SURFACE.textFaint : SEMANTIC.shed;
+    const state = this.win.isHeld() ? ' — held' : this.win.isFollowing() ? '' : ' — scrolled back';
+    const win = this.win.isFitAll()
       ? 'whole run'
-      : `${fmtDur(this.windowMs)} window${state ? ` @ ${fmtClock(start)}${state}` : ''}`;
+      : `${fmtDur(this.win.windowMs)} window${state ? ` @ ${fmtClock(start)}${state}` : ''}`;
     ctx.fillText(win, x, 14);
     x -= ctx.measureText(win).width + 10;
     // Drop the hint rather than let it collide with the title on a narrow pane.
-    const how = this.fitAll ? 'hover for detail' : '◀ ▶ or drag to scroll';
+    const how = this.win.isFitAll() ? 'hover for detail' : '◀ ▶ or drag to scroll';
     const hint = `${how} · ${fmtClock(view.nowMs)} elapsed`;
     if (x - ctx.measureText(hint).width > 76) {
       ctx.fillStyle = SURFACE.textFaint;
@@ -639,7 +649,7 @@ export class ScalingTimeline {
     const ctx = this.ctx;
     const step = view.metricPeriodMs;
     // Don't draw a solid smear when a wide window packs ticks tighter than a pixel.
-    if ((step / this.windowMs) * l.plotW < 2.5) return;
+    if ((step / this.win.windowMs) * l.plotW < 2.5) return;
     ctx.fillStyle = withAlpha(SEMANTIC.tlsPulse, 0.5);
     const first = Math.ceil(Math.max(0, start) / step) * step;
     for (let t = first; t <= Math.min(view.nowMs, end); t += step) {
@@ -662,11 +672,11 @@ export class ScalingTimeline {
     ctx.moveTo(l.plotX, l.axisY);
     ctx.lineTo(l.plotX + l.plotW, l.axisY);
     ctx.stroke();
-    const step = TICK_STEPS.find((s) => this.windowMs / s <= 10) ?? TICK_STEPS[TICK_STEPS.length - 1];
+    const step = TICK_STEPS.find((s) => this.win.windowMs / s <= 10) ?? TICK_STEPS[TICK_STEPS.length - 1];
     ctx.font = '500 8px "IBM Plex Mono", monospace';
     ctx.fillStyle = SURFACE.textFaint;
     ctx.textAlign = 'center';
-    const end = start + this.windowMs;
+    const end = start + this.win.windowMs;
     for (let t = Math.ceil(start / step) * step; t <= end + 1; t += step) {
       const x = xFor(t);
       ctx.strokeStyle = SURFACE.grid;
@@ -707,7 +717,7 @@ export class ScalingTimeline {
     const hx = this.hoverX;
     if (hx === null || hx < l.plotX || hx > l.plotX + l.plotW) return;
     const ctx = this.ctx;
-    const t = start + ((hx - l.plotX) / l.plotW) * this.windowMs;
+    const t = start + ((hx - l.plotX) / l.plotW) * this.win.windowMs;
     ctx.strokeStyle = withAlpha(SURFACE.text, 0.5);
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -736,7 +746,7 @@ export class ScalingTimeline {
       lines.push(`counted ${fmtTps(bucket.meteredCapacityTps)}`);
       lines.push(`avail   ${(avail * 100).toFixed(1)}%`);
     }
-    const grabMs = (this.windowMs / l.plotW) * 6;
+    const grabMs = (this.win.windowMs / l.plotW) * 6;
     const near = view.events.filter((e) => Math.abs(e.time - t) <= grabMs).slice(-3);
     for (const e of near) lines.push(`• ${e.message}`);
     this.tooltip(lines, hx, l, near.length);

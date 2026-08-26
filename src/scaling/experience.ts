@@ -11,7 +11,7 @@ import { cloneScalingConfig, scalingPresetById, SCALING_PRESETS } from './engine
 import type { ScalingSimulationConfig } from './engine/types';
 import { ScalingChartRail } from './render/charts';
 import { ScalingRenderer } from './render/renderer';
-import { ScalingTimeline } from './render/timeline';
+import { ScalingTimeline, TimelineWindow } from './render/timeline';
 import { ScalingControlPanel, PANE_TAGS } from './ui/controls';
 
 /** Ramps here run for tens of minutes of sim time, so playback starts well dilated. */
@@ -72,8 +72,10 @@ export class ScalingExperience implements Experience {
   private hudAvail!: HTMLElement;
   private degradedBadge!: HTMLElement;
   /** The annotated run timeline — single mode only, opened from the header. */
-  private timelineEl!: HTMLElement;
-  private timeline: ScalingTimeline | null = null;
+  /** One per pane; all sharing `timelineWindow` so they stay on the same axis. */
+  private timelines: ScalingTimeline[] = [];
+  private timelineWindow = new TimelineWindow();
+  private timelineHosts: HTMLElement[] = [];
   private timelineOpen = false;
   private timelineMax = false;
   private liveBtn!: HTMLButtonElement;
@@ -137,9 +139,8 @@ export class ScalingExperience implements Experience {
   unmount(): void {
     this.controls.destroy();
     window.removeEventListener('keydown', this.onKeyDown);
-    this.appEl.classList.remove('compare', 'timeline-max');
-    this.timeline?.destroy();
-    this.timelineEl.remove();
+    this.appEl.classList.remove('compare', 'timeline-max', 'timeline-open');
+    for (const t of this.timelines) t.destroy();
     this.helpEl.remove();
     this.hosts.hud.replaceChildren();
     this.hosts.header.replaceChildren();
@@ -153,7 +154,7 @@ export class ScalingExperience implements Experience {
 
   render(): void {
     if (this.timelineMax) {
-      this.timeline?.draw(this.panes[0].sim);
+      this.drawTimelines();
       this.syncTimelineControls();
       this.controls.update();
       this.updateHud();
@@ -171,8 +172,8 @@ export class ScalingExperience implements Experience {
     } else {
       for (const p of this.panes) p.charts.draw(p.sim);
     }
-    if (this.timelineOpen && this.timeline && !this.compare) {
-      this.timeline.draw(this.panes[0].sim);
+    if (this.timelineOpen) {
+      this.drawTimelines();
       this.syncTimelineControls();
     }
     this.controls.update();
@@ -186,8 +187,12 @@ export class ScalingExperience implements Experience {
         p.charts.resize();
       }
     }
-    this.timeline?.resize();
-    this.timeline?.setHeaderInset(this.controlsBar ? this.controlsBar.offsetWidth + 12 : 0);
+    const inset = this.controlsBar ? this.controlsBar.offsetWidth + 12 : 0;
+    this.timelines.forEach((t, i) => {
+      t.resize();
+      // Only the pane carrying the control bar has to leave room for it.
+      t.setHeaderInset(i === 0 ? inset : 0);
+    });
   }
 
   simTimeMs(): number {
@@ -211,92 +216,96 @@ export class ScalingExperience implements Experience {
    * The timeline lives below the panes rather than inside one: it is a view of
    * the whole run on one axis, so it wants the full stage width.
    */
+  /**
+   * The control bar is built once and driven by the shared window, so however
+   * many panes are on screen they pan, zoom and hold together — which is the
+   * point of comparing them on one axis.
+   */
   private buildTimeline(): void {
-    this.timelineEl = el('div', 'timeline-pane hidden');
-    this.timelineEl.id = 'scaling-timeline';
-    const canvas = document.createElement('canvas');
-    this.timelineEl.appendChild(canvas);
-    this.timeline = new ScalingTimeline(canvas);
-
-    // Explicit controls beat dragging for getting somewhere specific.
     const bar = el('div', 'timeline-controls');
     const back = el('button', 'tl-btn', '◀') as HTMLButtonElement;
     back.title = 'Page back through the history';
-    back.addEventListener('click', () => this.timeline?.pageBy(-0.5));
+    back.addEventListener('click', () => this.timelineWindow.pageBy(-0.5));
     const fwd = el('button', 'tl-btn', '▶') as HTMLButtonElement;
     fwd.title = 'Page forward';
-    fwd.addEventListener('click', () => this.timeline?.pageBy(0.5));
+    fwd.addEventListener('click', () => this.timelineWindow.pageBy(0.5));
     bar.append(back, fwd, el('span', 'tl-sep'));
     for (const span of TIMELINE_SPANS) {
       const b = el('button', 'tl-btn tl-span', span.label) as HTMLButtonElement;
       b.dataset.span = String(span.value);
       b.title = span.value === 'all' ? 'Fit the whole run on one axis' : `Show a ${span.label} window`;
-      b.addEventListener('click', () => this.timeline?.setWindow(span.value));
+      b.addEventListener('click', () => this.timelineWindow.setWindow(span.value));
       bar.appendChild(b);
     }
     this.holdBtn = el('button', 'tl-btn', '⏸ HOLD') as HTMLButtonElement;
     this.holdBtn.title = 'Hold the window here — the run carries on, the view stays put';
-    this.holdBtn.addEventListener('click', () => this.timeline?.setHeld(!this.timeline.isHeld()));
+    this.holdBtn.addEventListener('click', () => this.timelineWindow.setHeld(!this.timelineWindow.isHeld()));
     bar.append(el('span', 'tl-sep'), this.holdBtn);
 
     this.liveBtn = el('button', 'tl-btn timeline-live-btn', '● LIVE') as HTMLButtonElement;
     this.liveBtn.title = 'Jump back to the live edge';
-    this.liveBtn.addEventListener('click', () => this.timeline?.goLive());
+    this.liveBtn.addEventListener('click', () => this.timelineWindow.goLive());
     const maxBtn = el('button', 'tl-btn', '⤢') as HTMLButtonElement;
     maxBtn.title = 'Maximize the timeline (Esc to restore)';
     maxBtn.addEventListener('click', () => this.setTimelineMax(!this.timelineMax));
     bar.append(this.liveBtn, el('span', 'tl-sep'), maxBtn);
-    this.timelineEl.appendChild(bar);
+
     this.maxBtn = maxBtn;
     this.spanBtns = [...bar.querySelectorAll<HTMLButtonElement>('.tl-span')];
     this.pageBackBtn = back;
     this.controlsBar = bar;
 
-    this.hosts.stageCol.appendChild(this.timelineEl);
     this.onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || !this.timelineOpen) return;
-      // Escape backs out one step: re-pin a scrolled window, then un-maximize.
-      if (this.timeline && (!this.timeline.isFollowing() || this.timeline.isHeld())) this.timeline.goLive();
+      // Escape backs out one step: release a held or scrolled window, then
+      // un-maximize.
+      if (!this.timelineWindow.isFollowing() || this.timelineWindow.isHeld()) this.timelineWindow.goLive();
       else if (this.timelineMax) this.setTimelineMax(false);
     };
     window.addEventListener('keydown', this.onKeyDown);
   }
 
   private setTimelineOpen(on: boolean): void {
-    // Two panes, two clocks — one shared axis would misrepresent both.
-    this.timelineOpen = on && !this.compare;
-    this.timelineEl.classList.toggle('hidden', !this.timelineOpen);
-    this.controls?.setTimelineUI(this.timelineOpen);
-    if (!this.timelineOpen) this.setTimelineMax(false);
+    // Both panes run one clock and one demand ramp, so a shared axis is exactly
+    // right for comparing them — each keeps its own lanes beneath it.
+    this.timelineOpen = on;
+    this.appEl.classList.toggle('timeline-open', on);
+    this.controls?.setTimelineUI(on);
+    if (!on) this.setTimelineMax(false);
     // The panes lose height to the timeline, so every canvas needs re-measuring.
     this.resize();
   }
 
   /** Keep the timeline's own controls in step with the window it is showing. */
   private syncTimelineControls(): void {
-    const tl = this.timeline;
-    if (!tl) return;
-    const showLive = !tl.isFollowing();
+    const win = this.timelineWindow;
+    const showLive = !win.isFollowing();
     this.liveBtn.classList.toggle('visible', showLive);
     // The bar's width changes with the LIVE button; re-measure only then, not
     // every frame, since reading offsetWidth forces layout.
     if (showLive !== this.liveWas) {
       this.liveWas = showLive;
-      tl.setHeaderInset(this.controlsBar.offsetWidth + 12);
+      this.timelines[0]?.setHeaderInset(this.controlsBar.offsetWidth + 12);
     }
-    this.pageBackBtn.disabled = !tl.canPageBack();
+    this.pageBackBtn.disabled = !win.canPageBack();
     // Holding a window that already shows everything would mean nothing.
-    this.holdBtn.disabled = tl.isFitAll();
-    this.holdBtn.classList.toggle('active', tl.isHeld());
-    const active = tl.isFitAll() ? 'all' : String(tl.currentWindowMs());
+    this.holdBtn.disabled = win.isFitAll();
+    this.holdBtn.classList.toggle('active', win.isHeld());
+    const active = win.isFitAll() ? 'all' : String(win.windowMs);
     for (const b of this.spanBtns) b.classList.toggle('active', b.dataset.span === active);
+  }
+
+  private drawTimelines(): void {
+    this.timelines.forEach((t, i) => {
+      const pane = this.panes[i];
+      if (pane) t.draw(pane.sim);
+    });
   }
 
   /** Hand the whole stage to the timeline — the board and charts step aside. */
   private setTimelineMax(on: boolean): void {
     this.timelineMax = on && this.timelineOpen;
     this.appEl.classList.toggle('timeline-max', this.timelineMax);
-    this.timelineEl.classList.toggle('maximized', this.timelineMax);
     this.maxBtn.textContent = this.timelineMax ? '⤡' : '⤢';
     this.resize();
   }
@@ -310,6 +319,9 @@ export class ScalingExperience implements Experience {
   }
 
   private buildPanes(cfgs: ScalingSimulationConfig[]): void {
+    for (const t of this.timelines) t.destroy();
+    this.timelines = [];
+    this.timelineHosts = [];
     this.panesHost.innerHTML = '';
     const compare = cfgs.length > 1;
     this.appEl.classList.toggle('compare', compare);
@@ -342,7 +354,15 @@ export class ScalingExperience implements Experience {
       stage.appendChild(canvas);
       const chartsEl = document.createElement('div');
       chartsEl.className = 'pane-charts';
-      root.append(stage, chartsEl);
+      // Every pane carries its own timeline; they share one window, so the two
+      // sit on the same axis and pan, zoom and hold together.
+      const tlEl = document.createElement('div');
+      tlEl.className = 'timeline-pane';
+      const tlCanvas = document.createElement('canvas');
+      tlEl.appendChild(tlCanvas);
+      root.append(stage, chartsEl, tlEl);
+      this.timelineHosts.push(tlEl);
+      this.timelines.push(new ScalingTimeline(tlCanvas, this.timelineWindow));
       this.panesHost.appendChild(root);
       return {
         sim: new ScalingSimulation(cloneScalingConfig(cfg)),
@@ -351,6 +371,8 @@ export class ScalingExperience implements Experience {
         stats,
       };
     });
+    // One bar for all panes; it rides on the first one.
+    if (this.controlsBar) this.timelineHosts[0]?.appendChild(this.controlsBar);
     this.resize();
   }
 

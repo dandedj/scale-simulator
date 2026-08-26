@@ -59,28 +59,48 @@ export class ScalingRenderer {
     const m = w * 0.02;
     // One row of chips — the board gets the rest.
     const readoutH = 34;
-    const outcomeH = 50;
+    // Short board (comparison mode with a timeline under each pane): the fixed
+    // furniture has to give ground too, or there is nothing left for the fleet.
+    const compact = h < 340;
+    const outcomeH = compact ? 30 : 50;
     const top = 8;
-    const mainTop = top + readoutH + 12;
-    const mainBottom = h - outcomeH - 10;
+    const mainTop = top + readoutH + (compact ? 8 : 12);
+    const mainBottom = h - outcomeH - (compact ? 6 : 10);
     const mainH = Math.max(60, mainBottom - mainTop);
 
     this.drawReadout(sim, m, top, w - 2 * m, readoutH);
 
-    const leftW = (w - 3 * m) * 0.46;
-    const rightW = w - 3 * m - leftW;
-    const leftX = m;
-    const rightX = m + leftW + m;
+    // Short boards — comparison mode with a timeline under each pane — drop the
+    // pipeline column rather than squeeze eight stage rows into no height. The
+    // cycle bar and the fleet are what carry the story at a glance; the
+    // stage-by-stage view is a single-sim study, and the timeline shows it too.
+    if (compact) {
+      const full = w - 2 * m;
+      // The cycle bar is the first thing to go when even this is too tall.
+      const breakdownH = mainH >= 130 ? 34 : 0;
+      if (breakdownH) this.drawBreakdown(sim, { x: m, y: mainTop, w: full, h: breakdownH });
+      const restY = mainTop + (breakdownH ? breakdownH + 6 : 0);
+      const restH = mainH - (breakdownH ? breakdownH + 6 : 0);
+      // Proportional, so the fleet always gets room rather than a negative box.
+      const meterH = Math.max(30, Math.min(56, restH * 0.42));
+      this.drawDemandMeter(sim, { x: m, y: restY, w: full, h: meterH });
+      this.drawFleet(sim, { x: m, y: restY + meterH + 6, w: full, h: Math.max(24, restH - meterH - 6) });
+    } else {
+      const meterH = 84;
+      const leftW = (w - 3 * m) * 0.46;
+      const rightW = w - 3 * m - leftW;
+      const leftX = m;
+      const rightX = m + leftW + m;
 
-    // Left column: per-stage breakdown bar + pipeline flow.
-    const breakdownH = 54;
-    this.drawBreakdown(sim, { x: leftX, y: mainTop, w: leftW, h: breakdownH });
-    this.drawPipeline(sim, { x: leftX, y: mainTop + breakdownH + 10, w: leftW, h: mainH - breakdownH - 10 });
+      // Left column: per-stage breakdown bar + pipeline flow.
+      const breakdownH = 54;
+      this.drawBreakdown(sim, { x: leftX, y: mainTop, w: leftW, h: breakdownH });
+      this.drawPipeline(sim, { x: leftX, y: mainTop + breakdownH + 10, w: leftW, h: mainH - breakdownH - 10 });
 
-    // Right column: demand-vs-capacity meter + fleet tiles.
-    const meterH = 84;
-    this.drawDemandMeter(sim, { x: rightX, y: mainTop, w: rightW, h: meterH });
-    this.drawFleet(sim, { x: rightX, y: mainTop + meterH + 10, w: rightW, h: mainH - meterH - 10 });
+      // Right column: demand-vs-capacity meter + fleet tiles.
+      this.drawDemandMeter(sim, { x: rightX, y: mainTop, w: rightW, h: meterH });
+      this.drawFleet(sim, { x: rightX, y: mainTop + meterH + 10, w: rightW, h: mainH - meterH - 10 });
+    }
 
     this.drawOutcomeBar(sim, m, h - outcomeH - 4, w - 2 * m, outcomeH - 4);
 
