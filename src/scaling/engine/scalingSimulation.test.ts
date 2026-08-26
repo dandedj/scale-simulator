@@ -447,13 +447,18 @@ describe('playback determinism', () => {
 });
 
 describe('the landing scenario', () => {
-  /** What the tab opens on: calm, small, and waiting for the user to act. */
+  /**
+   * What the tab opens on: measured RTB Fabric production configuration, calm
+   * and waiting for the user to act. The pre-warm is the check that matters —
+   * 60K ÷ (10K × 0.62) lands on ten tasks, which is production's configured
+   * desiredCount, so the modelled fleet and the real one start the same size.
+   */
   it('holds a small steady fleet and never scales on its own', () => {
     const sim = new ScalingSimulation(cloneScalingConfig(SCALING_PRESETS[0].config));
-    expect(SCALING_PRESETS[0].id).toBe('steady');
+    expect(SCALING_PRESETS[0].id).toBe('rtb-fabric');
     expect(sim.cfg.traffic.shape).toBe('steady');
-    expect(sim.cfg.traffic.baseRateTps).toBe(50_000);
-    expect(sim.instances.length).toBe(2);
+    expect(sim.cfg.traffic.baseRateTps).toBe(60_000);
+    expect(sim.instances.length).toBe(10);
     run(sim, 1_800_000);
     expect(sim.metrics.totals.launches).toBe(0);
     expect(sim.metrics.totals.lost).toBe(0);
@@ -464,11 +469,28 @@ describe('the landing scenario', () => {
     const sim = new ScalingSimulation(cloneScalingConfig(SCALING_PRESETS[0].config));
     run(sim, 120_000);
     expect(sim.metrics.totals.launches).toBe(0);
-    sim.triggerRamp(1_000_000, 60_000);
-    run(sim, 900_000);
+    sim.triggerRamp(500_000, 1_800_000);
+    run(sim, 5_400_000);
     expect(sim.metrics.totals.launches).toBeGreaterThan(0);
-    // And it converges on what 1.05M at a 60% buffer actually needs.
-    expect(sim.instances.length).toBe(Math.ceil(1_050_000 / (0.6 * 50_000)));
+    // It reaches what 560K at the 62% buffer needs, and does not stop short.
+    expect(sim.instances.length).toBeGreaterThanOrEqual(Math.ceil(560_000 / (0.62 * 10_000)));
+    expect(sim.metrics.lifetimeAvailability()).toBeGreaterThan(0.98);
+  });
+
+  /**
+   * The ladder, not the pipeline, is what paces this configuration — the claim
+   * the scenario's description makes. A +20% rung with a 10-task minimum takes
+   * eight decisions to climb from ten tasks to ninety-odd, at one decision per
+   * 300s cooldown; the pipeline is 375s once.
+   */
+  it('is paced by the step ladder and its cooldown, not the pipeline', () => {
+    const sim = new ScalingSimulation(cloneScalingConfig(SCALING_PRESETS[0].config));
+    sim.triggerRamp(500_000, 1_800_000);
+    run(sim, 5_400_000);
+    expect(sim.metrics.totals.launches).toBe(8);
+    expect(sim.scaleReadout().decisionIntervalMs).toBe(300_000);
+    // Eight decisions at 300s each outlast the 375s pipeline several times over.
+    expect(sim.metrics.totals.launches * 300_000).toBeGreaterThan(sim.scaleReadout().pipelineLatencyMs * 5);
   });
 });
 

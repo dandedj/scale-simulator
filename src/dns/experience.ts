@@ -285,7 +285,10 @@ export class DnsExperience implements Experience {
     const wantCompare = params.get(LINK_KEYS.compare) === '1';
     const idA = params.get(LINK_KEYS.scenario);
     const idB = params.get(LINK_KEYS.scenarioB);
-    const known = (id: string | null) => (id && DNS_PRESETS.some((p) => p.id === id) ? id : null);
+    // An absent or unrecognised id falls back to the default scenario — and is
+    // named as that scenario, since that is the config actually loaded. Calling
+    // it "custom" would claim an edit nobody made.
+    const known = (id: string | null) => (id && DNS_PRESETS.some((p) => p.id === id) ? id : DNS_PRESETS[0].id);
     const a = known(idA);
     const b = known(idB);
     const cfgA = cloneDnsConfig((a ? dnsPresetById(a) : DNS_PRESETS[0]).config);
@@ -300,7 +303,7 @@ export class DnsExperience implements Experience {
     this.linkScenario = [a, wantCompare ? b : null];
     this.resetPanes(cfgs);
     this.controls.setCompareUI(wantCompare, [a, b]);
-    if (!wantCompare && a) this.controls.setActivePreset(a);
+    if (!wantCompare) this.controls.setActivePreset(a);
   }
 
   private updateHud(): void {

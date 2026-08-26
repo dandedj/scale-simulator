@@ -72,10 +72,51 @@ function scenario(tune: (c: ScalingSimulationConfig) => void): ScalingSimulation
 
 export const SCALING_PRESETS: ScalingPreset[] = [
   {
+    id: 'rtb-fabric',
+    name: 'RTB Fabric (prod)',
+    description:
+      'Where the tab opens: measured RTB Fabric production configuration — ten broker tasks serving 60K TPS in one AZ, ' +
+      'behind a step policy capped at +20% per decision with a 10-task minimum and a 300s cooldown. Press START and it ' +
+      'holds. ▲ RAMP adds +500K over 30 min: eight scale-outs, one every five minutes, to reach the ~91 tasks that ' +
+      'demand needs. The ladder and its cooldown pace that, not the ~6-minute pipeline — which is the opposite of the ' +
+      'AWS-generic scenarios below, where pipeline latency is the whole story.',
+    config: scenario((c) => {
+      // Fleet: c7g.xlarge at BASIC_TPS_PER_INSTANCE, RTB Fabric's own
+      // conservative planning constant.
+      c.capacity.capacityPerInstanceTps = 10_000;
+      // Burst alarm trips at 0.61875 × systemLoadAverageMax.
+      c.capacity.targetUtilization = 0.62;
+
+      // Only the pipeline terms production actually pins.
+      c.stages.bootMs = 60_000; // health check startPeriod
+      c.stages.dnsPublishMs = 60_000; // DNS update lambda: rate(1 minute)
+      c.stages.clientPickupMs = 60_000; // record TTL 60s
+
+      // StepScaling, PercentChangeInCapacity, two real rungs — production has
+      // no third, so the top rung is held flat rather than invented.
+      c.policy.type = 'step';
+      c.policy.steps = [
+        { lowerBound: 0, adjustment: 10 }, // e1 == 1: any pressure signal breached
+        { lowerBound: 0.18, adjustment: 20 }, // e1 == 2: load ≥ 0.73125 × max
+        { lowerBound: 1, adjustment: 20 },
+      ];
+      c.launch.minStepSize = 10; // minAdjustmentMagnitude (tasks)
+      c.launch.maxStepSize = 400; // no maximum configured
+      c.launch.maxInstances = 400; // ECS scalable target max, per AZ
+
+      // Demand is a workload choice, not configuration. 60K ÷ (10K × 0.62) ≈ 10
+      // tasks, which is exactly production's configured desiredCount.
+      c.traffic.shape = 'steady';
+      c.traffic.baseRateTps = 60_000;
+      c.traffic.rampAmountTps = 500_000;
+      c.traffic.rampDurationMs = 1_800_000;
+    }),
+  },
+  {
     id: 'steady',
     name: 'Steady baseline',
     description:
-      'Where the tab opens: a calm fleet serving 50K TPS on two instances, sitting under the target buffer with nothing scheduled. Press START and it just holds. Add demand when you want it — ▲ RAMP for the configured amount and rate, ◉ SURGE for a step — and watch the whole scale-out play out on the timeline. The scenarios below run their ramp for you instead.',
+      'A calm fleet on the AWS-generic defaults: 50K TPS on two instances, sitting under the target buffer with nothing scheduled. Press START and it just holds. Add demand when you want it — ▲ RAMP for the configured amount and rate, ◉ SURGE for a step — and watch the whole scale-out play out on the timeline. The scenarios below run their ramp for you instead.',
     config: scenario((c) => {
       c.traffic.shape = 'steady';
       c.traffic.baseRateTps = 50_000;

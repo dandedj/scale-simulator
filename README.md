@@ -639,14 +639,30 @@ nine descriptions pushed the tuning controls off the panel entirely — with the
 selected one's description a ⓘ away. Editing any knob switches it to
 *— custom —* rather than keep claiming a scenario it no longer matches.
 
-The tab opens on **Steady baseline** — a calm fleet serving 50K TPS on two
-instances, with nothing scheduled. It holds there until you add demand yourself
+The tab opens on **RTB Fabric (prod)** — measured production configuration
+rather than AWS-generic defaults: ten broker tasks serving 60K TPS in one AZ
+(10K TPS/task at a 62% burst threshold, which lands on production's configured
+`desiredCount` of ten), behind a step policy capped at +20% per decision with a
+10-task `minAdjustmentMagnitude` and a 300s cooldown. Nothing is scheduled, so
+it holds until you add demand.
+
+It inverts the lesson of every scenario below it. ▲ RAMP's +500K over 30 min
+takes eight scale-outs at one per five minutes to reach the ~91 tasks demand
+needs — the ladder and its cooldown pace that, not the ~6-minute pipeline. Four
+pipeline stages in it (`signalMs`, `launchMs`, `cloudInitMs`, `placeMs` — 105s,
+about 28% of the total) have no counterpart in RTB Fabric configuration and are
+carried over from the generic defaults; instrument them before quoting a total
+pipeline latency.
+
+**Steady baseline** is the same idea on the AWS-generic defaults — 50K TPS on
+two instances, with nothing scheduled. It holds there until you add demand yourself
 with ▲ RAMP or ◉ SURGE, which is the way to watch a single scale-out end to end
 on the timeline. The rest run their ramp for you: four share the +1M-in-1-min
 ramp and vary the pipeline, four share a +1M-over-30-min ramp and vary the
 policy and bake.
 
-- **Steady baseline** — 50K, holding; you drive it.
+- **RTB Fabric (prod)** — measured production config; you drive it.
+- **Steady baseline** — 50K on the generic defaults, holding; you drive it.
 - **Baseline ramp** — ~5-min pipeline vs a 1-min ramp. The policy orders the
   whole gap within two decisions, so pure pipeline latency is what is left.
 - **Optimized pipeline** — warm pool / baked AMI collapses the per-stage lag;
@@ -674,7 +690,12 @@ and playback-speed determinism.
 
 ### Grounding (scaling specifics)
 
-- Reference throughput: 100K TPS on 2× c7g.2xlarge ⇒ 50K TPS/instance.
+- Reference throughput: 100K TPS on 2× c7g.2xlarge ⇒ 50K TPS/instance, which is
+  what the AWS-generic scenarios use. The **RTB Fabric (prod)** scenario instead
+  uses RTB Fabric's own `BASIC_TPS_PER_INSTANCE` of 10K, commented in-source as
+  conservative and varying with instance type, DSP response time and payload
+  size. The two disagree 5×, and this single value scales the whole fleet —
+  worth replacing with a measured number if you have one.
 - The scale-up latency is the sum of real ASG/ECS stages — CloudWatch metric +
   alarm datapoints for detection, EC2 launch, cloud-init/user-data, ECS
   placement, container boot, health-check grace, and DNS registration + client

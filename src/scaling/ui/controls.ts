@@ -62,6 +62,8 @@ interface KnobDef {
   format?(v: number): string;
   /** Hide the row when it does not apply to the selected policy. */
   when?(c: ScalingSimulationConfig): boolean;
+  /** Label computed from the config, for rows whose meaning moves with it. */
+  labelOf?(c: ScalingSimulationConfig): string;
   /** Let the value be typed exactly, not just dragged to the nearest step. */
   entry?: EntryDef;
   info?: SettingInfo;
@@ -153,11 +155,20 @@ function stageKnob(label: string, key: keyof ScalingSimulationConfig['stages'], 
   };
 }
 
-/** One rung of the step-scaling ladder, as a knob over its adjustment. */
+/**
+ * One rung of the step-scaling ladder, as a knob over its adjustment. The label
+ * reads the rung's own trip point rather than naming a fixed one — scenarios
+ * set different bounds, and a hard-coded "25% over" was wrong for any that did.
+ */
 function stepKnob(index: number, label: string, info: SettingInfo): KnobDef {
   return {
     kind: 'knob',
     label,
+    labelOf: (c) => {
+      const bound = c.policy.steps[index]?.lowerBound;
+      if (bound === undefined) return label;
+      return `Step ${index + 1} — ${bound === 0 ? 'over target' : `${Math.round(bound * 100)}% over`}`;
+    },
     min: 0,
     max: 200,
     step: 5,
@@ -262,7 +273,7 @@ const GROUPS: Array<{ name: string; scope: KnobScope; open?: boolean; controls: 
       },
       {
         kind: 'knob',
-        label: 'Target utilization (buffer)', min: 0.2, max: 0.95, step: 0.05, get: (c) => c.capacity.targetUtilization, set: (c, v) => (c.capacity.targetUtilization = v), format: pct,
+        label: 'Target utilization (buffer)', min: 0.2, max: 0.95, step: 0.01, get: (c) => c.capacity.targetUtilization, set: (c, v) => (c.capacity.targetUtilization = v), format: pct,
         info: {
           what: 'The utilization the autoscaler holds — the buffer. ECS calls it targetCapacity (default 100%).',
           how: 'Steady-state util sits here; (1 − this) is headroom. Scale-out triggers when util exceeds it. AWS suggests 60–80% for workloads that burst.',
@@ -386,7 +397,7 @@ const GROUPS: Array<{ name: string; scope: KnobScope; open?: boolean; controls: 
       },
       {
         kind: 'knob',
-        label: 'Max step size', min: 1, max: 120, step: 1, get: (c) => c.launch.maxStepSize, set: (c, v) => (c.launch.maxStepSize = v), format: (v) => String(Math.round(v)),
+        label: 'Max step size', min: 1, max: 400, step: 1, get: (c) => c.launch.maxStepSize, set: (c, v) => (c.launch.maxStepSize = v), format: (v) => String(Math.round(v)),
         info: {
           what: 'Most instances one scale-out launches (ECS maximumScalingStepSize, default 10000 — effectively no ceiling).',
           how: 'With the decision interval it sets the sustained add rate: max step × capacity ÷ (pipeline + bake). The readout shows the result as the max sustainable ramp.',
@@ -755,6 +766,7 @@ export class ScalingControlPanel {
 
   private buildKnobRow(scope: KnobScope, knob: KnobDef): HTMLElement {
     const row = el('div', 'knob-row');
+    const labelEl = el('div', 'knob-label', knob.label);
     const fmt = knob.format ?? ((v: number) => String(Math.round(v * 100) / 100));
     const input = document.createElement('input');
     input.type = 'range';
@@ -767,6 +779,7 @@ export class ScalingControlPanel {
     const sync = () => {
       const cfg = this.cfgFor(scope);
       row.classList.toggle('hidden', knob.when ? !knob.when(cfg) : false);
+      if (knob.labelOf) labelEl.textContent = knob.labelOf(cfg);
       const v = knob.get(cfg);
       // A typed value can sit outside the slider's range; pin the thumb to the end.
       input.value = String(Math.min(knob.max, Math.max(knob.min, v)));
@@ -777,7 +790,7 @@ export class ScalingControlPanel {
       value.set(knob.get(this.cfgFor(scope)));
     });
     this.refreshers.push(sync);
-    row.append(this.rowTop(knob.label, value.el, knob.info, row), input);
+    row.append(this.rowTop(labelEl, value.el, knob.info, row), input);
     sync();
     return row;
   }
@@ -809,7 +822,7 @@ export class ScalingControlPanel {
       seg.appendChild(b);
     }
     this.refreshers.push(sync);
-    row.append(this.rowTop(choice.label, value?.el ?? null, choice.info, row), seg);
+    row.append(this.rowTop(el('div', 'knob-label', choice.label), value?.el ?? null, choice.info, row), seg);
     sync();
     return row;
   }
@@ -861,9 +874,9 @@ export class ScalingControlPanel {
   }
 
   /** Label + optional live value + the ⓘ disclosure, shared by both row kinds. */
-  private rowTop(label: string, valueEl: HTMLElement | null, info: SettingInfo | undefined, row: HTMLElement): HTMLElement {
+  private rowTop(labelEl: HTMLElement, valueEl: HTMLElement | null, info: SettingInfo | undefined, row: HTMLElement): HTMLElement {
     const top = el('div', 'knob-top');
-    top.appendChild(el('div', 'knob-label', label));
+    top.appendChild(labelEl);
     const meta = el('div', 'knob-meta');
     if (valueEl) meta.appendChild(valueEl);
     const built = info ? this.buildInfo(info) : null;
