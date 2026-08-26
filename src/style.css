@@ -563,27 +563,31 @@ main {
 
 /* ---------- Charts ---------- */
 
+/* One row, however many charts a mode has — six for scaling, eight for the
+   others. Wrapping them onto a second row cost the board a strip of height and
+   split one reading of the run across two bands. */
 .pane-charts {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  grid-auto-rows: 1fr;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  grid-template-rows: 1fr;
   gap: 6px;
-  height: 210px;
+  height: 150px;
   flex-shrink: 0;
 }
 
 /* Comparison mode: each full-width pane keeps a single compact row. */
 .compare .pane-charts {
-  grid-template-columns: repeat(8, 1fr);
-  grid-auto-rows: auto;
   height: 84px;
 }
 
-/* Narrow screens: two columns so each strip chart stays legible. */
+/* Narrow screens: one row of eight would be unreadable, so let them wrap. */
 @media (max-width: 1080px) {
   #app:not(.compare) .pane-charts {
+    grid-auto-flow: row;
     grid-template-columns: repeat(2, 1fr);
-    height: 380px;
+    grid-auto-rows: 1fr;
+    height: 300px;
   }
 }
 

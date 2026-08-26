@@ -53,11 +53,15 @@ export function drawChart<B extends { time: number }, C>(
   g.font = '600 9px "IBM Plex Mono", monospace';
   g.fillStyle = SURFACE.textDim;
   g.fillText(def.title, plotX, 10);
+  // A narrow cell can't hold every series name; drop the ones that would run
+  // past the edge rather than let them bleed over the chart beside it.
   let lx = plotX + g.measureText(def.title).width + 10;
   for (const s of def.series) {
+    const w = g.measureText(s.label).width;
+    if (lx + w > plotX + plotW) break;
     g.fillStyle = s.color;
     g.fillText(s.label, lx, 10);
-    lx += g.measureText(s.label).width + 8;
+    lx += w + 8;
   }
 
   // Determine y scale (override wins, for a shared scale across compare panes).
