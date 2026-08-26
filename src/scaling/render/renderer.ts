@@ -57,7 +57,8 @@ export class ScalingRenderer {
     if (w < 260 || h < 200) return;
 
     const m = w * 0.02;
-    const readoutH = Math.min(96, h * 0.22);
+    // One row of chips — the board gets the rest.
+    const readoutH = 34;
     const outcomeH = 50;
     const top = 8;
     const mainTop = top + readoutH + 12;
@@ -98,88 +99,88 @@ export class ScalingRenderer {
 
   // -- Readout panel ----------------------------------------------------------
 
+  /**
+   * One row of chips rather than three stacked columns. The panel used to take a
+   * fifth of the board's height to say ten things that fit on a line, and the
+   * board is what people are here to watch.
+   *
+   * Chips are drawn in priority order and stop at the panel edge, so a narrow
+   * pane loses the least important readings instead of overlapping them.
+   */
   private drawReadout(sim: ScalingSimulation, x: number, y: number, w: number, h: number): void {
     const ctx = this.ctx;
     const d = sim.demandView();
     const r = sim.scaleReadout();
     const avail = sim.availability();
-    this.panel(x, y, w, h, avail < sim.cfg.slaTarget ? SEMANTIC.timeout : SURFACE.border);
-
-    ctx.textAlign = 'left';
-    ctx.font = '700 14px "Big Shoulders", "Arial Narrow", sans-serif';
-    ctx.fillStyle = SURFACE.text;
-    ctx.fillText('SCALE-UP', x + 12, y + 19);
-
-    // Left block: big live numbers.
-    ctx.font = '600 11px "IBM Plex Mono", monospace';
-    ctx.fillStyle = SURFACE.textDim;
-    ctx.fillText(`offered ${fmtTps(d.offeredTps)}`, x + 12, y + 40);
-    ctx.fillText(`usable  ${fmtTps(d.usableCapacityTps)}  (counted ${fmtTps(d.meteredCapacityTps)})`, x + 12, y + 56);
-    ctx.fillText(
-      `instances ${d.inUse} in use · ${d.baking} baking · ${d.ready} ready · ${d.provisioning} launching`,
-      x + 12,
-      y + 72,
-    );
     const availCol = avail >= sim.cfg.slaTarget ? SEMANTIC.success : avail >= 0.9 ? SEMANTIC.shed : SEMANTIC.timeout;
-    ctx.font = '700 20px "IBM Plex Mono", monospace';
-    ctx.fillStyle = availCol;
-    ctx.textAlign = 'right';
-    ctx.fillText(`${(avail * 100).toFixed(1)}%`, x + w * 0.5, y + 24);
-    ctx.font = '500 9px "IBM Plex Mono", monospace';
-    ctx.fillStyle = SURFACE.textDim;
-    ctx.fillText('availability', x + w * 0.5, y + 36);
-
-    // Right block: the scale-rate calculus.
-    const rx = x + w - 12;
-    ctx.textAlign = 'right';
-    const rows: { label: string; value: string; color: string }[] = [
-      {
-        label: 'recover time',
-        value: r.active ? `${fmtDur(r.recoverMs)}${r.recovered ? '' : '…'}` : '—',
-        color: r.recovered ? SEMANTIC.success : r.active ? SEMANTIC.timeout : SURFACE.textDim,
-      },
-      {
-        label: 'effective add-rate',
-        value: r.effectiveAddRatePerMin > 0 ? `${fmtTps(r.effectiveAddRatePerMin)}/min` : '—',
-        color: SURFACE.text,
-      },
-      { label: 'max sustainable ramp', value: `${fmtTps(r.maxSustainableRampPerMin)}/min`, color: SEMANTIC.inFlight },
-      { label: 'pipeline latency', value: fmtDur(r.pipelineLatencyMs), color: SURFACE.textDim },
-    ];
-    let ry = y + 18;
-    for (const row of rows) {
-      ctx.font = '700 12px "IBM Plex Mono", monospace';
-      ctx.fillStyle = row.color;
-      ctx.fillText(row.value, rx, ry);
-      ctx.font = '500 8.5px "IBM Plex Mono", monospace';
-      ctx.fillStyle = SURFACE.textFaint;
-      ctx.fillText(row.label, rx, ry + 9);
-      ry += 20;
-    }
-    ctx.textAlign = 'left';
-
-    // The autoscaler's own state, centred under the availability figure: what it
-    // is waiting on before it can act again, and how far it has over-provisioned.
-    const cx = x + w * 0.5;
     const held = r.holdRemainingMs > 0;
     const beat = 0.5 + 0.5 * Math.sin(sim.now / 300);
-    ctx.textAlign = 'center';
-    ctx.font = '700 10px "IBM Plex Mono", monospace';
-    ctx.fillStyle = held ? withAlpha(SEMANTIC.retry, 0.6 + 0.4 * beat) : SURFACE.textDim;
-    ctx.fillText(held ? `⏳ ${r.holdReason?.toUpperCase()} ${fmtDur(r.holdRemainingMs)}` : fmtDur(r.decisionIntervalMs), cx, y + 58);
-    ctx.font = '500 8.5px "IBM Plex Mono", monospace';
-    ctx.fillStyle = SURFACE.textFaint;
-    // Under ASG rules nothing is blocked — the bake only withholds the metric.
-    const heldLabel = r.holdBlocks ? 'until the next scale decision' : 'until this batch is counted';
-    ctx.fillText(held ? heldLabel : 'between scale decisions', cx, y + 68);
+    this.panel(x, y, w, h, avail < sim.cfg.slaTarget ? SEMANTIC.timeout : SURFACE.border);
+
+    const mid = y + h / 2 + 4;
     ctx.textAlign = 'left';
-    if (r.overshootInstances > 0) {
-      ctx.textAlign = 'center';
-      ctx.font = '600 9px "IBM Plex Mono", monospace';
-      ctx.fillStyle = SEMANTIC.shed;
-      ctx.fillText(`+${r.overshootInstances} beyond peak need`, cx, y + h - 6);
-      ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = '700 13px "Big Shoulders", "Arial Narrow", sans-serif';
+    ctx.fillStyle = SURFACE.text;
+    ctx.fillText('SCALE-UP', x + 11, mid);
+    let cx = x + 11 + ctx.measureText('SCALE-UP').width + 14;
+    const right = x + w - 10;
+
+    // Once one chip runs out of room the rest stay off too, so what is shown is
+    // always the leading run of the priority order rather than whichever later
+    // ones happened to be short enough to squeeze in.
+    let full = false;
+    const chip = (value: string, label: string, color: string, big = false): void => {
+      if (full) return;
+      ctx.font = big ? '700 15px "IBM Plex Mono", monospace' : '700 11.5px "IBM Plex Mono", monospace';
+      const vw = ctx.measureText(value).width;
+      ctx.font = '500 8.5px "IBM Plex Mono", monospace';
+      const lw = ctx.measureText(label).width;
+      if (cx + vw + 4 + lw > right) {
+        full = true;
+        return;
+      }
+      ctx.font = big ? '700 15px "IBM Plex Mono", monospace' : '700 11.5px "IBM Plex Mono", monospace';
+      ctx.fillStyle = color;
+      ctx.fillText(value, cx, mid);
+      cx += vw + 4;
+      ctx.font = '500 8.5px "IBM Plex Mono", monospace';
+      ctx.fillStyle = SURFACE.textFaint;
+      ctx.fillText(label, cx, mid);
+      cx += lw + 15;
+    };
+
+    chip(`${(avail * 100).toFixed(1)}%`, 'availability', availCol, true);
+    chip(fmtTps(d.offeredTps), 'offered', SEMANTIC.timeout);
+    chip(fmtTps(d.usableCapacityTps), `usable · ${fmtTps(d.meteredCapacityTps)} counted`, SEMANTIC.success);
+    chip(
+      `${d.inUse}·${d.baking}·${d.ready}·${d.provisioning}`,
+      'in use · baking · ready · launching',
+      SURFACE.text,
+    );
+    // What the autoscaler is waiting on, or how often it can act when free.
+    if (held) {
+      chip(
+        `⏳ ${fmtDur(r.holdRemainingMs)}`,
+        r.holdBlocks ? `${r.holdReason} — until the next decision` : `${r.holdReason} — until counted`,
+        withAlpha(SEMANTIC.retry, 0.65 + 0.35 * beat),
+      );
+    } else {
+      chip(fmtDur(r.decisionIntervalMs), 'between decisions', SURFACE.textDim);
     }
+    chip(
+      r.active ? `${fmtDur(r.recoverMs)}${r.recovered ? '' : '…'}` : '—',
+      'recover',
+      r.recovered ? SEMANTIC.success : r.active ? SEMANTIC.timeout : SURFACE.textDim,
+    );
+    chip(
+      r.effectiveAddRatePerMin > 0 ? `${fmtTps(r.effectiveAddRatePerMin)}/min` : '—',
+      'add-rate',
+      SURFACE.text,
+    );
+    chip(`${fmtTps(r.maxSustainableRampPerMin)}/min`, 'max ramp', SEMANTIC.inFlight);
+    chip(fmtDur(r.pipelineLatencyMs), 'pipeline', SURFACE.textDim);
+    if (r.overshootInstances > 0) chip(`+${r.overshootInstances}`, 'beyond peak need', SEMANTIC.shed);
   }
 
   // -- Per-stage lag breakdown ------------------------------------------------
