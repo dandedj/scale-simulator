@@ -609,8 +609,15 @@ the unit of the story. Its own control bar sits in the corner:
 | `◀` `▶` | page back and forward through the history |
 | `5m` `15m` `30m` `1h` | pick a fixed window, which follows the live edge |
 | `ALL` | fit the whole run on one axis instead |
-| `● LIVE` | appears when scrolled off the live edge; click to catch up |
+| `⏸ HOLD` | freeze the window where it is — the run carries on, the view stays put |
+| `● LIVE` | appears when the view is off the live edge; click to catch up |
 | `⤢` | maximize |
+
+**HOLD** is the one to reach for while something is developing: scrolling back to
+stop the view moving also moves you off what you were watching, and the live edge
+would catch up and re-pin the moment it arrived. Held, the window stays exactly
+where you left it however far the run travels past it — the header says
+`15m window @ 1:05:37 — held` — and ● LIVE (or Esc) releases it.
 
 Dragging and the wheel do the same by hand (drag to scroll, wheel to zoom), with
 a few pixels of slop before a press counts as a drag so inspecting a row never

@@ -77,6 +77,7 @@ export class ScalingExperience implements Experience {
   private timelineOpen = false;
   private timelineMax = false;
   private liveBtn!: HTMLButtonElement;
+  private holdBtn!: HTMLButtonElement;
   private maxBtn!: HTMLButtonElement;
   private spanBtns: HTMLButtonElement[] = [];
   private pageBackBtn!: HTMLButtonElement;
@@ -233,6 +234,11 @@ export class ScalingExperience implements Experience {
       b.addEventListener('click', () => this.timeline?.setWindow(span.value));
       bar.appendChild(b);
     }
+    this.holdBtn = el('button', 'tl-btn', '⏸ HOLD') as HTMLButtonElement;
+    this.holdBtn.title = 'Hold the window here — the run carries on, the view stays put';
+    this.holdBtn.addEventListener('click', () => this.timeline?.setHeld(!this.timeline.isHeld()));
+    bar.append(el('span', 'tl-sep'), this.holdBtn);
+
     this.liveBtn = el('button', 'tl-btn timeline-live-btn', '● LIVE') as HTMLButtonElement;
     this.liveBtn.title = 'Jump back to the live edge';
     this.liveBtn.addEventListener('click', () => this.timeline?.goLive());
@@ -250,7 +256,7 @@ export class ScalingExperience implements Experience {
     this.onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || !this.timelineOpen) return;
       // Escape backs out one step: re-pin a scrolled window, then un-maximize.
-      if (this.timeline && !this.timeline.isFollowing()) this.timeline.goLive();
+      if (this.timeline && (!this.timeline.isFollowing() || this.timeline.isHeld())) this.timeline.goLive();
       else if (this.timelineMax) this.setTimelineMax(false);
     };
     window.addEventListener('keydown', this.onKeyDown);
@@ -279,6 +285,9 @@ export class ScalingExperience implements Experience {
       tl.setHeaderInset(this.controlsBar.offsetWidth + 12);
     }
     this.pageBackBtn.disabled = !tl.canPageBack();
+    // Holding a window that already shows everything would mean nothing.
+    this.holdBtn.disabled = tl.isFitAll();
+    this.holdBtn.classList.toggle('active', tl.isHeld());
     const active = tl.isFitAll() ? 'all' : String(tl.currentWindowMs());
     for (const b of this.spanBtns) b.classList.toggle('active', b.dataset.span === active);
   }

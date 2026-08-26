@@ -17,8 +17,9 @@
  * The axis is either a fixed window that follows the live edge — wide enough for
  * a couple of scale-outs, not the whole run — or the whole run at once, picked
  * with the span buttons. In windowed mode ◀ ▶ page through the history, drag and
- * wheel do the same by hand, and ● LIVE catches back up. Before the run starts
- * the window sits at the beginning, so a scheduled ramp is visible as a plan.
+ * wheel do the same by hand, HOLD freezes the window where it is while the run
+ * carries on, and ● LIVE catches back up. Before the run starts the window sits
+ * at the beginning, so a scheduled ramp is visible as a plan.
  */
 
 import { SEMANTIC, SURFACE, withAlpha } from '../../render/colors';
@@ -95,6 +96,12 @@ export class ScalingTimeline {
   private windowStart = 0;
   /** Pinned to the live edge until the user scrolls back. */
   private following = true;
+  /**
+   * Frozen in place: the run advances but the window does not. Distinct from
+   * merely having scrolled back, which the live edge would otherwise catch up
+   * to and re-pin the moment it arrived.
+   */
+  private held = false;
   /** Plot geometry from the last draw, so pointer deltas can be read as time. */
   private geom = { plotX: 10, plotW: 1 };
   /** Right-hand space the DOM control bar occupies, so the header clears it. */
@@ -181,12 +188,26 @@ export class ScalingTimeline {
 
   /** True while the window is pinned to the live edge (always so when fitting all). */
   isFollowing(): boolean {
-    return this.fitAll || this.following;
+    return this.fitAll || (this.following && !this.held);
   }
 
   /** Re-pin to the live edge — what the ● LIVE button does. */
   goLive(): void {
+    this.held = false;
     this.following = true;
+  }
+
+  isHeld(): boolean {
+    return this.held;
+  }
+
+  /** Freeze the window where it currently sits, or let it follow again. */
+  setHeld(on: boolean): void {
+    if (on === this.held) return;
+    // Freeze from wherever the view is right now, live edge included.
+    if (on) this.windowStart = this.resolveWindowStart();
+    this.held = on;
+    if (!on) this.following = true;
   }
 
   /** Reserve room on the header row for the control bar drawn over the canvas. */
@@ -299,6 +320,11 @@ export class ScalingTimeline {
       return 0;
     }
     const max = Math.max(0, this.contentEnd - this.windowMs);
+    if (this.held) {
+      // Held: stay put, but never past the end of what exists.
+      this.windowStart = Math.min(Math.max(0, this.windowStart), max);
+      return this.windowStart;
+    }
     if (this.following) this.windowStart = max;
     else this.windowStart = Math.min(Math.max(0, this.windowStart), max);
     // Dragging back to the right edge re-pins, so the button isn't the only way.
@@ -339,9 +365,10 @@ export class ScalingTimeline {
     ctx.fillText(outs, x, 14);
     x -= ctx.measureText(outs).width + 10;
     ctx.fillStyle = this.isFollowing() ? SURFACE.textFaint : SEMANTIC.shed;
+    const state = this.held ? ' — held' : this.following ? '' : ' — scrolled back';
     const win = this.fitAll
       ? 'whole run'
-      : `${fmtDur(this.windowMs)} window${this.following ? '' : ` @ ${fmtClock(start)} — scrolled back`}`;
+      : `${fmtDur(this.windowMs)} window${state ? ` @ ${fmtClock(start)}${state}` : ''}`;
     ctx.fillText(win, x, 14);
     x -= ctx.measureText(win).width + 10;
     // Drop the hint rather than let it collide with the title on a narrow pane.
