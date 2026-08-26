@@ -492,6 +492,7 @@ export class ScalingControlPanel {
   private rampBtn!: HTMLButtonElement;
   private compareBtn!: HTMLButtonElement;
   private timelineBtn!: HTMLButtonElement;
+  private presetSelect: HTMLSelectElement | null = null;
   private paneTabBtns: HTMLButtonElement[] = [];
   private activePane = 0;
   private side: HTMLElement;
@@ -600,20 +601,42 @@ export class ScalingControlPanel {
   private buildPresets(): void {
     const section = el('div', 'panel-section');
     section.appendChild(el('h2', 'panel-title', 'Scenarios'));
-    const grid = el('div', 'preset-grid single-only');
+    // A picker rather than a wall of cards: nine descriptions pushed the tuning
+    // controls off the panel entirely. The description is one ⓘ away.
+    const grid = el('div', 'preset-pick single-only');
+    const select = document.createElement('select');
+    select.className = 'preset-select';
     for (const preset of SCALING_PRESETS) {
-      const card = el('button', 'preset-card');
-      card.dataset.preset = preset.id;
-      card.appendChild(el('div', 'preset-name', preset.name));
-      card.appendChild(el('div', 'preset-desc', preset.description));
-      card.addEventListener('click', () => {
-        this.hooks.loadPreset(preset.id);
-        this.setActivePreset(preset.id);
-        this.refreshKnobs();
-      });
-      grid.appendChild(card);
+      const opt = document.createElement('option');
+      opt.value = preset.id;
+      opt.textContent = preset.name;
+      select.appendChild(opt);
     }
-    section.appendChild(grid);
+    const desc = el('div', 'setting-info preset-desc-panel');
+    const descBody = el('p', '');
+    desc.appendChild(descBody);
+    const infoBtn = el('button', 'info-btn', 'ⓘ') as HTMLButtonElement;
+    infoBtn.type = 'button';
+    infoBtn.title = 'What this scenario shows';
+    infoBtn.addEventListener('click', () => {
+      const open = desc.classList.toggle('open');
+      infoBtn.classList.toggle('active', open);
+    });
+    const syncDesc = () => {
+      const preset = SCALING_PRESETS.find((p) => p.id === select.value);
+      descBody.textContent = preset?.description ?? '';
+      select.title = preset?.description ?? '';
+    };
+    select.addEventListener('change', () => {
+      this.hooks.loadPreset(select.value);
+      this.setActivePreset(select.value);
+      syncDesc();
+      this.refreshKnobs();
+    });
+    syncDesc();
+    this.presetSelect = select;
+    grid.append(select, infoBtn);
+    section.append(grid, desc);
 
     const cmp = el('div', 'compare-only');
     PANE_TAGS.forEach((tag, pane) => {
@@ -644,7 +667,21 @@ export class ScalingControlPanel {
   }
 
   setActivePreset(id: string | null): void {
-    this.side.querySelectorAll<HTMLElement>('.preset-card').forEach((c) => c.classList.toggle('active', c.dataset.preset === id));
+    if (!this.presetSelect) return;
+    // A knob edit leaves no scenario selected; say so rather than keep claiming one.
+    const custom = this.presetSelect.querySelector<HTMLOptionElement>('option[value="__custom"]');
+    if (id === null) {
+      if (!custom) {
+        const opt = document.createElement('option');
+        opt.value = '__custom';
+        opt.textContent = '— custom —';
+        this.presetSelect.appendChild(opt);
+      }
+      this.presetSelect.value = '__custom';
+      return;
+    }
+    custom?.remove();
+    this.presetSelect.value = id;
   }
   private setActiveScenario(pane: number, id: string | null): void {
     this.side.querySelectorAll<HTMLElement>(`.preset-mini[data-pane='${pane}']`).forEach((b) => b.classList.toggle('active', b.dataset.preset === id));

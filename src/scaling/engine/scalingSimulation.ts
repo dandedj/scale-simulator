@@ -37,6 +37,7 @@ import {
   type ScalingSimulationConfig,
   type ScalingStageView,
   type ScalingTimelineView,
+  type StageMeta,
 } from './types';
 
 /** Autoscaler evaluation + demand-ramp refresh cadence (ms). */
@@ -65,6 +66,12 @@ class Instance {
   inServiceAt: number;
   /** When it was launched — the ECS bake clock's zero. */
   launchedAt: number;
+  /**
+   * Set on one instance per batch. A batch launches together and runs identical
+   * stage durations, so a single reporter gives the ticker the pipeline without
+   * eight events per instance.
+   */
+  reportsForBatch: number | null = null;
   event: ScheduledEvent | null = null;
 
   constructor(stageIndex: number, now: number, prewarmed: boolean) {
@@ -259,8 +266,10 @@ export class ScalingSimulation {
     const decision = this.decide(util, tier);
     const n = decision.launched;
     if (n <= 0) return;
-    for (let i = 0; i < n; i++) this.launchInstance();
+    // The first of the batch reports the pipeline on the batch's behalf.
+    for (let i = 0; i < n; i++) this.launchInstance(i === 0 ? n : null);
     this.recordBatch(n, decision);
+    if (c.launch.warmupMode === 'ecs') this.scheduleBakeLog(n, this.now + c.launch.bakeMs);
     this.lastLaunchAt = this.now;
     this.metrics.totals.launches++;
     this.metrics.totals.instancesLaunched += n;
@@ -391,8 +400,9 @@ export class ScalingSimulation {
     return tier;
   }
 
-  private launchInstance(): void {
+  private launchInstance(reportsForBatch: number | null = null): void {
     const inst = new Instance(0, this.now, false);
+    inst.reportsForBatch = reportsForBatch;
     this.instances.push(inst);
     this.scheduleStage(inst);
   }
@@ -402,14 +412,41 @@ export class ScalingSimulation {
     const durMs = this.stageDurationMs(inst.stageIndex);
     inst.stageEnteredAt = this.now;
     inst.stageEndsAt = this.now + durMs;
+    const stage = PIPELINE_STAGES[inst.stageIndex];
     inst.event = this.queue.schedule(inst.stageEndsAt, () => {
       inst.stageIndex++;
+      if (inst.reportsForBatch !== null) this.logStage(inst, stage);
       if (inst.stageIndex < IN_USE_INDEX) this.scheduleStage(inst);
       else {
         inst.inServiceAt = this.now;
         inst.event = null;
+        // ASG times the bake from here; ECS timed it from the launch already.
+        if (inst.reportsForBatch !== null && this.cfg.launch.warmupMode === 'asg') {
+          this.scheduleBakeLog(inst.reportsForBatch, this.now + this.cfg.launch.bakeMs);
+        }
       }
     });
+  }
+
+  /** One line per stage the batch clears, so the ticker shows the whole pipeline. */
+  private logStage(inst: Instance, stage: StageMeta): void {
+    const n = inst.reportsForBatch ?? 1;
+    const done = inst.stageIndex >= IN_USE_INDEX;
+    const note = done ? ' — in service, carrying traffic' : stage.readyAfter ? ' — serving, awaiting clients' : '';
+    this.metrics.log(this.now, 'info', 'pipeline', `+${n} · ${stage.label} done${note}`, n);
+  }
+
+  /**
+   * The batch's bake, announced when it expires — the point the autoscaler
+   * starts counting the capacity and can build on it. Under ECS rules that can
+   * fall while the batch is still in the pipeline, which is the whole point of
+   * saying so out loud.
+   */
+  private scheduleBakeLog(count: number, at: number): void {
+    const log = () =>
+      this.metrics.log(this.now, 'info', 'pipeline', `+${count} · bake done — counted as capacity`, count);
+    if (at <= this.now) log();
+    else this.queue.schedule(at, log);
   }
 
   private stageDurationMs(stageIndex: number): number {

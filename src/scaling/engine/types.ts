@@ -281,7 +281,7 @@ export interface ScalingMetricsBucket {
 }
 
 /** What an event is about — the timeline draws one lane per kind. */
-export type ScalingEventKind = 'demand' | 'scale' | 'slo' | 'info';
+export type ScalingEventKind = 'demand' | 'scale' | 'pipeline' | 'slo' | 'info';
 
 export interface ScalingSimEventLog {
   time: number;

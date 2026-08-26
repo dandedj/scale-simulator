@@ -17,6 +17,15 @@ import { ScalingControlPanel, PANE_TAGS } from './ui/controls';
 const DEFAULT_TIME_SCALE = 60;
 const MAX_SIM_MS_PER_FRAME = 60_000;
 
+/** Span choices on the timeline's own control bar. */
+const TIMELINE_SPANS: Array<{ value: number | 'all'; label: string }> = [
+  { value: 300_000, label: '5m' },
+  { value: 900_000, label: '15m' },
+  { value: 1_800_000, label: '30m' },
+  { value: 3_600_000, label: '1h' },
+  { value: 'all', label: 'ALL' },
+];
+
 const SINGLE_HINT =
   'Starts calm at 50K TPS and holds there — press START, then ▲ RAMP when you want to add demand. Pick a scenario to run a scheduled ramp instead.';
 const COMPARE_HINT = 'Tune each sim — A above, B below — then start. Both run on the same clock and demand ramp.';
@@ -65,6 +74,11 @@ export class ScalingExperience implements Experience {
   private timelineOpen = false;
   private timelineMax = false;
   private liveBtn!: HTMLButtonElement;
+  private maxBtn!: HTMLButtonElement;
+  private spanBtns: HTMLButtonElement[] = [];
+  private pageBackBtn!: HTMLButtonElement;
+  private controlsBar!: HTMLElement;
+  private liveWas = false;
   private onKeyDown!: (e: KeyboardEvent) => void;
 
   mount(hosts: ExperienceHosts, playback: PlaybackController): void {
@@ -130,7 +144,7 @@ export class ScalingExperience implements Experience {
   render(): void {
     if (this.timelineMax) {
       this.timeline?.draw(this.panes[0].sim);
-      this.syncLiveBtn();
+      this.syncTimelineControls();
       this.controls.update();
       this.updateHud();
       return;
@@ -149,7 +163,7 @@ export class ScalingExperience implements Experience {
     }
     if (this.timelineOpen && this.timeline && !this.compare) {
       this.timeline.draw(this.panes[0].sim);
-      this.syncLiveBtn();
+      this.syncTimelineControls();
     }
     this.controls.update();
     this.updateHud();
@@ -163,6 +177,7 @@ export class ScalingExperience implements Experience {
       }
     }
     this.timeline?.resize();
+    this.timeline?.setHeaderInset(this.controlsBar ? this.controlsBar.offsetWidth + 12 : 0);
   }
 
   simTimeMs(): number {
@@ -190,16 +205,39 @@ export class ScalingExperience implements Experience {
     this.timelineEl = el('div', 'timeline-pane hidden');
     this.timelineEl.id = 'scaling-timeline';
     const canvas = document.createElement('canvas');
-    const maxBtn = el('button', 'timeline-max-btn', '⤢') as HTMLButtonElement;
-    maxBtn.title = 'Maximize the timeline (Esc to restore)';
-    maxBtn.addEventListener('click', () => this.setTimelineMax(!this.timelineMax));
-    // Only shown once the window has been scrolled off the live edge.
-    this.liveBtn = el('button', 'timeline-live-btn', '● LIVE') as HTMLButtonElement;
+    this.timelineEl.appendChild(canvas);
+    this.timeline = new ScalingTimeline(canvas);
+
+    // Explicit controls beat dragging for getting somewhere specific.
+    const bar = el('div', 'timeline-controls');
+    const back = el('button', 'tl-btn', '◀') as HTMLButtonElement;
+    back.title = 'Page back through the history';
+    back.addEventListener('click', () => this.timeline?.pageBy(-0.5));
+    const fwd = el('button', 'tl-btn', '▶') as HTMLButtonElement;
+    fwd.title = 'Page forward';
+    fwd.addEventListener('click', () => this.timeline?.pageBy(0.5));
+    bar.append(back, fwd, el('span', 'tl-sep'));
+    for (const span of TIMELINE_SPANS) {
+      const b = el('button', 'tl-btn tl-span', span.label) as HTMLButtonElement;
+      b.dataset.span = String(span.value);
+      b.title = span.value === 'all' ? 'Fit the whole run on one axis' : `Show a ${span.label} window`;
+      b.addEventListener('click', () => this.timeline?.setWindow(span.value));
+      bar.appendChild(b);
+    }
+    this.liveBtn = el('button', 'tl-btn timeline-live-btn', '● LIVE') as HTMLButtonElement;
     this.liveBtn.title = 'Jump back to the live edge';
     this.liveBtn.addEventListener('click', () => this.timeline?.goLive());
-    this.timelineEl.append(canvas, this.liveBtn, maxBtn);
+    const maxBtn = el('button', 'tl-btn', '⤢') as HTMLButtonElement;
+    maxBtn.title = 'Maximize the timeline (Esc to restore)';
+    maxBtn.addEventListener('click', () => this.setTimelineMax(!this.timelineMax));
+    bar.append(this.liveBtn, el('span', 'tl-sep'), maxBtn);
+    this.timelineEl.appendChild(bar);
+    this.maxBtn = maxBtn;
+    this.spanBtns = [...bar.querySelectorAll<HTMLButtonElement>('.tl-span')];
+    this.pageBackBtn = back;
+    this.controlsBar = bar;
+
     this.hosts.stageCol.appendChild(this.timelineEl);
-    this.timeline = new ScalingTimeline(canvas);
     this.onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || !this.timelineOpen) return;
       // Escape backs out one step: re-pin a scrolled window, then un-maximize.
@@ -219,9 +257,21 @@ export class ScalingExperience implements Experience {
     this.resize();
   }
 
-  private syncLiveBtn(): void {
-    const scrolled = this.timeline ? !this.timeline.isFollowing() : false;
-    this.liveBtn.classList.toggle('visible', scrolled);
+  /** Keep the timeline's own controls in step with the window it is showing. */
+  private syncTimelineControls(): void {
+    const tl = this.timeline;
+    if (!tl) return;
+    const showLive = !tl.isFollowing();
+    this.liveBtn.classList.toggle('visible', showLive);
+    // The bar's width changes with the LIVE button; re-measure only then, not
+    // every frame, since reading offsetWidth forces layout.
+    if (showLive !== this.liveWas) {
+      this.liveWas = showLive;
+      tl.setHeaderInset(this.controlsBar.offsetWidth + 12);
+    }
+    this.pageBackBtn.disabled = !tl.canPageBack();
+    const active = tl.isFitAll() ? 'all' : String(tl.currentWindowMs());
+    for (const b of this.spanBtns) b.classList.toggle('active', b.dataset.span === active);
   }
 
   /** Hand the whole stage to the timeline — the board and charts step aside. */
@@ -229,8 +279,7 @@ export class ScalingExperience implements Experience {
     this.timelineMax = on && this.timelineOpen;
     this.appEl.classList.toggle('timeline-max', this.timelineMax);
     this.timelineEl.classList.toggle('maximized', this.timelineMax);
-    const btn = this.timelineEl.querySelector('.timeline-max-btn');
-    if (btn) btn.textContent = this.timelineMax ? '⤡' : '⤢';
+    this.maxBtn.textContent = this.timelineMax ? '⤡' : '⤢';
     this.resize();
   }
 

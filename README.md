@@ -550,6 +550,13 @@ Lanes, top to bottom:
   case, where it follows them.
 - **Metric** — a tick per publish. Nothing can be decided between two of them.
 
+The **event ticker** carries the same pipeline: each batch reports one line per
+stage it clears (`+20 · health check done`, `+20 · client pickup done — in
+service, carrying traffic`, `+20 · bake done — counted as capacity`), reported by
+one instance on the batch's behalf so a twenty-instance step is twenty times
+quieter than it would otherwise be. Under ECS rules a bake shorter than the
+pipeline reports *before* the batch lands, which is exactly the point.
+
 **Hovering a scale-out row shows why it chose that size**, step by step:
 
 ```
@@ -569,13 +576,20 @@ availability and events at that moment.
 
 **The axis is a fixed window, not the whole run** — 15 minutes by default, wide
 enough to hold a couple of scale-outs with their pipelines and bakes, which is
-the unit of the story. It follows the live edge as the run advances:
+the unit of the story. Its own control bar sits in the corner:
 
-- **Drag** to scroll back through older events. A **● LIVE** button appears
-  while you are away from the live edge; click it (or drag back to the right
-  edge, or press Esc) to catch up.
-- **Wheel** to zoom, through 2m / 5m / 10m / 15m / 30m / 1h / 2h, anchored on
-  the cursor so whatever is under it stays put.
+| | |
+|---|---|
+| `◀` `▶` | page back and forward through the history |
+| `5m` `15m` `30m` `1h` | pick a fixed window, which follows the live edge |
+| `ALL` | fit the whole run on one axis instead |
+| `● LIVE` | appears when scrolled off the live edge; click to catch up |
+| `⤢` | maximize |
+
+Dragging and the wheel do the same by hand (drag to scroll, wheel to zoom), with
+a few pixels of slop before a press counts as a drag so inspecting a row never
+scrolls the view. Esc backs out one step at a time — re-pin a scrolled window
+first, then un-maximize.
 
 Only scale-outs active inside the window get a row, so the rows stay large and
 about what is on screen; the demand curve scales to the window too, rather than
@@ -761,6 +775,11 @@ two panes run one clock but tell two stories, and a shared axis would
 misrepresent both.
 
 ### Scenarios
+
+Scenarios are a picker at the top of the side panel rather than a wall of cards —
+nine descriptions pushed the tuning controls off the panel entirely — with the
+selected one's description a ⓘ away. Editing any knob switches it to
+*— custom —* rather than keep claiming a scenario it no longer matches.
 
 The tab opens on **Steady baseline** — a calm fleet serving 50K TPS on two
 instances, with nothing scheduled. It holds there until you add demand yourself

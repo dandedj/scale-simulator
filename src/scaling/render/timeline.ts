@@ -14,10 +14,11 @@
  * Hovering a batch row explains that scale-out's arithmetic; hovering anywhere
  * else reports the demand, capacity, availability and events at that moment.
  *
- * The axis is a fixed window — wide enough for a couple of scale-outs, not the
- * whole run — that follows the live edge. Drag to scroll back through older
- * events, wheel to zoom, ● LIVE to catch up again. Before the run starts the
- * window sits at the beginning, so a scheduled ramp is visible as a plan.
+ * The axis is either a fixed window that follows the live edge — wide enough for
+ * a couple of scale-outs, not the whole run — or the whole run at once, picked
+ * with the span buttons. In windowed mode ◀ ▶ page through the history, drag and
+ * wheel do the same by hand, and ● LIVE catches back up. Before the run starts
+ * the window sits at the beginning, so a scheduled ramp is visible as a plan.
  */
 
 import { SEMANTIC, SURFACE, withAlpha } from '../../render/colors';
@@ -37,8 +38,12 @@ const TICK_STEPS = [10_000, 30_000, 60_000, 120_000, 300_000, 600_000, 900_000, 
  * of scale-outs with their pipelines and bakes, which is the unit of the story;
  * zooming out to the widest reaches the collector's whole retention.
  */
-const WINDOW_STOPS = [120_000, 300_000, 600_000, 900_000, 1_800_000, 3_600_000, 7_200_000];
-const DEFAULT_WINDOW_INDEX = 3; // 15 minutes
+const WINDOW_STOPS = [300_000, 900_000, 1_800_000, 3_600_000];
+const DEFAULT_WINDOW_MS = 900_000; // 15 minutes
+/** Pointer slop before a press counts as a drag, so inspecting never scrolls. */
+const DRAG_DEADZONE_PX = 4;
+/** Floor for the whole-run axis, so an idle run still reads as a timeline. */
+const MIN_SPAN_MS = 60_000;
 /** Rows the demand-bracket lane will stack before it stops drawing more. */
 const MAX_SPAN_ROWS = 3;
 /** Tallest a single scale-out's Gantt row gets, however much room there is. */
@@ -82,15 +87,19 @@ export class ScalingTimeline {
   private hoverX: number | null = null;
   private hoverY = 0;
   private rows: BatchRow[] = [];
-  /** Visible span, from WINDOW_STOPS. */
-  private windowMs = WINDOW_STOPS[DEFAULT_WINDOW_INDEX];
+  /** Visible span while windowed. */
+  private windowMs = DEFAULT_WINDOW_MS;
+  /** Show the whole run on one axis instead of a fixed window. */
+  private fitAll = false;
   /** Left edge of the window (sim ms); only meaningful when not following. */
   private windowStart = 0;
   /** Pinned to the live edge until the user scrolls back. */
   private following = true;
   /** Plot geometry from the last draw, so pointer deltas can be read as time. */
   private geom = { plotX: 10, plotW: 1 };
-  private dragging: { pointerId: number; lastX: number } | null = null;
+  /** Right-hand space the DOM control bar occupies, so the header clears it. */
+  private headerInset = 0;
+  private dragging: { pointerId: number; lastX: number; startX: number; live: boolean } | null = null;
   private onMove: (e: PointerEvent) => void;
   private onLeave: () => void;
   private onDown: (e: PointerEvent) => void;
@@ -104,9 +113,13 @@ export class ScalingTimeline {
       const rect = this.canvas.getBoundingClientRect();
       this.hoverX = e.clientX - rect.left;
       this.hoverY = e.clientY - rect.top;
-      if (this.dragging && e.pointerId === this.dragging.pointerId) {
-        const dx = e.clientX - this.dragging.lastX;
-        this.dragging.lastX = e.clientX;
+      const d = this.dragging;
+      if (d && e.pointerId === d.pointerId && !this.fitAll) {
+        // Ignore pointer slop, so moving onto a row to read it never scrolls.
+        if (!d.live && Math.abs(e.clientX - d.startX) < DRAG_DEADZONE_PX) return;
+        d.live = true;
+        const dx = e.clientX - d.lastX;
+        d.lastX = e.clientX;
         // Content follows the finger: dragging right walks back in time.
         this.panBy(-(dx / this.geom.plotW) * this.windowMs);
       }
@@ -115,7 +128,7 @@ export class ScalingTimeline {
       this.hoverX = null;
     };
     this.onDown = (e: PointerEvent) => {
-      this.dragging = { pointerId: e.pointerId, lastX: e.clientX };
+      this.dragging = { pointerId: e.pointerId, lastX: e.clientX, startX: e.clientX, live: false };
       // Capture keeps a drag alive past the canvas edge; it throws for a pointer
       // the browser isn't tracking, which must not break the drag itself.
       try {
@@ -136,6 +149,7 @@ export class ScalingTimeline {
       this.canvas.classList.remove('dragging');
     };
     this.onWheel = (e: WheelEvent) => {
+      if (this.fitAll) return;
       e.preventDefault();
       // Zoom about the cursor so whatever is under it stays put.
       const rect = this.canvas.getBoundingClientRect();
@@ -165,14 +179,53 @@ export class ScalingTimeline {
     this.canvas.removeEventListener('wheel', this.onWheel);
   }
 
-  /** True while the window is pinned to the live edge. */
+  /** True while the window is pinned to the live edge (always so when fitting all). */
   isFollowing(): boolean {
-    return this.following;
+    return this.fitAll || this.following;
   }
 
   /** Re-pin to the live edge — what the ● LIVE button does. */
   goLive(): void {
     this.following = true;
+  }
+
+  /** Reserve room on the header row for the control bar drawn over the canvas. */
+  setHeaderInset(px: number): void {
+    this.headerInset = px;
+  }
+
+  /** Whether the whole run is on screen rather than a fixed window. */
+  isFitAll(): boolean {
+    return this.fitAll;
+  }
+
+  /** The visible span while windowed, for matching the span buttons. */
+  currentWindowMs(): number {
+    return this.windowMs;
+  }
+
+  /** Pick a fixed span, or `'all'` to put the whole run on one axis. */
+  setWindow(ms: number | 'all'): void {
+    if (ms === 'all') {
+      this.fitAll = true;
+      return;
+    }
+    // Keep the middle of the view put when the span changes under it.
+    const mid = this.windowStart + this.windowMs / 2;
+    this.fitAll = false;
+    this.windowMs = ms;
+    if (!this.following) this.windowStart = mid - ms / 2;
+  }
+
+  /** Page through history by a fraction of the window — what ◀ ▶ do. */
+  pageBy(fraction: number): void {
+    if (this.fitAll) return;
+    this.panBy(fraction * this.windowMs);
+  }
+
+  /** True when there is history to the left of the window to page back into. */
+  canPageBack(): boolean {
+    return !this.fitAll && this.windowStart > 0;
   }
 
   /** Scrolling away from the right edge drops the live pin. */
@@ -205,7 +258,11 @@ export class ScalingTimeline {
 
     const view = sim.timelineView();
     // The window may reach past `now` to a ramp that is scheduled but hasn't run.
-    this.contentEnd = Math.max(view.nowMs, ...view.spans.map((s) => s.endMs), this.windowMs);
+    this.contentEnd = Math.max(
+      view.nowMs,
+      ...view.spans.map((s) => s.endMs),
+      this.fitAll ? MIN_SPAN_MS : this.windowMs,
+    );
     const start = this.resolveWindowStart();
     const end = start + this.windowMs;
     // Only batches active inside the window get a row, so the rows stay large
@@ -236,6 +293,11 @@ export class ScalingTimeline {
 
   /** Where the window sits: pinned to the live edge, or wherever it was dragged. */
   private resolveWindowStart(): number {
+    if (this.fitAll) {
+      this.windowMs = this.contentEnd;
+      this.windowStart = 0;
+      return 0;
+    }
     const max = Math.max(0, this.contentEnd - this.windowMs);
     if (this.following) this.windowStart = max;
     else this.windowStart = Math.min(Math.max(0, this.windowStart), max);
@@ -265,7 +327,7 @@ export class ScalingTimeline {
     const added = view.batches.reduce((a, b) => a + b.count, 0);
     ctx.textAlign = 'right';
     ctx.font = '500 9px "IBM Plex Mono", monospace';
-    let x = w - 10;
+    let x = w - 10 - this.headerInset;
     if (breachMs > 0) {
       const label = `below SLO ${fmtDur(breachMs)}`;
       ctx.fillStyle = SEMANTIC.timeout;
@@ -276,12 +338,19 @@ export class ScalingTimeline {
     ctx.fillStyle = SEMANTIC.inFlight;
     ctx.fillText(outs, x, 14);
     x -= ctx.measureText(outs).width + 10;
-    ctx.fillStyle = this.following ? SURFACE.textFaint : SEMANTIC.shed;
-    const win = `${fmtDur(this.windowMs)} window${this.following ? '' : ` @ ${fmtClock(start)} — scrolled back`}`;
+    ctx.fillStyle = this.isFollowing() ? SURFACE.textFaint : SEMANTIC.shed;
+    const win = this.fitAll
+      ? 'whole run'
+      : `${fmtDur(this.windowMs)} window${this.following ? '' : ` @ ${fmtClock(start)} — scrolled back`}`;
     ctx.fillText(win, x, 14);
     x -= ctx.measureText(win).width + 10;
-    ctx.fillStyle = SURFACE.textFaint;
-    ctx.fillText(`drag to scroll · wheel to zoom · ${fmtClock(view.nowMs)} elapsed`, x, 14);
+    // Drop the hint rather than let it collide with the title on a narrow pane.
+    const how = this.fitAll ? 'hover for detail' : '◀ ▶ or drag to scroll';
+    const hint = `${how} · ${fmtClock(view.nowMs)} elapsed`;
+    if (x - ctx.measureText(hint).width > 76) {
+      ctx.fillStyle = SURFACE.textFaint;
+      ctx.fillText(hint, x, 14);
+    }
     ctx.textAlign = 'left';
   }
 

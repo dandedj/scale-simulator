@@ -391,6 +391,38 @@ describe('timeline', () => {
     for (const a of fired) expect(a.firedAtMs - a.startMs).toBe(sim.cfg.stages.detectionMs);
   });
 
+  it('reports each batch through the pipeline once, not once per instance', () => {
+    const sim = newSim();
+    run(sim, 900_000);
+    const events = sim.timelineView().events;
+    const pipeline = events.filter((e) => e.kind === 'pipeline');
+    const batches = sim.timelineView().batches;
+    // One line per stage, plus the bake, for each batch — regardless of size.
+    const perBatch = PIPELINE_STAGES.length + 1;
+    expect(pipeline.length).toBe(batches.length * perBatch);
+    expect(pipeline.some((e) => e.message.includes('health check'))).toBe(true);
+    expect(pipeline.some((e) => e.message.includes('in service'))).toBe(true);
+    expect(pipeline.some((e) => e.message.includes('bake done'))).toBe(true);
+    // They carry the batch size, not a per-instance count.
+    for (const e of pipeline) expect(batches.some((b) => b.count === e.value)).toBe(true);
+  });
+
+  /**
+   * ECS times the bake from the launch, so with a bake shorter than the pipeline
+   * the capacity is "counted" before it has even landed — the ticker should say
+   * so in that order rather than pretending the bake followed the pipeline.
+   */
+  it('announces an ECS bake that expires before the batch lands', () => {
+    const sim = newSim((c) => (c.launch.bakeMs = 60_000));
+    run(sim, 600_000);
+    const pipeline = sim.timelineView().events.filter((e) => e.kind === 'pipeline');
+    const bake = pipeline.find((e) => e.message.includes('bake done'));
+    const inService = pipeline.find((e) => e.message.includes('in service'));
+    expect(bake).toBeDefined();
+    expect(inService).toBeDefined();
+    expect(bake!.time).toBeLessThan(inService!.time);
+  });
+
   it('tags events by kind and carries the instances each scale-out added', () => {
     const sim = newSim();
     run(sim, 900_000);
