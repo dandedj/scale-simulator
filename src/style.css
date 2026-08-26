@@ -1695,7 +1695,33 @@ input[type='range']::-moz-range-thumb {
   display: block;
   width: 100%;
   height: 100%;
-  cursor: crosshair;
+  cursor: grab;
+  touch-action: none;
+}
+
+.timeline-pane canvas.dragging {
+  cursor: grabbing;
+}
+
+/* Appears only when the window has been scrolled off the live edge. */
+.timeline-live-btn {
+  position: absolute;
+  top: 5px;
+  right: 36px;
+  display: none;
+  padding: 1px 7px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: #0a0b0e;
+  background: var(--warn);
+  border: 1px solid var(--warn);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.timeline-live-btn.visible {
+  display: block;
 }
 
 .timeline-max-btn {

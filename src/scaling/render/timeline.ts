@@ -14,8 +14,10 @@
  * Hovering a batch row explains that scale-out's arithmetic; hovering anywhere
  * else reports the demand, capacity, availability and events at that moment.
  *
- * The axis spans the whole run and extends to a scheduled ramp that hasn't
- * happened yet, so the plan is visible before the run starts.
+ * The axis is a fixed window — wide enough for a couple of scale-outs, not the
+ * whole run — that follows the live edge. Drag to scroll back through older
+ * events, wheel to zoom, ● LIVE to catch up again. Before the run starts the
+ * window sits at the beginning, so a scheduled ramp is visible as a plan.
  */
 
 import { SEMANTIC, SURFACE, withAlpha } from '../../render/colors';
@@ -30,8 +32,13 @@ import {
 
 /** Axis tick steps (ms), coarsest that still leaves ~10 ticks wins. */
 const TICK_STEPS = [10_000, 30_000, 60_000, 120_000, 300_000, 600_000, 900_000, 1_800_000, 3_600_000, 7_200_000];
-/** Never squeeze the axis below this, so an idle run still reads as a timeline. */
-const MIN_AXIS_MS = 60_000;
+/**
+ * Zoom stops for the visible window. The default is wide enough to hold a couple
+ * of scale-outs with their pipelines and bakes, which is the unit of the story;
+ * zooming out to the widest reaches the collector's whole retention.
+ */
+const WINDOW_STOPS = [120_000, 300_000, 600_000, 900_000, 1_800_000, 3_600_000, 7_200_000];
+const DEFAULT_WINDOW_INDEX = 3; // 15 minutes
 /** Rows the demand-bracket lane will stack before it stops drawing more. */
 const MAX_SPAN_ROWS = 3;
 /** Tallest a single scale-out's Gantt row gets, however much room there is. */
@@ -75,8 +82,20 @@ export class ScalingTimeline {
   private hoverX: number | null = null;
   private hoverY = 0;
   private rows: BatchRow[] = [];
+  /** Visible span, from WINDOW_STOPS. */
+  private windowMs = WINDOW_STOPS[DEFAULT_WINDOW_INDEX];
+  /** Left edge of the window (sim ms); only meaningful when not following. */
+  private windowStart = 0;
+  /** Pinned to the live edge until the user scrolls back. */
+  private following = true;
+  /** Plot geometry from the last draw, so pointer deltas can be read as time. */
+  private geom = { plotX: 10, plotW: 1 };
+  private dragging: { pointerId: number; lastX: number } | null = null;
   private onMove: (e: PointerEvent) => void;
   private onLeave: () => void;
+  private onDown: (e: PointerEvent) => void;
+  private onUp: (e: PointerEvent) => void;
+  private onWheel: (e: WheelEvent) => void;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -85,19 +104,87 @@ export class ScalingTimeline {
       const rect = this.canvas.getBoundingClientRect();
       this.hoverX = e.clientX - rect.left;
       this.hoverY = e.clientY - rect.top;
+      if (this.dragging && e.pointerId === this.dragging.pointerId) {
+        const dx = e.clientX - this.dragging.lastX;
+        this.dragging.lastX = e.clientX;
+        // Content follows the finger: dragging right walks back in time.
+        this.panBy(-(dx / this.geom.plotW) * this.windowMs);
+      }
     };
     this.onLeave = () => {
       this.hoverX = null;
     };
+    this.onDown = (e: PointerEvent) => {
+      this.dragging = { pointerId: e.pointerId, lastX: e.clientX };
+      // Capture keeps a drag alive past the canvas edge; it throws for a pointer
+      // the browser isn't tracking, which must not break the drag itself.
+      try {
+        this.canvas.setPointerCapture(e.pointerId);
+      } catch {
+        /* not capturable — the drag still works inside the canvas */
+      }
+      this.canvas.classList.add('dragging');
+    };
+    this.onUp = (e: PointerEvent) => {
+      if (this.dragging?.pointerId !== e.pointerId) return;
+      try {
+        this.canvas.releasePointerCapture(e.pointerId);
+      } catch {
+        /* never captured */
+      }
+      this.dragging = null;
+      this.canvas.classList.remove('dragging');
+    };
+    this.onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      // Zoom about the cursor so whatever is under it stays put.
+      const rect = this.canvas.getBoundingClientRect();
+      const frac = clamp01((e.clientX - rect.left - this.geom.plotX) / this.geom.plotW);
+      const anchor = this.windowStart + frac * this.windowMs;
+      const i = WINDOW_STOPS.indexOf(this.windowMs);
+      const next = WINDOW_STOPS[clampInt(i + (e.deltaY > 0 ? 1 : -1), 0, WINDOW_STOPS.length - 1)];
+      if (next === this.windowMs) return;
+      this.windowMs = next;
+      if (!this.following) this.windowStart = anchor - frac * next;
+    };
     canvas.addEventListener('pointermove', this.onMove);
     canvas.addEventListener('pointerleave', this.onLeave);
+    canvas.addEventListener('pointerdown', this.onDown);
+    canvas.addEventListener('pointerup', this.onUp);
+    canvas.addEventListener('pointercancel', this.onUp);
+    canvas.addEventListener('wheel', this.onWheel, { passive: false });
     this.resize();
   }
 
   destroy(): void {
     this.canvas.removeEventListener('pointermove', this.onMove);
     this.canvas.removeEventListener('pointerleave', this.onLeave);
+    this.canvas.removeEventListener('pointerdown', this.onDown);
+    this.canvas.removeEventListener('pointerup', this.onUp);
+    this.canvas.removeEventListener('pointercancel', this.onUp);
+    this.canvas.removeEventListener('wheel', this.onWheel);
   }
+
+  /** True while the window is pinned to the live edge. */
+  isFollowing(): boolean {
+    return this.following;
+  }
+
+  /** Re-pin to the live edge — what the ● LIVE button does. */
+  goLive(): void {
+    this.following = true;
+  }
+
+  /** Scrolling away from the right edge drops the live pin. */
+  private panBy(dtMs: number): void {
+    if (dtMs === 0) return;
+    if (this.following) this.windowStart = Math.max(0, this.contentEnd - this.windowMs);
+    this.following = false;
+    this.windowStart += dtMs;
+  }
+
+  /** Rightmost time the window may reach — set in draw from the current view. */
+  private contentEnd = 0;
 
   resize(): void {
     const dpr = window.devicePixelRatio || 1;
@@ -117,25 +204,49 @@ export class ScalingTimeline {
     if (w < 200 || h < 90) return;
 
     const view = sim.timelineView();
-    const axisMax = axisMaxMs(view);
-    const l = layout(w, h, view.batches.length);
-    const xFor = (t: number) => l.plotX + (t / axisMax) * l.plotW;
+    // The window may reach past `now` to a ramp that is scheduled but hasn't run.
+    this.contentEnd = Math.max(view.nowMs, ...view.spans.map((s) => s.endMs), this.windowMs);
+    const start = this.resolveWindowStart();
+    const end = start + this.windowMs;
+    // Only batches active inside the window get a row, so the rows stay large
+    // and about what is on screen rather than the whole run.
+    const visible = view.batches.filter((b) => b.countedAt >= start && b.launchedAt <= end);
+    const l = layout(w, h, visible.length);
+    this.geom = { plotX: l.plotX, plotW: l.plotW };
+    const xFor = (t: number) => l.plotX + ((t - start) / this.windowMs) * l.plotW;
 
-    this.drawFrame(w, h, view);
+    this.drawFrame(w, h, view, start);
+    // Everything time-mapped is clipped to the plot so nothing spills into the
+    // margins when it runs off either edge of the window.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(l.plotX, l.demand.y - 10, l.plotW, l.axisY - l.demand.y + 10);
+    ctx.clip();
     this.drawBreaches(view, l, xFor);
-    this.drawDemand(sim, l, xFor);
+    this.drawDemand(sim, l, xFor, start, end);
     this.drawSpans(view, l, xFor);
     this.drawAlarms(view, l, xFor);
-    this.drawBatches(view, l, xFor);
-    this.drawMetricTicks(view, l, xFor, axisMax);
-    this.drawAxis(l, axisMax, xFor);
+    this.drawBatches(view, visible, l, xFor);
+    this.drawMetricTicks(view, l, xFor, start, end);
     this.drawNowEdge(view, l, xFor);
-    this.drawHover(sim, view, l, axisMax);
+    ctx.restore();
+    this.drawAxis(l, start, xFor);
+    this.drawHover(sim, view, l, start);
+  }
+
+  /** Where the window sits: pinned to the live edge, or wherever it was dragged. */
+  private resolveWindowStart(): number {
+    const max = Math.max(0, this.contentEnd - this.windowMs);
+    if (this.following) this.windowStart = max;
+    else this.windowStart = Math.min(Math.max(0, this.windowStart), max);
+    // Dragging back to the right edge re-pins, so the button isn't the only way.
+    if (!this.following && this.windowStart >= max - 1e-6) this.following = true;
+    return this.windowStart;
   }
 
   // -- Chrome ----------------------------------------------------------------
 
-  private drawFrame(w: number, h: number, view: ScalingTimelineView): void {
+  private drawFrame(w: number, h: number, view: ScalingTimelineView, start: number): void {
     const ctx = this.ctx;
     ctx.fillStyle = SURFACE.panel;
     ctx.strokeStyle = SURFACE.border;
@@ -165,8 +276,12 @@ export class ScalingTimeline {
     ctx.fillStyle = SEMANTIC.inFlight;
     ctx.fillText(outs, x, 14);
     x -= ctx.measureText(outs).width + 10;
+    ctx.fillStyle = this.following ? SURFACE.textFaint : SEMANTIC.shed;
+    const win = `${fmtDur(this.windowMs)} window${this.following ? '' : ` @ ${fmtClock(start)} — scrolled back`}`;
+    ctx.fillText(win, x, 14);
+    x -= ctx.measureText(win).width + 10;
     ctx.fillStyle = SURFACE.textFaint;
-    ctx.fillText(`hover a row for its arithmetic · ${fmtClock(view.nowMs)} elapsed`, x, 14);
+    ctx.fillText(`drag to scroll · wheel to zoom · ${fmtClock(view.nowMs)} elapsed`, x, 14);
     ctx.textAlign = 'left';
   }
 
@@ -182,9 +297,17 @@ export class ScalingTimeline {
   }
 
   /** Offered demand as a curve, usable capacity filled beneath it. */
-  private drawDemand(sim: ScalingSimulation, l: Layout, xFor: (t: number) => number): void {
+  private drawDemand(
+    sim: ScalingSimulation,
+    l: Layout,
+    xFor: (t: number) => number,
+    start: number,
+    end: number,
+  ): void {
     const ctx = this.ctx;
-    const buckets = sim.metrics.buckets;
+    // Only the buckets in view, so the y-scale reflects the window rather than
+    // a peak that happened an hour ago and is no longer on screen.
+    const buckets = sim.metrics.buckets.filter((b) => b.time >= start && b.time <= end);
     let peak = 1;
     for (const b of buckets) peak = Math.max(peak, b.offeredRate, b.usableCapacityTps);
     // Include the demand the run is heading for, so a pre-start axis is to scale.
@@ -324,15 +447,23 @@ export class ScalingTimeline {
    * the point the batch started counting as capacity. This is the whole scale
    * process — why a step took as long as it did to matter.
    */
-  private drawBatches(view: ScalingTimelineView, l: Layout, xFor: (t: number) => number): void {
+  private drawBatches(
+    view: ScalingTimelineView,
+    visible: ScalingBatch[],
+    l: Layout,
+    xFor: (t: number) => number,
+  ): void {
     const ctx = this.ctx;
     this.rows = [];
-    const n = view.batches.length;
+    const n = visible.length;
     if (n === 0) {
       ctx.font = '500 8.5px "IBM Plex Mono", monospace';
       ctx.fillStyle = SURFACE.textFaint;
       ctx.textAlign = 'left';
-      ctx.fillText('no scale-outs yet — each one draws its pipeline here', l.plotX + 2, l.batches.y + 12);
+      const msg = view.batches.length
+        ? 'no scale-outs in this window — scroll back to find them'
+        : 'no scale-outs yet — each one draws its pipeline here';
+      ctx.fillText(msg, l.plotX + 2, l.batches.y + 12);
       return;
     }
     const rowH = Math.min(BATCH_ROW_MAX, l.batches.h / n);
@@ -340,7 +471,7 @@ export class ScalingTimeline {
     const bakeH = Math.max(1.5, rowH * 0.16);
     const hoveredBatch = this.hoveredRow()?.batch;
 
-    view.batches.forEach((batch, i) => {
+    visible.forEach((batch, i) => {
       const y = l.batches.y + i * rowH;
       this.rows.push({ batch, y0: y, y1: y + rowH });
       const hovered = hoveredBatch === batch;
@@ -402,13 +533,20 @@ export class ScalingTimeline {
   }
 
   /** A tick per metric publish — nothing can be decided between two of them. */
-  private drawMetricTicks(view: ScalingTimelineView, l: Layout, xFor: (t: number) => number, axisMax: number): void {
+  private drawMetricTicks(
+    view: ScalingTimelineView,
+    l: Layout,
+    xFor: (t: number) => number,
+    start: number,
+    end: number,
+  ): void {
     const ctx = this.ctx;
     const step = view.metricPeriodMs;
-    // Don't draw a solid smear when a long run packs ticks tighter than a pixel.
-    if ((step / axisMax) * l.plotW < 2.5) return;
+    // Don't draw a solid smear when a wide window packs ticks tighter than a pixel.
+    if ((step / this.windowMs) * l.plotW < 2.5) return;
     ctx.fillStyle = withAlpha(SEMANTIC.tlsPulse, 0.5);
-    for (let t = 0; t <= Math.min(view.nowMs, axisMax); t += step) {
+    const first = Math.ceil(Math.max(0, start) / step) * step;
+    for (let t = first; t <= Math.min(view.nowMs, end); t += step) {
       ctx.fillRect(xFor(t), l.metric.y, 1, Math.max(2, l.metric.h - 2));
     }
     if (l.detailed) {
@@ -420,7 +558,7 @@ export class ScalingTimeline {
     }
   }
 
-  private drawAxis(l: Layout, axisMax: number, xFor: (t: number) => number): void {
+  private drawAxis(l: Layout, start: number, xFor: (t: number) => number): void {
     const ctx = this.ctx;
     ctx.strokeStyle = SURFACE.grid;
     ctx.lineWidth = 1;
@@ -428,11 +566,12 @@ export class ScalingTimeline {
     ctx.moveTo(l.plotX, l.axisY);
     ctx.lineTo(l.plotX + l.plotW, l.axisY);
     ctx.stroke();
-    const step = TICK_STEPS.find((s) => axisMax / s <= 10) ?? TICK_STEPS[TICK_STEPS.length - 1];
+    const step = TICK_STEPS.find((s) => this.windowMs / s <= 10) ?? TICK_STEPS[TICK_STEPS.length - 1];
     ctx.font = '500 8px "IBM Plex Mono", monospace';
     ctx.fillStyle = SURFACE.textFaint;
     ctx.textAlign = 'center';
-    for (let t = 0; t <= axisMax + 1; t += step) {
+    const end = start + this.windowMs;
+    for (let t = Math.ceil(start / step) * step; t <= end + 1; t += step) {
       const x = xFor(t);
       ctx.strokeStyle = SURFACE.grid;
       ctx.beginPath();
@@ -468,11 +607,11 @@ export class ScalingTimeline {
     return this.rows.find((r) => this.hoverY >= r.y0 && this.hoverY < r.y1) ?? null;
   }
 
-  private drawHover(sim: ScalingSimulation, view: ScalingTimelineView, l: Layout, axisMax: number): void {
+  private drawHover(sim: ScalingSimulation, view: ScalingTimelineView, l: Layout, start: number): void {
     const hx = this.hoverX;
     if (hx === null || hx < l.plotX || hx > l.plotX + l.plotW) return;
     const ctx = this.ctx;
-    const t = ((hx - l.plotX) / l.plotW) * axisMax;
+    const t = start + ((hx - l.plotX) / l.plotW) * this.windowMs;
     ctx.strokeStyle = withAlpha(SURFACE.text, 0.5);
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -501,8 +640,8 @@ export class ScalingTimeline {
       lines.push(`counted ${fmtTps(bucket.meteredCapacityTps)}`);
       lines.push(`avail   ${(avail * 100).toFixed(1)}%`);
     }
-    const windowMs = (axisMax / l.plotW) * 6;
-    const near = view.events.filter((e) => Math.abs(e.time - t) <= windowMs).slice(-3);
+    const grabMs = (this.windowMs / l.plotW) * 6;
+    const near = view.events.filter((e) => Math.abs(e.time - t) <= grabMs).slice(-3);
     for (const e of near) lines.push(`• ${e.message}`);
     this.tooltip(lines, hx, l, near.length);
   }
@@ -592,11 +731,12 @@ function layout(w: number, h: number, batchCount: number): Layout {
   return { plotX, plotW, demand, spans, alarm, batches, metric, axisY, detailed };
 }
 
-/** Span the whole run — and any scheduled demand still ahead of it. */
-function axisMaxMs(view: ScalingTimelineView): number {
-  let max = Math.max(view.nowMs, MIN_AXIS_MS);
-  for (const s of view.spans) max = Math.max(max, s.endMs);
-  return max;
+function clamp01(t: number): number {
+  return t < 0 ? 0 : t > 1 ? 1 : t;
+}
+
+function clampInt(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
 }
 
 function clip(ctx: CanvasRenderingContext2D, text: string, maxW: number): string {

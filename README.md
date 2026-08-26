@@ -567,10 +567,23 @@ and simple policies show their rung and adjustment instead of the ratio.
 Hovering anywhere else reports the demand, capacity, counted capacity,
 availability and events at that moment.
 
-The axis spans the whole run and extends to a scheduled ramp that hasn't
-happened yet, so the plan is visible before the run starts. It stays single-mode
-only: two panes run one clock but tell two stories, and a shared axis would
-misrepresent both.
+**The axis is a fixed window, not the whole run** — 15 minutes by default, wide
+enough to hold a couple of scale-outs with their pipelines and bakes, which is
+the unit of the story. It follows the live edge as the run advances:
+
+- **Drag** to scroll back through older events. A **● LIVE** button appears
+  while you are away from the live edge; click it (or drag back to the right
+  edge, or press Esc) to catch up.
+- **Wheel** to zoom, through 2m / 5m / 10m / 15m / 30m / 1h / 2h, anchored on
+  the cursor so whatever is under it stays put.
+
+Only scale-outs active inside the window get a row, so the rows stay large and
+about what is on screen; the demand curve scales to the window too, rather than
+to a peak that happened an hour ago. Before the run starts the window sits at
+the beginning, so a scheduled ramp is visible as a plan.
+
+It stays single-mode only: two panes run one clock but tell two stories, and a
+shared axis would misrepresent both.
 
 ### Scenarios
 

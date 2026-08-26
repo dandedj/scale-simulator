@@ -64,6 +64,7 @@ export class ScalingExperience implements Experience {
   private timeline: ScalingTimeline | null = null;
   private timelineOpen = false;
   private timelineMax = false;
+  private liveBtn!: HTMLButtonElement;
   private onKeyDown!: (e: KeyboardEvent) => void;
 
   mount(hosts: ExperienceHosts, playback: PlaybackController): void {
@@ -129,6 +130,7 @@ export class ScalingExperience implements Experience {
   render(): void {
     if (this.timelineMax) {
       this.timeline?.draw(this.panes[0].sim);
+      this.syncLiveBtn();
       this.controls.update();
       this.updateHud();
       return;
@@ -145,7 +147,10 @@ export class ScalingExperience implements Experience {
     } else {
       for (const p of this.panes) p.charts.draw(p.sim);
     }
-    if (this.timelineOpen && this.timeline && !this.compare) this.timeline.draw(this.panes[0].sim);
+    if (this.timelineOpen && this.timeline && !this.compare) {
+      this.timeline.draw(this.panes[0].sim);
+      this.syncLiveBtn();
+    }
     this.controls.update();
     this.updateHud();
   }
@@ -188,11 +193,18 @@ export class ScalingExperience implements Experience {
     const maxBtn = el('button', 'timeline-max-btn', '⤢') as HTMLButtonElement;
     maxBtn.title = 'Maximize the timeline (Esc to restore)';
     maxBtn.addEventListener('click', () => this.setTimelineMax(!this.timelineMax));
-    this.timelineEl.append(canvas, maxBtn);
+    // Only shown once the window has been scrolled off the live edge.
+    this.liveBtn = el('button', 'timeline-live-btn', '● LIVE') as HTMLButtonElement;
+    this.liveBtn.title = 'Jump back to the live edge';
+    this.liveBtn.addEventListener('click', () => this.timeline?.goLive());
+    this.timelineEl.append(canvas, this.liveBtn, maxBtn);
     this.hosts.stageCol.appendChild(this.timelineEl);
     this.timeline = new ScalingTimeline(canvas);
     this.onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && this.timelineMax) this.setTimelineMax(false);
+      if (e.key !== 'Escape' || !this.timelineOpen) return;
+      // Escape backs out one step: re-pin a scrolled window, then un-maximize.
+      if (this.timeline && !this.timeline.isFollowing()) this.timeline.goLive();
+      else if (this.timelineMax) this.setTimelineMax(false);
     };
     window.addEventListener('keydown', this.onKeyDown);
   }
@@ -205,6 +217,11 @@ export class ScalingExperience implements Experience {
     if (!this.timelineOpen) this.setTimelineMax(false);
     // The panes lose height to the timeline, so every canvas needs re-measuring.
     this.resize();
+  }
+
+  private syncLiveBtn(): void {
+    const scrolled = this.timeline ? !this.timeline.isFollowing() : false;
+    this.liveBtn.classList.toggle('visible', scrolled);
   }
 
   /** Hand the whole stage to the timeline — the board and charts step aside. */
