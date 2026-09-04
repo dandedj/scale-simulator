@@ -21,10 +21,14 @@ export interface PoolTrafficConfig {
 export interface FabricPoolTopologyConfig {
   nodes: number;
   coresPerNode: number;
-  /** Links aimed at this one customer responder endpoint. */
+  /** Requester→responder Links carrying traffic to this customer. */
   links: number;
-  /** Resolved IPs for that endpoint. */
-  endpointIps: number;
+  /** Configured responder endpoint definitions referenced by each link. */
+  endpointsPerLink: number;
+  /** Exact endpoint identities (host/cert/port) common to every link. */
+  sharedEndpointsPerLink: number;
+  /** DNS addresses resolved by each configured link endpoint. */
+  ipsPerEndpoint: number;
   /** Current worker-process ownership, or a hypothetical node-shared client. */
   ownership: PoolOwnership;
   /** Application-level partitioning layered above hyper-util's own pool key. */
@@ -104,6 +108,32 @@ export interface PoolEventLog {
   message: string;
 }
 
+/** One requester→responder Link and the endpoint definitions it references. */
+export interface PoolLinkView {
+  id: number;
+  name: string;
+  endpointIds: number[];
+  requestRate: number;
+  /** Current-design link-local keys contributed by this Link per pool owner. */
+  localKeysPerOwner: number;
+}
+
+/** A unique host/certificate/port identity referenced by one or more Links. */
+export interface PoolEndpointView {
+  id: number;
+  name: string;
+  authority: string;
+  certificate: string;
+  port: number;
+  ips: string[];
+  linkIds: number[];
+  shared: boolean;
+  requestRate: number;
+  /** Keys this endpoint contributes per owner under the selected strategy. */
+  keysPerOwner: number;
+  estimatedConnections: number;
+}
+
 export interface PoolSnapshot {
   baseRate: number;
   effectiveRate: number;
@@ -115,6 +145,11 @@ export interface PoolSnapshot {
   busy: number;
   idle: number;
   pending: number;
+  /** Link→endpoint references, including repeated shared endpoints. */
+  linkEndpointBindings: number;
+  /** De-duplicated host/certificate/port endpoint identities. */
+  uniqueEndpoints: number;
+  sharedEndpoints: number;
   logicalKeysPerOwner: number;
   poolOwners: number;
   poolKeys: number;
@@ -129,4 +164,6 @@ export interface PoolSnapshot {
   attemptsPerSec: number;
   resetsPerSec: number;
   closesPerSec: number;
+  links: PoolLinkView[];
+  endpoints: PoolEndpointView[];
 }

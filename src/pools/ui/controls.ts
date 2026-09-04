@@ -157,18 +157,43 @@ const GROUPS: GroupDef[] = [
         label: 'Links to responder', min: 1, max: 64, step: 1,
         get: (c) => c.fabric.links, set: (c, v) => (c.fabric.links = v), format: count,
         info: {
-          what: 'Requester/responder links that target the same customer endpoint.',
-          how: 'Current link × IP partitioning creates a separate pool key for every link even when certificate, port, and responder are identical.',
+          what: 'Requester→responder Links carrying traffic to this customer. Each Link references its own set of configured link endpoints.',
+          how: 'The model creates every Link as an entity, attaches its endpoint identities, and divides customer traffic across the Links.',
           expect: 'More links grow connections linearly in the current design; sharing by endpoint or authority removes this multiplier.',
         },
       },
       {
-        label: 'Resolved endpoint IPs', min: 1, max: 64, step: 1,
-        get: (c) => c.fabric.endpointIps, set: (c, v) => (c.fabric.endpointIps = v), format: count,
+        label: 'Link endpoints / Link', min: 1, max: 16, step: 1,
+        get: (c) => c.fabric.endpointsPerLink,
+        set: (c, v) => {
+          c.fabric.endpointsPerLink = v;
+          c.fabric.sharedEndpointsPerLink = Math.min(c.fabric.sharedEndpointsPerLink, v);
+        },
+        format: count,
         info: {
-          what: 'IP addresses returned for the customer endpoint.',
-          how: 'Per-IP and IP+cert+port strategies make each address a key. DNS authority pooling resolves connections across them behind one authority key.',
-          expect: 'More A records multiply current pools; DNS-authority keying avoids that pool-state multiplier but changes address balancing behavior.',
+          what: 'Configured responder endpoint definitions referenced by every Link. An endpoint has a DNS authority, certificate identity, port, and resolved IP set.',
+          how: 'Total Link→endpoint bindings are Links × endpoints/Link. Some definitions can be exact shared identities; the remainder are private to one Link.',
+          expect: 'More endpoints create more routing choices and more pool keys. Whether repeated endpoints duplicate sockets depends on the key strategy.',
+        },
+      },
+      {
+        label: 'Shared endpoints / Link', min: 0, max: 16, step: 1,
+        get: (c) => c.fabric.sharedEndpointsPerLink,
+        set: (c, v) => (c.fabric.sharedEndpointsPerLink = Math.min(v, c.fabric.endpointsPerLink)),
+        format: count,
+        info: {
+          what: 'Exact endpoint identities—host, certificate, and port—referenced in common by every Link.',
+          how: 'The value is clamped to endpoints/Link. Other endpoint definitions are generated as Link-private, so the board can show both converging and isolated routes.',
+          expect: 'Current Link-local pools still duplicate shared endpoints. IP+cert+port or DNS-authority sharing collapses only genuinely identical endpoints, not private ones.',
+        },
+      },
+      {
+        label: 'Resolved IPs / endpoint', min: 1, max: 64, step: 1,
+        get: (c) => c.fabric.ipsPerEndpoint, set: (c, v) => (c.fabric.ipsPerEndpoint = v), format: count,
+        info: {
+          what: 'IP addresses returned by each configured link endpoint authority.',
+          how: 'Current Link×endpoint×IP and IP+cert+port strategies make each address a key. DNS-authority pooling holds one key for the endpoint and resolves connections across its IPs.',
+          expect: 'More A records multiply per-IP pools. DNS-authority keying avoids the IP pool-state multiplier but changes address selection and balancing behavior.',
         },
       },
     ],
@@ -176,15 +201,15 @@ const GROUPS: GroupDef[] = [
       {
         label: 'Application pool key',
         choices: [
-          { value: 'link-ip', label: 'link × IP' },
+          { value: 'link-ip', label: 'Link×endpoint×IP' },
           { value: 'endpoint', label: 'IP+cert+port' },
           { value: 'dns', label: 'DNS authority' },
         ],
         get: (c) => c.fabric.keyStrategy, set: (c, v) => (c.fabric.keyStrategy = v as PoolKeyStrategy),
         info: {
           what: 'RTB Fabric’s application-level partition above the library pool.',
-          how: 'Current makes links × IPs keys. Endpoint shares identical IP/cert/port destinations across links. DNS uses one shared authority per pool owner, matching Hyper’s native scheme+authority key shape when one Client is shared.',
-          expect: 'Removing link and IP multipliers is usually the biggest connection reduction, provided routing, certificate identity, and isolation rules permit sharing.',
+          how: 'Current keys every Link→endpoint→IP binding. Endpoint de-duplicates identical IP/cert/port destinations across Links. DNS uses one scheme+authority key per unique endpoint, matching Hyper’s native key shape when one Client is shared.',
+          expect: 'Sharing removes only the multipliers caused by Links that reference the same endpoint identity; private link endpoints remain separate by design.',
         },
       },
     ],

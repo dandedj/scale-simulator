@@ -6,8 +6,10 @@
  * and key dimensions visible:
  *
  *   pool copies = nodes x (workers per node, or one node-shared owner)
- *   keys/owner  = links x IPs (current), one shared authority (DNS), or IPs
- *                 (IP+cert+port shared across links)
+ *   bindings    = links x configured endpoints per link
+ *   unique eps  = shared endpoints + each link's private endpoints
+ *   keys/owner  = bindings x IPs (current), unique endpoint authorities (DNS),
+ *                 or unique endpoints x IPs (IP+cert+port sharing)
  *
  * The Hyper legacy client is modeled as an on-demand pool with idle expiry and
  * a max-idle setting, but no active cap. A bounded policy is included as a
@@ -16,7 +18,13 @@
  */
 
 import { PoolMetricsCollector } from './metrics';
-import type { PoolKeyStrategy, PoolSimulationConfig, PoolSnapshot } from './types';
+import type {
+  PoolEndpointView,
+  PoolKeyStrategy,
+  PoolLinkView,
+  PoolSimulationConfig,
+  PoolSnapshot,
+} from './types';
 
 const INTERNAL_TICK_MS = 50;
 const EPS = 1e-7;
@@ -125,16 +133,30 @@ export class PoolSimulation {
   }
 
   logicalKeysPerOwner(): number {
-    const links = Math.max(1, Math.round(this.cfg.fabric.links));
-    const ips = Math.max(1, Math.round(this.cfg.fabric.endpointIps));
+    const ips = Math.max(1, Math.round(this.cfg.fabric.ipsPerEndpoint));
     switch (this.cfg.fabric.keyStrategy) {
       case 'link-ip':
-        return links * ips;
+        return this.linkEndpointBindingCount() * ips;
       case 'dns':
-        return 1;
+        return this.uniqueEndpointCount();
       case 'endpoint':
-        return ips;
+        return this.uniqueEndpointCount() * ips;
     }
+  }
+
+  /** Every Link→endpoint reference, before identical endpoints are de-duplicated. */
+  linkEndpointBindingCount(): number {
+    return this.linkCount() * this.endpointsPerLink();
+  }
+
+  /** Exact host/certificate/port identities after common endpoint reuse. */
+  uniqueEndpointCount(): number {
+    const shared = this.sharedEndpointCount();
+    return shared + this.linkCount() * (this.endpointsPerLink() - shared);
+  }
+
+  sharedEndpointCount(): number {
+    return Math.min(this.endpointsPerLink(), Math.max(0, Math.round(this.cfg.fabric.sharedEndpointsPerLink)));
   }
 
   /** Analytical desired count before responder or alternative-library limits. */
@@ -233,6 +255,7 @@ export class PoolSimulation {
     const pressure = hottest / Math.max(1, this.cfg.responder.connectionLimit);
     const opensRate = this.lastDeltas.opened * (1000 / INTERNAL_TICK_MS);
     const reuse = effectiveRate > EPS ? Math.max(0, 1 - opensRate / effectiveRate) : 1;
+    const topology = this.topologyViews(effectiveRate, this.established);
     return {
       baseRate,
       effectiveRate,
@@ -244,6 +267,9 @@ export class PoolSimulation {
       busy,
       idle: Math.max(0, this.established - busy),
       pending,
+      linkEndpointBindings: this.linkEndpointBindingCount(),
+      uniqueEndpoints: this.uniqueEndpointCount(),
+      sharedEndpoints: this.sharedEndpointCount(),
       logicalKeysPerOwner: this.logicalKeysPerOwner(),
       poolOwners: this.poolOwners(),
       poolKeys: this.poolKeyCount(),
@@ -258,12 +284,43 @@ export class PoolSimulation {
       attemptsPerSec: this.lastDeltas.attempts * (1000 / INTERNAL_TICK_MS),
       resetsPerSec: this.lastDeltas.resets * (1000 / INTERNAL_TICK_MS),
       closesPerSec: this.lastDeltas.closed * (1000 / INTERNAL_TICK_MS),
+      links: topology.links,
+      endpoints: topology.endpoints,
     };
   }
 
   private connectionTarget(rate: number): { desired: number; allowed: number } {
-    const keys = this.poolKeyCount();
-    const perKeyRate = Math.max(0, rate) / Math.max(1, keys);
+    const bindings = this.linkEndpointBindingCount();
+    if (this.cfg.fabric.keyStrategy === 'link-ip') {
+      // Link-local endpoint bindings carry equal traffic in this model. Shared
+      // endpoint identity is deliberately irrelevant to the current key.
+      return this.keyGroupTarget(rate, bindings * Math.max(1, Math.round(this.cfg.fabric.ipsPerEndpoint)));
+    }
+
+    // Shared strategies combine traffic only for exact repeated endpoint
+    // identities. A shared endpoint therefore sees one contribution from every
+    // Link, while a private endpoint sees one Link's contribution. Keeping
+    // these as separate key groups matters when rounding or an active cap binds.
+    const links = this.linkCount();
+    const sharedEndpoints = this.sharedEndpointCount();
+    const privateEndpoints = links * (this.endpointsPerLink() - sharedEndpoints);
+    const keysPerEndpoint = this.cfg.fabric.keyStrategy === 'endpoint'
+      ? Math.max(1, Math.round(this.cfg.fabric.ipsPerEndpoint))
+      : 1;
+    const sharedTraffic = Math.max(0, rate) * ((sharedEndpoints * links) / bindings);
+    const privateTraffic = Math.max(0, rate) * (privateEndpoints / bindings);
+    const shared = this.keyGroupTarget(sharedTraffic, sharedEndpoints * keysPerEndpoint);
+    const privateOnly = this.keyGroupTarget(privateTraffic, privateEndpoints * keysPerEndpoint);
+    return {
+      desired: shared.desired + privateOnly.desired,
+      allowed: shared.allowed + privateOnly.allowed,
+    };
+  }
+
+  private keyGroupTarget(rate: number, logicalKeysPerOwner: number): { desired: number; allowed: number } {
+    if (logicalKeysPerOwner <= 0) return { desired: 0, allowed: 0 };
+    const keys = this.poolOwners() * logicalKeysPerOwner;
+    const perKeyRate = Math.max(0, rate) / keys;
     const timeoutSeconds = this.cfg.pool.idleTimeoutMs <= 0 ? 1e6 : this.cfg.pool.idleTimeoutMs / 1000;
     // Probability that this key has been touched inside its idle-retention
     // window. It prevents a theoretical key from contributing a full socket
@@ -275,10 +332,10 @@ export class PoolSimulation {
     const trafficConnectionsPerKey = touched * Math.max(1, Math.ceil(meanConcurrency));
     const floorPerKey = Math.max(0, this.cfg.pool.minConnectionsPerKey);
     const desired = keys * Math.max(floorPerKey, trafficConnectionsPerKey);
-    const cap = this.cfg.pool.policy === 'bounded'
-      ? keys * Math.max(1, this.cfg.pool.maxConnectionsPerKey)
-      : Infinity;
-    return { desired, allowed: Math.min(desired, cap) };
+    const allowedPerKey = this.cfg.pool.policy === 'bounded'
+      ? Math.min(Math.max(floorPerKey, trafficConnectionsPerKey), Math.max(1, this.cfg.pool.maxConnectionsPerKey))
+      : Math.max(floorPerKey, trafficConnectionsPerKey);
+    return { desired, allowed: keys * allowedPerKey };
   }
 
   private busyConnectionCount(rate: number): number {
@@ -313,7 +370,99 @@ export class PoolSimulation {
   private poolSignature(): string {
     const f = this.cfg.fabric;
     const p = this.cfg.pool;
-    return [f.nodes, f.coresPerNode, f.links, f.endpointIps, f.ownership, f.keyStrategy, p.protocol].join('|');
+    return [
+      f.nodes,
+      f.coresPerNode,
+      f.links,
+      f.endpointsPerLink,
+      f.sharedEndpointsPerLink,
+      f.ipsPerEndpoint,
+      f.ownership,
+      f.keyStrategy,
+      p.protocol,
+    ].join('|');
+  }
+
+  private topologyViews(rate: number, established: number): { links: PoolLinkView[]; endpoints: PoolEndpointView[] } {
+    const linkCount = this.linkCount();
+    const endpointsPerLink = this.endpointsPerLink();
+    const sharedCount = this.sharedEndpointCount();
+    const ipsPerEndpoint = Math.max(1, Math.round(this.cfg.fabric.ipsPerEndpoint));
+    const endpoints: PoolEndpointView[] = [];
+    const endpointById = new Map<number, PoolEndpointView>();
+
+    const makeEndpoint = (id: number, shared: boolean): PoolEndpointView => {
+      const stem = shared ? `shared-${id}` : `private-${id}`;
+      const endpoint: PoolEndpointView = {
+        id,
+        name: shared ? `Shared endpoint ${id}` : `Private endpoint ${id - sharedCount}`,
+        authority: `${stem}.bidder.example:443`,
+        certificate: shared ? 'customer-shared' : `customer-${id}`,
+        port: 443,
+        ips: Array.from({ length: ipsPerEndpoint }, (_, ip) => endpointIp(id, ip)),
+        linkIds: [],
+        shared,
+        requestRate: 0,
+        keysPerOwner: 0,
+        estimatedConnections: 0,
+      };
+      endpoints.push(endpoint);
+      endpointById.set(id, endpoint);
+      return endpoint;
+    };
+
+    for (let id = 1; id <= sharedCount; id++) makeEndpoint(id, true);
+    const links: PoolLinkView[] = [];
+    let nextEndpointId = sharedCount + 1;
+    for (let linkId = 1; linkId <= linkCount; linkId++) {
+      const endpointIds = Array.from({ length: sharedCount }, (_, i) => i + 1);
+      for (let privateIndex = sharedCount; privateIndex < endpointsPerLink; privateIndex++) {
+        const endpoint = makeEndpoint(nextEndpointId++, false);
+        endpointIds.push(endpoint.id);
+      }
+      const requestRate = rate / linkCount;
+      const link: PoolLinkView = {
+        id: linkId,
+        name: `Link ${linkId}`,
+        endpointIds,
+        requestRate,
+        localKeysPerOwner: endpointsPerLink * ipsPerEndpoint,
+      };
+      links.push(link);
+      for (const endpointId of endpointIds) {
+        const endpoint = endpointById.get(endpointId)!;
+        endpoint.linkIds.push(linkId);
+        endpoint.requestRate += requestRate / endpointsPerLink;
+      }
+    }
+
+    const endpointTargets: Array<{ endpoint: PoolEndpointView; allowed: number }> = [];
+    for (const endpoint of endpoints) {
+      endpoint.keysPerOwner = this.cfg.fabric.keyStrategy === 'link-ip'
+        ? endpoint.linkIds.length * ipsPerEndpoint
+        : this.cfg.fabric.keyStrategy === 'endpoint'
+          ? ipsPerEndpoint
+          : 1;
+      endpointTargets.push({
+        endpoint,
+        allowed: this.keyGroupTarget(endpoint.requestRate, endpoint.keysPerOwner).allowed,
+      });
+    }
+    const totalAllowed = endpointTargets.reduce((sum, target) => sum + target.allowed, 0);
+    for (const target of endpointTargets) {
+      target.endpoint.estimatedConnections = totalAllowed > EPS
+        ? established * (target.allowed / totalAllowed)
+        : 0;
+    }
+    return { links, endpoints };
+  }
+
+  private linkCount(): number {
+    return Math.max(1, Math.round(this.cfg.fabric.links));
+  }
+
+  private endpointsPerLink(): number {
+    return Math.max(1, Math.round(this.cfg.fabric.endpointsPerLink));
   }
 
   private detectEdges(): void {
@@ -335,10 +484,21 @@ export class PoolSimulation {
 
 export function keyStrategyLabel(strategy: PoolKeyStrategy): string {
   switch (strategy) {
-    case 'link-ip': return 'link x IP';
-    case 'dns': return 'DNS authority';
+    case 'link-ip': return 'Link x endpoint x IP';
+    case 'dns': return 'endpoint DNS authority';
     case 'endpoint': return 'IP + cert + port';
   }
+}
+
+function endpointIp(endpointId: number, index: number): string {
+  // Give every configured endpoint its own synthetic subnet so the generated
+  // IP+cert+port identities are genuinely distinct unless the endpoint entity
+  // itself is shared by Links.
+  const endpointIndex = endpointId - 1;
+  const second = 16 + Math.floor(endpointIndex / 254);
+  const third = endpointIndex % 254;
+  const fourth = index + 1;
+  return `172.${second}.${third}.${fourth}`;
 }
 
 function fmtCount(v: number): string {

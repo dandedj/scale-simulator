@@ -37,23 +37,23 @@ export class PoolRenderer {
     if (w < 300 || h < 180) return;
 
     const s = sim.snapshot();
-    const pad = 16;
+    const pad = 12;
     const topH = Math.min(80, h * 0.2);
     const bottomH = Math.min(62, h * 0.17);
     const mainY = pad + topH + 12;
     const mainH = h - mainY - bottomH - 2 * pad;
-    const gap = 16;
-    const leftW = w * 0.25;
-    const centerW = w * 0.34;
-    const left: Rect = { x: pad, y: mainY, w: leftW, h: mainH };
-    const center: Rect = { x: left.x + left.w + gap, y: mainY, w: centerW, h: mainH };
-    const right: Rect = { x: center.x + center.w + gap, y: mainY, w: w - center.x - center.w - gap - pad, h: mainH };
+    const gap = 10;
+    const fabric: Rect = { x: pad, y: mainY, w: w * 0.17, h: mainH };
+    const links: Rect = { x: fabric.x + fabric.w + gap, y: mainY, w: w * 0.19, h: mainH };
+    const endpoints: Rect = { x: links.x + links.w + gap, y: mainY, w: w * 0.34, h: mainH };
+    const responders: Rect = { x: endpoints.x + endpoints.w + gap, y: mainY, w: w - endpoints.x - endpoints.w - gap - pad, h: mainH };
 
     this.drawEquation(sim, pad, pad, w - pad * 2, topH);
-    this.drawFabric(sim, left);
-    this.drawPools(sim, center);
-    this.drawResponders(sim, right);
-    this.drawFlow(sim, left, center, right);
+    this.drawFlow(sim, fabric, links, endpoints, responders);
+    this.drawFabric(sim, fabric);
+    this.drawLinks(sim, links);
+    this.drawPools(sim, endpoints);
+    this.drawResponders(sim, responders);
     this.drawOutcome(sim, pad, h - bottomH - pad, w - pad * 2, bottomH);
     if (s.limitActive) this.drawLimitFrame(sim.now);
   }
@@ -65,10 +65,10 @@ export class PoolRenderer {
       ? `${sim.cfg.fabric.nodes} nodes × ${sim.cfg.fabric.coresPerNode} workers`
       : `${sim.cfg.fabric.nodes} nodes × 1 shared owner`;
     const keyTerm = sim.cfg.fabric.keyStrategy === 'link-ip'
-      ? `${sim.cfg.fabric.links} links × ${sim.cfg.fabric.endpointIps} IPs`
+      ? `${s.linkEndpointBindings} Link→endpoint refs × ${sim.cfg.fabric.ipsPerEndpoint} IPs`
       : sim.cfg.fabric.keyStrategy === 'endpoint'
-        ? `${sim.cfg.fabric.endpointIps} IP+cert+port keys`
-        : '1 DNS authority';
+        ? `${s.uniqueEndpoints} unique endpoints × ${sim.cfg.fabric.ipsPerEndpoint} IPs`
+        : `${s.uniqueEndpoints} unique endpoint authorities`;
     ctxText(this.ctx, 'POOL CARDINALITY', x + 12, y + 20, 13, SURFACE.textFaint, true);
     ctxText(this.ctx, `${ownerTerm} × ${keyTerm}`, x + 12, y + 42, 14, SURFACE.text);
     ctxText(this.ctx, `= ${fmt(s.poolKeys)} independently owned keys`, x + 12, y + 62, 16, SEMANTIC.tlsPulse, true);
@@ -106,17 +106,63 @@ export class PoolRenderer {
     ctxText(this.ctx, `${fmt(s.baseRate)} req/s`, r.x + 10, r.y + r.h - 12, 12, SEMANTIC.success, true);
   }
 
+  private drawLinks(sim: PoolSimulation, r: Rect): void {
+    const s = sim.snapshot();
+    this.panel(r, SURFACE.border);
+    ctxText(this.ctx, 'LINKS', r.x + 10, r.y + 20, 13, SURFACE.textFaint, true);
+    ctxText(this.ctx, `${s.links.length} requester → responder`, r.x + 10, r.y + 40, 11, SURFACE.text);
+    ctxText(this.ctx, `${s.linkEndpointBindings} endpoint bindings`, r.x + 10, r.y + 56, 10, SEMANTIC.inFlight);
+
+    const shown = Math.min(s.links.length, this.maxRows(r, 72, 25, 14));
+    const rowH = Math.max(18, Math.min(25, (r.h - 94) / Math.max(1, shown)));
+    for (let i = 0; i < shown; i++) {
+      const link = s.links[i];
+      const y = r.y + 68 + i * rowH;
+      this.ctx.fillStyle = withAlpha(SEMANTIC.inFlight, 0.12);
+      this.ctx.fillRect(r.x + 7, y, r.w - 14, rowH - 3);
+      this.ctx.strokeStyle = withAlpha(SEMANTIC.inFlight, 0.45);
+      this.ctx.strokeRect(r.x + 7.5, y + 0.5, r.w - 15, rowH - 4);
+      ctxText(this.ctx, `L${link.id}`, r.x + 13, y + 13, 10, SEMANTIC.inFlight, true);
+      ctxText(this.ctx, `${fmt(link.requestRate)}/s`, r.x + 36, y + 13, 9, SURFACE.textDim);
+      this.ctx.textAlign = 'right';
+      const ids = link.endpointIds.slice(0, 3).map((id) => `EP${id}`).join(',');
+      ctxText(this.ctx, `${ids}${link.endpointIds.length > 3 ? '…' : ''}`, r.x + r.w - 12, y + 13, 9, SURFACE.text);
+      this.ctx.textAlign = 'left';
+    }
+    if (shown < s.links.length) ctxText(this.ctx, `+${s.links.length - shown} Links`, r.x + 10, r.y + r.h - 11, 9, SURFACE.textDim);
+  }
+
   private drawPools(sim: PoolSimulation, r: Rect): void {
     const s = sim.snapshot();
     this.panel(r, s.capActive ? SEMANTIC.shed : SURFACE.border);
-    ctxText(this.ctx, 'OUTBOUND POOLS', r.x + 10, r.y + 20, 13, SURFACE.textFaint, true);
-    ctxText(this.ctx, s.keysLabel, r.x + 10, r.y + 41, 16, SEMANTIC.tlsPulse, true);
-    ctxText(this.ctx, `${sim.cfg.pool.protocol.toUpperCase()} · ${s.streamsPerConnection} stream${s.streamsPerConnection === 1 ? '' : 's'} / conn`, r.x + 10, r.y + 58, 10, SURFACE.textDim);
+    ctxText(this.ctx, 'LINK ENDPOINTS → POOL KEYS', r.x + 10, r.y + 20, 13, SURFACE.textFaint, true);
+    ctxText(this.ctx, `${s.uniqueEndpoints} unique · ${s.sharedEndpoints} shared by every Link`, r.x + 10, r.y + 40, 11, SURFACE.text);
+    ctxText(this.ctx, `${s.keysLabel} · ${sim.cfg.pool.protocol.toUpperCase()} · ${fmt(s.logicalKeysPerOwner)} keys/owner`, r.x + 10, r.y + 56, 9, SEMANTIC.tlsPulse);
+
+    const bottomSpace = 86;
+    const shown = Math.min(s.endpoints.length, this.maxRows(r, 72, 28, bottomSpace));
+    const rowH = Math.max(20, Math.min(28, (r.h - 72 - bottomSpace) / Math.max(1, shown)));
+    for (let i = 0; i < shown; i++) {
+      const endpoint = s.endpoints[i];
+      const y = r.y + 66 + i * rowH;
+      const color = endpoint.shared ? SEMANTIC.success : SEMANTIC.tlsPulse;
+      this.ctx.fillStyle = withAlpha(color, 0.1);
+      this.ctx.fillRect(r.x + 7, y, r.w - 14, rowH - 3);
+      this.ctx.strokeStyle = withAlpha(color, 0.45);
+      this.ctx.strokeRect(r.x + 7.5, y + 0.5, r.w - 15, rowH - 4);
+      ctxText(this.ctx, `EP${endpoint.id}`, r.x + 12, y + 12, 9, color, true);
+      ctxText(this.ctx, endpoint.shared ? `shared ×${endpoint.linkIds.length}` : `Link ${endpoint.linkIds[0]}`, r.x + 41, y + 12, 8, SURFACE.textDim);
+      ctxText(this.ctx, truncate(endpoint.authority, Math.max(8, Math.floor((r.w - 150) / 6))), r.x + 12, y + rowH - 6, 8, SURFACE.textDim);
+      this.ctx.textAlign = 'right';
+      ctxText(this.ctx, `${endpoint.ips.length} IP · ${fmt(endpoint.keysPerOwner)} key · ${fmt(endpoint.estimatedConnections)} conn`, r.x + r.w - 12, y + 12, 8, SURFACE.text);
+      this.ctx.textAlign = 'left';
+    }
+    if (shown < s.endpoints.length) ctxText(this.ctx, `+${s.endpoints.length - shown} endpoints`, r.x + 10, r.y + r.h - bottomSpace + 2, 8, SURFACE.textDim);
 
     const barX = r.x + 12;
     const barW = r.w - 24;
-    const barY = r.y + 82;
-    const barH = Math.min(54, r.h * 0.2);
+    const barY = r.y + r.h - 67;
+    const barH = 14;
     const denom = Math.max(1, s.desiredConnections, s.established + s.pending);
     this.ctx.fillStyle = SURFACE.panelRaised;
     this.ctx.fillRect(barX, barY, barW, barH);
@@ -129,15 +175,10 @@ export class PoolRenderer {
     const desiredX = barX + barW * Math.min(1, s.desiredConnections / denom);
     this.ctx.beginPath(); this.ctx.moveTo(desiredX, barY - 5); this.ctx.lineTo(desiredX, barY + barH + 5); this.ctx.stroke();
     this.ctx.setLineDash([]);
-    ctxText(this.ctx, `busy ${fmt(s.busy)}`, barX, barY + barH + 18, 10, SEMANTIC.success);
-    ctxText(this.ctx, `idle ${fmt(s.idle)}`, barX + barW * 0.34, barY + barH + 18, 10, SEMANTIC.inFlight);
-    ctxText(this.ctx, `connecting ${fmt(s.pending)}`, barX + barW * 0.65, barY + barH + 18, 10, SEMANTIC.tlsPulse);
-
-    const y = Math.min(r.y + r.h - 72, barY + barH + 48);
-    ctxText(this.ctx, `idle timeout  ${sim.cfg.pool.idleTimeoutMs === 0 ? 'disabled' : fmtDuration(sim.cfg.pool.idleTimeoutMs)}`, r.x + 12, y, 10, SURFACE.textDim);
-    ctxText(this.ctx, `max idle/key ${sim.cfg.pool.maxIdlePerKey === 0 ? 'unbounded' : sim.cfg.pool.maxIdlePerKey}`, r.x + 12, y + 17, 10, SURFACE.textDim);
-    ctxText(this.ctx, `active cap   ${sim.cfg.pool.policy === 'hyper' ? 'none (Hyper)' : `${sim.cfg.pool.maxConnectionsPerKey}/key`}`, r.x + 12, y + 34, 10,
-      s.capActive ? SEMANTIC.shed : SURFACE.textDim);
+    ctxText(this.ctx, `busy ${fmt(s.busy)} · idle ${fmt(s.idle)} · connecting ${fmt(s.pending)}`, barX, barY + barH + 17, 9, SURFACE.text);
+    ctxText(this.ctx,
+      `idle ${sim.cfg.pool.idleTimeoutMs === 0 ? '∞' : fmtDuration(sim.cfg.pool.idleTimeoutMs)} · max idle ${sim.cfg.pool.maxIdlePerKey === 0 ? '∞' : sim.cfg.pool.maxIdlePerKey}/key · cap ${sim.cfg.pool.policy === 'hyper' ? 'none' : `${sim.cfg.pool.maxConnectionsPerKey}/key`}`,
+      barX, barY + barH + 33, 8, s.capActive ? SEMANTIC.shed : SURFACE.textDim);
   }
 
   private drawResponders(sim: PoolSimulation, r: Rect): void {
@@ -172,12 +213,12 @@ export class PoolRenderer {
       loadColor(s.responderPressure), true);
   }
 
-  private drawFlow(sim: PoolSimulation, left: Rect, center: Rect, right: Rect): void {
+  private drawFlow(sim: PoolSimulation, fabric: Rect, links: Rect, endpoints: Rect, responders: Rect): void {
     const s = sim.snapshot();
     const phase = (sim.now / 450) % 1;
     const lines: Array<[number, number, number, number, string]> = [
-      [left.x + left.w, left.y + left.h * 0.5, center.x, center.y + center.h * 0.5, SEMANTIC.inFlight],
-      [center.x + center.w, center.y + center.h * 0.5, right.x, right.y + right.h * 0.5, s.limitActive ? SEMANTIC.timeout : SEMANTIC.success],
+      [fabric.x + fabric.w, fabric.y + fabric.h * 0.5, links.x, links.y + links.h * 0.5, SEMANTIC.inFlight],
+      [endpoints.x + endpoints.w, endpoints.y + endpoints.h * 0.5, responders.x, responders.y + responders.h * 0.5, s.limitActive ? SEMANTIC.timeout : SEMANTIC.success],
     ];
     for (const [x1, y1, x2, y2, color] of lines) {
       this.ctx.strokeStyle = withAlpha(color, 0.35);
@@ -187,6 +228,30 @@ export class PoolRenderer {
         const t = (phase + i / 4) % 1;
         this.ctx.fillStyle = color;
         this.ctx.beginPath(); this.ctx.arc(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, 2.2, 0, Math.PI * 2); this.ctx.fill();
+      }
+    }
+
+    // Actual Link→endpoint membership. Shared endpoints visibly collect lines
+    // from several Links; private endpoints receive exactly one.
+    const shownLinks = Math.min(s.links.length, this.maxRows(links, 72, 25, 14));
+    const shownEndpoints = Math.min(s.endpoints.length, this.maxRows(endpoints, 72, 28, 86));
+    const linkRowH = Math.max(18, Math.min(25, (links.h - 94) / Math.max(1, shownLinks)));
+    const endpointRowH = Math.max(20, Math.min(28, (endpoints.h - 72 - 86) / Math.max(1, shownEndpoints)));
+    const endpointIndex = new Map(s.endpoints.slice(0, shownEndpoints).map((endpoint, i) => [endpoint.id, i]));
+    for (let i = 0; i < shownLinks; i++) {
+      const link = s.links[i];
+      const y1 = links.y + 68 + i * linkRowH + (linkRowH - 3) / 2;
+      for (const id of link.endpointIds) {
+        const index = endpointIndex.get(id);
+        if (index === undefined) continue;
+        const y2 = endpoints.y + 66 + index * endpointRowH + (endpointRowH - 3) / 2;
+        const endpoint = s.endpoints[index];
+        this.ctx.strokeStyle = withAlpha(endpoint.shared ? SEMANTIC.success : SEMANTIC.tlsPulse, endpoint.shared ? 0.34 : 0.22);
+        this.ctx.lineWidth = endpoint.shared ? 1.2 : 0.8;
+        this.ctx.beginPath();
+        this.ctx.moveTo(links.x + links.w, y1);
+        this.ctx.bezierCurveTo(links.x + links.w + 5, y1, endpoints.x - 5, y2, endpoints.x, y2);
+        this.ctx.stroke();
       }
     }
   }
@@ -222,6 +287,10 @@ export class PoolRenderer {
     this.ctx.lineWidth = 1;
     this.ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
   }
+
+  private maxRows(r: Rect, top: number, row: number, bottom: number): number {
+    return Math.max(1, Math.floor((r.h - top - bottom) / row));
+  }
 }
 
 function ctxText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, size: number, color: string, bold = false): void {
@@ -238,4 +307,8 @@ function fmt(v: number): string {
 
 function fmtDuration(ms: number): string {
   return ms >= 60_000 ? `${(ms / 60_000).toFixed(1)}m` : `${(ms / 1000).toFixed(0)}s`;
+}
+
+function truncate(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, Math.max(1, max - 1))}…`;
 }

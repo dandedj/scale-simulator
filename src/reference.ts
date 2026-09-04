@@ -63,7 +63,7 @@ function sections(): OptionSection[] {
       id: 'pools',
       title: '⇉ Outbound Pools',
       blurb:
-        'RTB Fabric pool ownership and key cardinality, Hyper idle behavior, hypothetical active caps, and customer responder limits. Link with <code>?m=pools</code>.',
+        'RTB Fabric Links and Link endpoints, pool ownership and key cardinality, Hyper idle behavior, hypothetical active caps, and customer responder limits. Link with <code>?m=pools</code>.',
       options: describePoolOptions(),
     },
     {

@@ -2,7 +2,8 @@ import type { PoolPreset, PoolSimulationConfig } from './types';
 
 /**
  * A deliberately high-cardinality RTB Fabric shape. At 120k req/s the mean
- * concurrency is modest, but 24 nodes x 32 workers x 8 links x 4 IPs creates
+ * concurrency is modest, but 24 nodes x 32 workers x 8 links x 1 endpoint/link
+ * x 4 IPs creates
  * 24,576 independently warm HTTP/1 pool keys before load requires that many.
  */
 export function basePoolConfig(): PoolSimulationConfig {
@@ -19,7 +20,9 @@ export function basePoolConfig(): PoolSimulationConfig {
       nodes: 24,
       coresPerNode: 32,
       links: 8,
-      endpointIps: 4,
+      endpointsPerLink: 1,
+      sharedEndpointsPerLink: 1,
+      ipsPerEndpoint: 4,
       ownership: 'worker',
       keyStrategy: 'link-ip',
     },
@@ -53,7 +56,7 @@ export const POOL_PRESETS: PoolPreset[] = [
     id: 'current',
     name: 'Current RTB shape',
     description:
-      'Per-worker, per-link, per-IP HTTP/1 pools using Hyper’s on-demand growth. The key floor alone can exceed eight Envoys × 1,024 connections.',
+      'Eight Links all reference the same four-IP link endpoint, but current per-worker, per-Link, per-IP HTTP/1 pools cannot share those sockets.',
     config: basePoolConfig(),
   },
   {
@@ -82,16 +85,27 @@ export const POOL_PRESETS: PoolPreset[] = [
     id: 'endpoint-shared',
     name: 'Share links',
     description:
-      'Pools are keyed by IP + certificate + port across links. Eight links reuse the same endpoint pools, removing the link multiplier.',
+      'Pools are keyed by IP + certificate + port across Links. Exact shared link endpoints reuse sockets, while private endpoints stay isolated.',
     config: scenario((c) => {
       c.fabric.keyStrategy = 'endpoint';
+    }),
+  },
+  {
+    id: 'mixed-endpoints',
+    name: 'Mixed Link endpoints',
+    description:
+      'Each Link references one common customer endpoint and two Link-private endpoints, making partial overlap and the limits of cross-Link sharing visible.',
+    config: scenario((c) => {
+      c.fabric.endpointsPerLink = 3;
+      c.fabric.sharedEndpointsPerLink = 1;
+      c.fabric.ipsPerEndpoint = 2;
     }),
   },
   {
     id: 'dns-authority',
     name: 'DNS authority',
     description:
-      'One authority-keyed pool per link and worker, matching Hyper’s native scheme + authority key shape; connections resolve across endpoint IPs.',
+      'One authority-keyed pool per unique link endpoint and worker, matching Hyper’s native scheme + authority key shape.',
     config: scenario((c) => {
       c.fabric.keyStrategy = 'dns';
     }),

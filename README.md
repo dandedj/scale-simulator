@@ -452,15 +452,28 @@ The board keeps the multiplier visible:
 ```
 owned pool keys = RTB nodes × pool owners/node × application keys/owner
 
-current application keys/owner = links × resolved endpoint IPs
+Link→endpoint bindings = Links × configured endpoints/Link
+unique endpoints = common endpoints + Links × private endpoints/Link
+current application keys/owner = Link→endpoint bindings × IPs/endpoint
 ```
 
-With the default example, `24 nodes × 32 worker processes × 8 links × 4 IPs`
-is **24,576 independently owned keys**. A warm floor of one connection per key
-already exceeds eight Envoys at 1,024 connections each, even though the whole
-customer workload needs far less mean HTTP concurrency. This is the main
-distinction the simulator is built to expose: connection pressure can be driven
-by *partition cardinality* rather than throughput.
+Links and Link endpoints are concrete entities in the model. Each Link owns a
+list of endpoint references; each unique endpoint has a DNS authority,
+certificate identity, port, resolved IP set, reverse Link membership, and its
+share of traffic and connections. The **Shared endpoints / Link** control makes
+some exact endpoint identities common to every Link, while the remaining
+endpoints are private to one Link. The board draws those actual relationships,
+so a shared endpoint visibly collects traffic from multiple Links.
+
+In the default example, all eight Links reference the same endpoint identity,
+which resolves to four IPs. The current pool design still creates
+`24 nodes × 32 worker processes × 8 Link references × 4 IPs` = **24,576
+independently owned keys** because the Link remains part of the application key.
+A warm floor of one connection per key already exceeds eight Envoys at 1,024
+connections each, even though the whole customer workload needs far less mean
+HTTP concurrency. This is the main distinction the simulator is built to
+expose: connection pressure can be driven by *partition cardinality* rather
+than throughput.
 
 Pool ownership is explicit. **worker-local** matches separate worker processes:
 process memory and its Hyper client cannot share sockets with another process.
@@ -470,22 +483,26 @@ cross-process.
 
 The application key choices are:
 
-- **link × IP** — the current RTB Fabric shape. Every link gets a separate pool
-  for each resolved IP.
-- **IP + cert + port** — links that target the same TLS identity and endpoint
-  share pool state, removing the link multiplier while retaining explicit IP
-  selection.
-- **DNS authority** — one authority-keyed pool per owner, resolving connections
-  across the endpoint IPs. This matches Hyper's native key shape when the same
-  client is shared, but it changes where DNS/address-selection responsibility
-  lives.
+- **Link × endpoint × IP** — the current RTB Fabric shape. Every Link gets a
+  separate pool for every configured endpoint reference and resolved IP, even
+  when several Links reference the same endpoint identity.
+- **IP + cert + port** — Links that reference the same endpoint identity share
+  pool state for each IP. The Link multiplier disappears only for exact shared
+  endpoints; Link-private endpoints remain isolated.
+- **DNS authority** — one authority-keyed pool per unique endpoint and owner,
+  resolving connections across that endpoint's IPs. This matches Hyper's native
+  key shape when the same client is shared, but changes where DNS/address
+  selection responsibility lives.
 
-The fluid model converts QPS and response occupancy into mean concurrency using
-Little's Law, applies a headroom factor for arrival/latency variance, then rounds
-per independently owned key. Sparse keys contribute according to the probability
-that they were touched within the idle-retention window, so a theoretical key
-does not automatically hold a socket at extremely low traffic. The configured
-warm floor is applied afterward.
+The fluid model first divides customer QPS across Links and then across each
+Link's endpoint references. Traffic converges when Links share an endpoint and
+remains separate for private endpoints. It converts each endpoint's traffic and
+response occupancy into mean concurrency using Little's Law, applies a headroom
+factor for arrival/latency variance, then rounds per independently owned key.
+Sparse keys contribute according to the probability that they were touched
+within the idle-retention window, so a theoretical key does not automatically
+hold a socket at extremely low traffic. The configured warm floor is applied
+afterward.
 
 ### Hyper behavior represented
 
@@ -542,15 +559,19 @@ unserved work but does not pretend the cap alone defines those semantics.
 
 ### Scenarios and comparison
 
-- **Current RTB shape** — worker-local, link × IP, HTTP/1, Hyper on demand; the
+- **Current RTB shape** — eight Links converge on one shared four-IP endpoint,
+  but worker-local Link × endpoint × IP pools keep every copy separate; the
   1,024-per-Envoy example starts at the ceiling.
 - **Previous LB shape** — fewer, node-shared endpoint pools under identical
   customer traffic.
 - **Scale out ×2** — twice the nodes and therefore twice the independent warm
   key floor, despite unchanged total QPS.
-- **Share links** — IP + cert + port pooling removes the link multiplier.
-- **DNS authority** — shared authority keys remove both link and IP pool-state
-  multipliers.
+- **Share links** — IP + cert + port pooling de-duplicates exact endpoints
+  across Links while retaining one pool key per IP.
+- **Mixed Link endpoints** — every Link has one common and two private endpoint
+  identities, exposing which portions a sharing strategy can and cannot merge.
+- **DNS authority** — one authority key per unique endpoint removes repeated
+  Link references and the per-IP pool-state multiplier.
 - **Bounded + shared** — combines endpoint sharing, a short idle lifetime, and a
   hypothetical active max.
 - **HTTP/2 multiplexed** — shared authority keys plus 100 streams per connection,
@@ -572,7 +593,8 @@ treat connection creation. Horizontal or vertical RTB scaling should be checked
 against the pool-key equation every time because either can add independent
 floors even when customer QPS is unchanged.
 
-`npm test` covers the pool multiplier, all key strategies, horizontal/vertical
+`npm test` covers Link membership, shared/private endpoint identity and traffic
+conservation, the pool multiplier, all key strategies, horizontal/vertical
 scale, max-idle-versus-max-active semantics, H2 multiplexing, sparse-key idle
 retention, responder resets, scenario traffic parity, and step-size stability.
 
