@@ -92,6 +92,8 @@ export interface PoolMetricsBucket {
   idle: number;
   pending: number;
   desired: number;
+  littleLawRequired: number;
+  connectionAmplification: number;
   poolKeys: number;
   hottestResponder: number;
   responderPressure: number;
@@ -143,6 +145,10 @@ export interface PoolSnapshot {
   effectiveRate: number;
   servedRate: number;
   failedRate: number;
+  /** Theoretical connection-equivalent concurrency for configured customer throughput: λW / streams. */
+  littleLawRequired: number;
+  /** Established connections divided by the Little's Law requirement. */
+  connectionAmplification: number;
   desiredConnections: number;
   allowedConnections: number;
   established: number;

@@ -12,6 +12,7 @@ const CHARTS: ChartDef[] = [
     series: [
       { label: 'desired', color: SEMANTIC.timeout, value: (b) => b.desired },
       { label: 'established', color: SEMANTIC.connEstablished, fill: true, value: (b) => b.established },
+      { label: "Little's Law", color: SEMANTIC.success, value: (b) => b.littleLawRequired },
     ],
     threshold: (sim) => ({ value: sim.snapshot().responderCapacity, label: 'responder budget' }),
   },
@@ -55,9 +56,10 @@ const CHARTS: ChartDef[] = [
     series: [{ label: 'owned keys', color: SEMANTIC.tlsPulse, fill: true, value: (b) => b.poolKeys }],
   },
   {
-    title: 'CONNECTION REUSE %',
-    series: [{ label: 'requests not opening', color: SEMANTIC.success, fill: true, value: (b) => b.reuseRatio * 100 }],
-    yMax: () => 105,
+    title: "ACTUAL / LITTLE'S LAW",
+    series: [{ label: 'connection amplification', color: SEMANTIC.timeout, fill: true, value: (b) => b.connectionAmplification }],
+    threshold: () => ({ value: 1, label: 'theoretical minimum' }),
+    yMax: (_sim, max) => Math.max(3, max * 1.1),
   },
 ];
 

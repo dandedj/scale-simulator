@@ -43,9 +43,9 @@ export class PoolRenderer {
     const mainY = pad + topH + 12;
     const mainH = h - mainY - bottomH - 2 * pad;
     const gap = 10;
-    const fabric: Rect = { x: pad, y: mainY, w: w * 0.17, h: mainH };
-    const links: Rect = { x: fabric.x + fabric.w + gap, y: mainY, w: w * 0.19, h: mainH };
-    const endpoints: Rect = { x: links.x + links.w + gap, y: mainY, w: w * 0.34, h: mainH };
+    const fabric: Rect = { x: pad, y: mainY, w: w * 0.21, h: mainH };
+    const links: Rect = { x: fabric.x + fabric.w + gap, y: mainY, w: w * 0.22, h: mainH };
+    const endpoints: Rect = { x: links.x + links.w + gap, y: mainY, w: w * 0.31, h: mainH };
     const responders: Rect = { x: endpoints.x + endpoints.w + gap, y: mainY, w: w - endpoints.x - endpoints.w - gap - pad, h: mainH };
 
     this.drawEquation(sim, pad, pad, w - pad * 2, topH);
@@ -76,42 +76,55 @@ export class PoolRenderer {
     this.ctx.textAlign = 'right';
     ctxText(this.ctx, `${fmt(s.desiredConnections)} desired → ${fmt(s.established)} established`, x + w - 12, y + 29, 15,
       s.limitActive ? SEMANTIC.timeout : SEMANTIC.success, true);
-    ctxText(this.ctx, `${fmt(s.busy)} busy · ${fmt(s.idle)} idle · ${fmt(s.pending)} connecting`, x + w - 12, y + 52, 11, SURFACE.textDim);
+    ctxText(this.ctx, `Little's Law ${fmt(s.littleLawRequired)} required · actual ${amplificationText(s)}`, x + w - 12, y + 52, 11,
+      amplificationColor(s));
     this.ctx.textAlign = 'left';
   }
 
   private drawFabric(sim: PoolSimulation, r: Rect): void {
     const s = sim.snapshot();
     this.panel(r, SURFACE.border);
-    ctxText(this.ctx, 'RTB FABRIC', r.x + 10, r.y + 20, 13, SURFACE.textFaint, true);
-    ctxText(this.ctx, `${sim.cfg.fabric.nodes} nodes`, r.x + 10, r.y + 42, 18, SEMANTIC.inFlight, true);
-    ctxText(this.ctx,
-      sim.cfg.fabric.ownership === 'worker' ? `${sim.cfg.fabric.coresPerNode} worker pools / node` : '1 shared pool owner / node',
-      r.x + 10, r.y + 59, 10, SURFACE.textDim);
+    const nodes = Math.max(1, Math.round(sim.cfg.fabric.nodes));
+    const ownersPerNode = sim.cfg.fabric.ownership === 'worker' ? Math.max(1, Math.round(sim.cfg.fabric.coresPerNode)) : 1;
+    ctxText(this.ctx, 'RTB FABRIC NODES', r.x + 10, r.y + 20, 13, SURFACE.textFaint, true);
+    ctxText(this.ctx, `${nodes} nodes · ${fmt(s.poolOwners)} pool owners`, r.x + 10, r.y + 41, 13, SEMANTIC.inFlight, true);
+    ctxText(this.ctx, `${ownersPerNode} owner${ownersPerNode === 1 ? '' : 's'}/node · each owns every Link`, r.x + 10, r.y + 58, 9, SURFACE.textDim);
 
-    const count = Math.min(48, Math.max(1, sim.cfg.fabric.nodes));
-    const cols = Math.max(2, Math.ceil(Math.sqrt(count * Math.max(1, r.w / Math.max(1, r.h)))));
-    const rows = Math.ceil(count / cols);
-    const cellW = (r.w - 20) / cols;
-    const cellH = Math.min(24, (r.h - 82) / rows);
-    for (let i = 0; i < count; i++) {
-      const cx = r.x + 10 + (i % cols) * cellW;
-      const cy = r.y + 72 + Math.floor(i / cols) * cellH;
+    const shown = Math.min(nodes, 12, this.maxRows(r, 76, 24, 34));
+    const rowH = Math.max(18, Math.min(24, (r.h - 106) / Math.max(1, shown)));
+    const linkBlocks = Math.min(8, s.links.length);
+    for (let i = 0; i < shown; i++) {
+      const y = r.y + 70 + i * rowH;
       this.ctx.fillStyle = withAlpha(SEMANTIC.inFlight, 0.18);
-      this.ctx.fillRect(cx + 2, cy + 2, Math.max(5, cellW - 5), Math.max(4, cellH - 5));
+      this.ctx.fillRect(r.x + 7, y, r.w - 14, rowH - 3);
       this.ctx.strokeStyle = withAlpha(SEMANTIC.inFlight, 0.6);
-      this.ctx.strokeRect(cx + 2, cy + 2, Math.max(5, cellW - 5), Math.max(4, cellH - 5));
+      this.ctx.strokeRect(r.x + 7.5, y + 0.5, r.w - 15, rowH - 4);
+      ctxText(this.ctx, `N${i + 1}`, r.x + 12, y + 13, 9, SURFACE.text, true);
+      const blocksX = r.x + 36;
+      const blocksW = Math.max(20, r.w - 82);
+      const blockGap = 2;
+      const blockW = Math.max(2, Math.min(12, (blocksW - blockGap * (linkBlocks - 1)) / linkBlocks));
+      for (let link = 0; link < linkBlocks; link++) {
+        this.ctx.fillStyle = withAlpha(SEMANTIC.tlsPulse, 0.72);
+        this.ctx.fillRect(blocksX + link * (blockW + blockGap), y + 5, blockW, Math.max(5, rowH - 13));
+      }
+      if (s.links.length > linkBlocks) ctxText(this.ctx, '…', blocksX + linkBlocks * (blockW + blockGap), y + 13, 8, SURFACE.textDim);
+      this.ctx.textAlign = 'right';
+      ctxText(this.ctx, `×${ownersPerNode}`, r.x + r.w - 12, y + 13, 8, SURFACE.textDim);
+      this.ctx.textAlign = 'left';
     }
-    if (sim.cfg.fabric.nodes > count) ctxText(this.ctx, `+${sim.cfg.fabric.nodes - count}`, r.x + r.w - 28, r.y + r.h - 10, 10, SURFACE.textDim);
-    ctxText(this.ctx, `${fmt(s.baseRate)} req/s`, r.x + 10, r.y + r.h - 12, 12, SEMANTIC.success, true);
+    if (shown < nodes) ctxText(this.ctx, `+${nodes - shown} nodes with the same Link-pool set`, r.x + 10, r.y + r.h - 27, 8, SURFACE.textDim);
+    ctxText(this.ctx, `${fmt(s.logicalKeysPerOwner * ownersPerNode)} owned keys / node`, r.x + 10, r.y + r.h - 11, 11, SEMANTIC.tlsPulse, true);
   }
 
   private drawLinks(sim: PoolSimulation, r: Rect): void {
     const s = sim.snapshot();
     this.panel(r, SURFACE.border);
-    ctxText(this.ctx, 'LINKS', r.x + 10, r.y + 20, 13, SURFACE.textFaint, true);
-    ctxText(this.ctx, `${s.links.length} requester → responder`, r.x + 10, r.y + 40, 11, SURFACE.text);
-    ctxText(this.ctx, 'exactly 1 endpoint / Link', r.x + 10, r.y + 56, 10, SEMANTIC.inFlight);
+    const ownersPerNode = sim.cfg.fabric.ownership === 'worker' ? Math.max(1, Math.round(sim.cfg.fabric.coresPerNode)) : 1;
+    const linkBased = sim.cfg.fabric.keyStrategy === 'link-ip';
+    ctxText(this.ctx, linkBased ? 'LINK-BASED POOLS / OWNER' : 'LINK ROUTES / OWNER', r.x + 10, r.y + 20, 13, SURFACE.textFaint, true);
+    ctxText(this.ctx, `${fmt(s.poolOwners)} identical owner copies fleet-wide`, r.x + 10, r.y + 40, 10, SURFACE.text);
+    ctxText(this.ctx, `${ownersPerNode}/node × all ${s.links.length} Links`, r.x + 10, r.y + 56, 10, SEMANTIC.inFlight);
 
     const shown = Math.min(s.links.length, this.maxRows(r, 72, 25, 14));
     const rowH = Math.max(18, Math.min(25, (r.h - 94) / Math.max(1, shown)));
@@ -122,10 +135,10 @@ export class PoolRenderer {
       this.ctx.fillRect(r.x + 7, y, r.w - 14, rowH - 3);
       this.ctx.strokeStyle = withAlpha(SEMANTIC.inFlight, 0.45);
       this.ctx.strokeRect(r.x + 7.5, y + 0.5, r.w - 15, rowH - 4);
-      ctxText(this.ctx, `L${link.id}`, r.x + 13, y + 13, 10, SEMANTIC.inFlight, true);
-      ctxText(this.ctx, `${fmt(link.requestRate)}/s`, r.x + 36, y + 13, 9, SURFACE.textDim);
+      ctxText(this.ctx, `L${link.id}→EP${link.endpointId}`, r.x + 13, y + 13, 9, SEMANTIC.inFlight, true);
+      ctxText(this.ctx, `${fmt(link.requestRate)}/s`, r.x + Math.min(78, r.w * 0.42), y + 13, 8, SURFACE.textDim);
       this.ctx.textAlign = 'right';
-      ctxText(this.ctx, `→ EP${link.endpointId}`, r.x + r.w - 12, y + 13, 9, SURFACE.text);
+      ctxText(this.ctx, linkBased ? `${s.responders.length} IP pools` : 'shared destination keys', r.x + r.w - 12, y + 13, 8, SURFACE.text);
       this.ctx.textAlign = 'left';
     }
     if (shown < s.links.length) ctxText(this.ctx, `+${s.links.length - shown} Links`, r.x + 10, r.y + r.h - 11, 9, SURFACE.textDim);
@@ -264,7 +277,7 @@ export class PoolRenderer {
       ['HOTTEST RESPONDER', `${fmt(s.hottestResponder)} / ${fmt(sim.cfg.responder.connectionLimit)}`, loadColor(s.responderPressure)],
       ['SERVED', `${(s.effectiveRate > 0 ? 100 * s.servedRate / s.effectiveRate : 100).toFixed(1)}%`, SEMANTIC.success],
       ['RESETS /s', fmt(s.resetsPerSec), s.resetsPerSec > 0 ? SEMANTIC.timeout : SURFACE.textDim],
-      ['REUSE', `${(s.reuseRatio * 100).toFixed(1)}%`, SEMANTIC.tlsPulse],
+      ["ACTUAL / LITTLE'S LAW", amplificationText(s), amplificationColor(s)],
     ];
     items.forEach(([label, value, color], i) => {
       const ix = x + 13 + (i * (w - 26)) / items.length;
@@ -311,4 +324,18 @@ function fmtDuration(ms: number): string {
 
 function truncate(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, Math.max(1, max - 1))}…`;
+}
+
+function amplificationText(s: ReturnType<PoolSimulation['snapshot']>): string {
+  if (s.littleLawRequired <= 1e-7) return '—';
+  return `${s.connectionAmplification.toFixed(s.connectionAmplification >= 10 ? 1 : 2)}×`;
+}
+
+function amplificationColor(s: ReturnType<PoolSimulation['snapshot']>): string {
+  if (s.littleLawRequired <= 1e-7) return SURFACE.textDim;
+  const ratio = s.connectionAmplification;
+  if (ratio < 0.95) return SEMANTIC.timeout;
+  if (ratio <= 1.25) return SEMANTIC.success;
+  if (ratio <= 2) return SEMANTIC.shed;
+  return SEMANTIC.timeout;
 }

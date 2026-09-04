@@ -224,7 +224,7 @@ const GROUPS: GroupDef[] = [
         info: {
           what: 'RTB Fabric’s configured minimum warm connection count for each application pool key; this is not a Hyper legacy builder option.',
           how: 'Multiplied by every owned key. The floor remains even when mean traffic concurrency is below one connection per key.',
-          expect: 'A floor of one across 49,152 keys is already six times the aggregate 8×1,024 responder budget.',
+          expect: 'At the two-node baseline, a floor of one creates 4,096 sockets versus 2,400 required by Little’s Law. Scaling to four nodes doubles the floor and reaches the responder ceiling.',
         },
       },
       {
@@ -607,6 +607,8 @@ export class PoolControlPanel {
 
 const TOTALS: Array<{ label: string; color: string; get(sim: PoolSimulation): string }> = [
   { label: 'Established now', color: SEMANTIC.connEstablished, get: (s) => fmtBig(s.snapshot().established) },
+  { label: "Little's Law required", color: SEMANTIC.success, get: (s) => fmtBig(s.snapshot().littleLawRequired) },
+  { label: 'Actual / required', color: SEMANTIC.timeout, get: (s) => formatRatio(s.snapshot().connectionAmplification, s.snapshot().littleLawRequired) },
   { label: 'Peak connections', color: SEMANTIC.tlsPulse, get: (s) => fmtBig(s.metrics.totals.peakConnections) },
   { label: 'Peak hottest', color: SEMANTIC.timeout, get: (s) => fmtBig(s.metrics.totals.peakHottestResponder) },
   { label: 'Connections opened', color: SEMANTIC.success, get: (s) => fmtBig(s.metrics.totals.connectionsOpened) },
@@ -635,6 +637,10 @@ function fmtBig(v: number): string {
   if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
   if (v >= 1e3) return `${(v / 1e3).toFixed(1)}k`;
   return String(Math.round(v));
+}
+
+function formatRatio(value: number, required: number): string {
+  return required <= 1e-7 ? '—' : `${value.toFixed(value >= 10 ? 1 : 2)}×`;
 }
 
 function lerp(a: number, b: number, t: number): number { return a + (b - a) * t; }

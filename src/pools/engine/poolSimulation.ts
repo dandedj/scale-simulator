@@ -166,6 +166,12 @@ export class PoolSimulation {
     return this.connectionTarget(rate).desired;
   }
 
+  /** Little's Law concurrency for customer throughput, before safety headroom or pool floors. */
+  littleLawConnectionCount(rate = this.baseRate()): number {
+    return Math.max(0, rate) * (Math.max(0.1, this.cfg.traffic.responseTimeMs) / 1000) /
+      this.streamsPerConnection();
+  }
+
   responderCapacity(): number {
     const count = this.responderCount();
     const limit = Math.max(1, this.cfg.responder.connectionLimit);
@@ -259,11 +265,15 @@ export class PoolSimulation {
     const reuse = effectiveRate > EPS ? Math.max(0, 1 - opensRate / effectiveRate) : 1;
     const topology = this.topologyViews(effectiveRate, this.established);
     const responders = this.responderViews(this.established);
+    const littleLawRequired = this.littleLawConnectionCount(baseRate);
+    const connectionAmplification = littleLawRequired > EPS ? this.established / littleLawRequired : 0;
     return {
       baseRate,
       effectiveRate,
       servedRate,
       failedRate: Math.max(0, effectiveRate - servedRate),
+      littleLawRequired,
+      connectionAmplification,
       desiredConnections: target.desired,
       allowedConnections: target.allowed,
       established: this.established,

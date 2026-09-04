@@ -469,19 +469,23 @@ evenly as possible across endpoints. The board draws those actual relationships.
 
 In the default example, all eight Links reference the same endpoint identity,
 which resolves to the eight responder IPs. The current pool design still creates
-`24 nodes × 32 worker processes × 8 Link references × 8 responder IPs` = **49,152
+`2 nodes × 32 worker processes × 8 Link references × 8 responder IPs` = **4,096
 independently owned keys** because the Link remains part of the application key.
-A warm floor of one connection per key already exceeds eight Envoys at 1,024
-connections each, even though the whole customer workload needs far less mean
-HTTP concurrency. This is the main distinction the simulator is built to
-expose: connection pressure can be driven by *partition cardinality* rather
-than throughput.
+A warm floor of one connection per key creates 4,096 established sockets while
+Little's Law requires only 2,400 for the default throughput and response time.
+Scaling the same workload from two to four nodes doubles the floor to 8,192 and
+reaches the eight-Envoy ceiling once placement skew is included. This is the
+main distinction the simulator is built to expose: connection pressure can be
+driven by *partition cardinality* rather than throughput.
 
 Pool ownership is explicit. **worker-local** matches separate worker processes:
 process memory and its Hyper client cannot share sockets with another process.
 **node-shared** is a hypothetical architectural comparison. Within one process,
 cloning a Hyper `Client` reuses its underlying pool; that does not make a pool
-cross-process.
+cross-process. The board renders every Fabric node as a row containing the full
+Link-pool set, multiplied by the owners on that node. The adjacent Link column is
+one owner's complete Link-pool template and states how many independent copies
+exist across the fleet.
 
 The application key choices are:
 
@@ -505,6 +509,31 @@ independently owned key. Sparse keys contribute according to the probability
 that they were touched within the idle-retention window, so a theoretical key
 does not automatically hold a socket at extremely low traffic. The configured
 warm floor is applied afterward.
+
+### Connection justification with Little's Law
+
+The simulator exposes the theoretical connection-equivalent concurrency needed
+for the configured customer throughput:
+
+```
+Little's Law required = customer requests/s × response occupancy seconds
+                        ÷ concurrent HTTP streams/connection
+
+connection amplification = established connections ÷ Little's Law required
+```
+
+The customer request rate is used rather than retry-amplified traffic so A/B
+scenarios compare against the same useful workload. `1×` means the established
+inventory equals the theoretical average-concurrency minimum. A value far above
+`1×` makes the excess visible; pool-key cardinality, warm floors, burst headroom,
+checkout races, and idle retention can explain the gap. A value below `1×`
+means the live inventory is below the concurrency needed to sustain the target
+throughput under the configured response time and protocol.
+
+This is a diagnostic baseline, not a recommended production cap: it deliberately
+excludes safety headroom and does not count connecting sockets as established.
+The board, HUD, comparison totals, connections chart, and **Actual / Little's
+Law** history chart show both the required count and amplification ratio.
 
 ### Hyper behavior represented
 
@@ -564,11 +593,12 @@ unserved work but does not pretend the cap alone defines those semantics.
 - **Current RTB shape** — eight Links converge on one endpoint that resolves to
   eight responder IPs,
   but worker-local Link × endpoint × IP pools keep every copy separate; the
-  1,024-per-Envoy example starts at the ceiling.
+  baseline starts with two Fabric nodes.
 - **Previous LB shape** — fewer, node-shared endpoint pools under identical
   customer traffic.
-- **Scale out ×2** — twice the nodes and therefore twice the independent warm
-  key floor, despite unchanged total QPS.
+- **Scale out ×2** — four nodes instead of two and therefore twice the
+  independent warm-key floor, despite unchanged total QPS; this crosses the
+  configured responder ceiling.
 - **Share links** — IP + cert + port pooling de-duplicates exact endpoints
   across Links while retaining one pool key per IP.
 - **Partially shared endpoints** — eight Links are distributed across three
@@ -598,10 +628,10 @@ against the pool-key equation every time because either can add independent
 floors even when customer QPS is unchanged.
 
 `npm test` covers one-endpoint-per-Link membership, repeated/distinct endpoint
-identities and traffic conservation, the pool multiplier, all key strategies,
-horizontal/vertical scale, max-idle-versus-max-active semantics, H2 multiplexing,
-sparse-key idle retention, responder resets, scenario traffic parity, and
-step-size stability.
+identities and traffic conservation, Little's Law connection amplification, the
+pool multiplier, all key strategies, horizontal/vertical scale,
+max-idle-versus-max-active semantics, H2 multiplexing, sparse-key idle retention,
+responder resets, scenario traffic parity, and step-size stability.
 
 ## Scaling
 

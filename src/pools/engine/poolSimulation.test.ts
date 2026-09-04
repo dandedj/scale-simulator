@@ -5,22 +5,22 @@ import { PoolSimulation } from './poolSimulation';
 describe('outbound pool cardinality', () => {
   it('multiplies current pools across nodes, workers, Link endpoints, and IPs', () => {
     const sim = new PoolSimulation(basePoolConfig());
-    expect(sim.poolOwners()).toBe(24 * 32);
+    expect(sim.poolOwners()).toBe(2 * 32);
     expect(sim.logicalKeysPerOwner()).toBe(8 * 8); // 8 Links × 8 responder IPs
-    expect(sim.poolKeyCount()).toBe(24 * 32 * 8 * 8);
+    expect(sim.poolKeyCount()).toBe(2 * 32 * 8 * 8);
     expect(sim.desiredConnectionCount()).toBeGreaterThanOrEqual(sim.poolKeyCount());
   });
 
   it('removes the right multiplier for each alternative key strategy', () => {
     const c = basePoolConfig();
     c.fabric.keyStrategy = 'dns';
-    expect(new PoolSimulation(c).poolKeyCount()).toBe(24 * 32);
+    expect(new PoolSimulation(c).poolKeyCount()).toBe(2 * 32);
 
     c.fabric.keyStrategy = 'endpoint';
-    expect(new PoolSimulation(c).poolKeyCount()).toBe(24 * 32 * 8);
+    expect(new PoolSimulation(c).poolKeyCount()).toBe(2 * 32 * 8);
 
     c.fabric.ownership = 'node';
-    expect(new PoolSimulation(c).poolKeyCount()).toBe(24 * 8);
+    expect(new PoolSimulation(c).poolKeyCount()).toBe(2 * 8);
   });
 
   it('shows horizontal and vertical scale multiplying independent pool copies', () => {
@@ -31,6 +31,11 @@ describe('outbound pool cardinality', () => {
     large.fabric.nodes = 16;
     large.fabric.coresPerNode = 64;
     expect(new PoolSimulation(large).poolKeyCount()).toBe(new PoolSimulation(small).poolKeyCount() * 8);
+  });
+
+  it('starts with two Fabric nodes and doubles to four in the scale-out preset', () => {
+    expect(basePoolConfig().fabric.nodes).toBe(2);
+    expect(POOL_PRESETS.find((preset) => preset.id === 'scale-out')?.config.fabric.nodes).toBe(4);
   });
 });
 
@@ -96,6 +101,36 @@ describe('hyper-util semantics represented by the model', () => {
     const short = clonePoolConfig(long);
     short.pool.idleTimeoutMs = 100;
     expect(new PoolSimulation(short).desiredConnectionCount()).toBeLessThan(new PoolSimulation(long).desiredConnectionCount());
+  });
+});
+
+describe("Little's Law connection justification", () => {
+  it('compares established sockets with the theoretical concurrency for customer throughput', () => {
+    const sim = new PoolSimulation(basePoolConfig());
+    const snapshot = sim.snapshot();
+    expect(snapshot.littleLawRequired).toBe(120_000 * 0.020);
+    expect(snapshot.established).toBe(4096);
+    expect(snapshot.connectionAmplification).toBeCloseTo(4096 / 2400, 8);
+  });
+
+  it('accounts for HTTP/2 streams but excludes safety headroom and warm floors', () => {
+    const cfg = basePoolConfig();
+    cfg.pool.protocol = 'http2';
+    cfg.pool.h2StreamsPerConnection = 100;
+    cfg.traffic.concurrencyHeadroom = 4;
+    cfg.pool.minConnectionsPerKey = 8;
+    const snapshot = new PoolSimulation(cfg).snapshot();
+    expect(snapshot.littleLawRequired).toBe(24);
+    expect(snapshot.connectionAmplification).toBeCloseTo(snapshot.established / 24, 8);
+  });
+
+  it('tracks the metric in history and drops actual/required to zero after a recycle', () => {
+    const sim = new PoolSimulation(basePoolConfig());
+    sim.step(1000);
+    expect(sim.metrics.buckets.at(-1)?.littleLawRequired).toBe(2400);
+    expect(sim.metrics.buckets.at(-1)?.connectionAmplification).toBeCloseTo(sim.snapshot().connectionAmplification, 4);
+    sim.reconnectAll();
+    expect(sim.snapshot().connectionAmplification).toBe(0);
   });
 });
 
@@ -203,15 +238,19 @@ describe('Links and configured link endpoints', () => {
 });
 
 describe('responder pressure dynamics', () => {
-  it('hits the configured Envoy limit in the current scenario', () => {
-    const sim = new PoolSimulation(basePoolConfig());
+  it('hits the configured Envoy limit after scaling the baseline from two to four nodes', () => {
+    const cfg = basePoolConfig();
+    cfg.fabric.nodes = 4;
+    const sim = new PoolSimulation(cfg);
     expect(sim.snapshot().responderPressure).toBeCloseTo(1, 5);
     expect(sim.snapshot().limitActive).toBe(true);
     expect(sim.snapshot().established).toBeLessThan(sim.snapshot().desiredConnections);
   });
 
   it('produces reset attempts after a cold reconnect above the responder budget', () => {
-    const sim = new PoolSimulation(basePoolConfig());
+    const cfg = basePoolConfig();
+    cfg.fabric.nodes = 4;
+    const sim = new PoolSimulation(cfg);
     sim.reconnectAll();
     sim.step(500);
     expect(sim.metrics.totals.connectionAttempts).toBeGreaterThan(0);

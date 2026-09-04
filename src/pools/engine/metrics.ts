@@ -71,6 +71,8 @@ export class PoolMetricsCollector {
       this.current.idle = s.idle;
       this.current.pending = s.pending;
       this.current.desired = s.desiredConnections;
+      this.current.littleLawRequired = s.littleLawRequired;
+      this.current.connectionAmplification = s.connectionAmplification;
       this.current.poolKeys = s.poolKeys;
       this.current.hottestResponder = s.hottestResponder;
       this.current.responderPressure = s.responderPressure;
@@ -112,6 +114,8 @@ export class PoolMetricsCollector {
       idle: 0,
       pending: 0,
       desired: 0,
+      littleLawRequired: 0,
+      connectionAmplification: 0,
       poolKeys: 0,
       hottestResponder: 0,
       responderPressure: 0,

@@ -19,14 +19,16 @@ const COMPARE_HELP = `
       <li><b>Same customer traffic.</b> Request rate, response occupancy, concurrency headroom, and retries apply to both panes.</li>
       <li><b>Independent pool designs.</b> Fleet size, process ownership, Link endpoint membership and overlap, keying, Hyper behavior, protocol, and responder limits are tuned per pane.</li>
       <li><b>Follow the Link paths.</b> Every Link points to exactly one endpoint ID. Shared endpoint rows collect several paths; distinct endpoint rows collect one.</li>
+      <li><b>See where pools live.</b> Every Fabric node row contains the full Link-pool set. The Link column shows one owner’s template and how many worker-local or node-shared copies exist.</li>
       <li><b>Read the multiplier first.</b> The top equation shows independently owned pool keys. One warm socket per key can dominate before throughput concurrency does.</li>
+      <li><b>Check actual / Little’s Law.</b> This divides established sockets by the theoretical minimum for customer throughput and response occupancy. It excludes safety headroom, warm floors, and retries.</li>
       <li><b>SURGE and RECONNECT ALL hit both panes together.</b> Compare pool growth, idle retention, responder pressure, resets, and served traffic on one clock.</li>
       <li><b>Max idle is not max active.</b> Hyper’s max-idle setting trims returned sockets; only the hypothetical bounded policy limits established + connecting sockets.</li>
     </ul>
     <button id="pool-help-dismiss" class="btn">GOT IT</button>
   </div>`;
 
-interface PaneStats { badge: HTMLElement; connections: HTMLElement; pressure: HTMLElement }
+interface PaneStats { badge: HTMLElement; connections: HTMLElement; amplification: HTMLElement; pressure: HTMLElement }
 interface Pane { sim: PoolSimulation; renderer: PoolRenderer; charts: PoolChartRail; stats: PaneStats | null }
 
 export class PoolExperience implements Experience {
@@ -41,6 +43,7 @@ export class PoolExperience implements Experience {
   private helpEl!: HTMLElement;
   private limitBadge!: HTMLElement;
   private hudConnections!: HTMLElement;
+  private hudAmplification!: HTMLElement;
   private hudPressure!: HTMLElement;
   private appEl = document.getElementById('app')!;
 
@@ -102,8 +105,9 @@ export class PoolExperience implements Experience {
   private buildHud(): void {
     this.limitBadge = el('div', 'single-only', '⚠ RESPONDER LIMIT'); this.limitBadge.id = 'pool-limit';
     const connections = el('div', 'hud-item single-only'); this.hudConnections = el('span', 'amp-ok', '0'); connections.append(this.hudConnections, label('connections'));
+    const amplification = el('div', 'hud-item single-only'); this.hudAmplification = el('span', 'amp-ok', '0×'); amplification.append(this.hudAmplification, label("actual / Little's Law"));
     const pressure = el('div', 'hud-item single-only'); this.hudPressure = el('span', 'amp-ok', '0%'); pressure.append(this.hudPressure, label('hottest / limit'));
-    this.hosts.hud.append(this.limitBadge, connections, pressure);
+    this.hosts.hud.append(this.limitBadge, connections, amplification, pressure);
   }
 
   private buildHelp(): void {
@@ -119,9 +123,9 @@ export class PoolExperience implements Experience {
       if (comparing) {
         const bar = el('div', 'pane-bar'); const tag = el('span', `pane-tag tag-${PANE_TAGS[i].toLowerCase()}`, `SIM ${PANE_TAGS[i]}`);
         const badge = el('span', 'pane-storm', '⚠ RESPONDER LIMIT'); const statWrap = el('span', 'pane-stats');
-        const connections = el('b', 'amp-ok', '0'); const pressure = el('b', 'amp-ok', '0%');
-        statWrap.append(connections, ' connections · ', pressure, ' hottest/limit'); bar.append(tag, badge, statWrap); root.appendChild(bar);
-        stats = { badge, connections, pressure };
+        const connections = el('b', 'amp-ok', '0'); const amplification = el('b', 'amp-ok', '0×'); const pressure = el('b', 'amp-ok', '0%');
+        statWrap.append(connections, ' connections · ', amplification, " actual/Little's Law · ", pressure, ' hottest/limit'); bar.append(tag, badge, statWrap); root.appendChild(bar);
+        stats = { badge, connections, amplification, pressure };
       }
       const stage = el('div', 'pane-stage'); const canvas = document.createElement('canvas'); stage.appendChild(canvas);
       const chartsEl = el('div', 'pane-charts'); root.append(stage, chartsEl); this.panesHost.appendChild(root);
@@ -152,11 +156,13 @@ export class PoolExperience implements Experience {
   private updateHud(): void {
     if (!this.compare) {
       const s = this.panes[0].sim.snapshot(); setStat(this.hudConnections, fmt(s.established), s.limitActive ? 'amp-bad' : 'amp-ok');
+      setStat(this.hudAmplification, formatAmplification(s.connectionAmplification, s.littleLawRequired), amplificationClass(s.connectionAmplification, s.littleLawRequired));
       setStat(this.hudPressure, `${(s.responderPressure * 100).toFixed(0)}%`, pressureClass(s.responderPressure));
       this.limitBadge.classList.toggle('visible', s.limitActive); return;
     }
     for (const pane of this.panes) if (pane.stats) {
       const s = pane.sim.snapshot(); setStat(pane.stats.connections, fmt(s.established), s.limitActive ? 'amp-bad' : 'amp-ok');
+      setStat(pane.stats.amplification, formatAmplification(s.connectionAmplification, s.littleLawRequired), amplificationClass(s.connectionAmplification, s.littleLawRequired));
       setStat(pane.stats.pressure, `${(s.responderPressure * 100).toFixed(0)}%`, pressureClass(s.responderPressure));
       pane.stats.badge.classList.toggle('visible', s.limitActive);
     }
@@ -164,6 +170,14 @@ export class PoolExperience implements Experience {
 }
 
 function pressureClass(value: number): string { return value >= 1 ? 'amp-bad' : value >= 0.8 ? 'amp-warn' : 'amp-ok'; }
+function amplificationClass(value: number, required: number): string {
+  if (required <= 1e-7 || (value >= 0.95 && value <= 1.25)) return 'amp-ok';
+  if (value >= 0.75 && value <= 2) return 'amp-warn';
+  return 'amp-bad';
+}
+function formatAmplification(value: number, required: number): string {
+  return required <= 1e-7 ? '—' : `${value.toFixed(value >= 10 ? 1 : 2)}×`;
+}
 function setStat(node: HTMLElement, text: string, cls: string): void { if (node.textContent !== text) node.textContent = text; if (node.className !== cls) node.className = cls; }
 function fmt(v: number): string { return v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(1)}k` : String(Math.round(v)); }
 function el(tag: string, cls: string, text?: string): HTMLElement { const node = document.createElement(tag); node.className = cls; if (text !== undefined) node.textContent = text; return node; }

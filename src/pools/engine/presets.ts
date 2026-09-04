@@ -2,9 +2,10 @@ import type { PoolPreset, PoolSimulationConfig } from './types';
 
 /**
  * A deliberately high-cardinality RTB Fabric shape. At 120k req/s the mean
- * concurrency is modest, but 24 nodes x 32 workers x 8 links x 8 responder
- * IPs creates 49,152 independently warm HTTP/1 pool keys before load requires
- * that many.
+ * concurrency is modest, but 2 nodes x 32 workers x 8 links x 8 responder IPs
+ * creates 4,096 independently warm HTTP/1 pool keys before load requires that
+ * many. Scaling to four nodes doubles that inventory and crosses the responder
+ * budget once connection-placement skew is included.
  */
 export function basePoolConfig(): PoolSimulationConfig {
   return {
@@ -17,7 +18,7 @@ export function basePoolConfig(): PoolSimulationConfig {
       maxRetries: 2,
     },
     fabric: {
-      nodes: 24,
+      nodes: 2,
       coresPerNode: 32,
       links: 8,
       uniqueEndpoints: 1,
@@ -63,7 +64,7 @@ export const POOL_PRESETS: PoolPreset[] = [
     description:
       'A small node-shared pool keyed by endpoint IP. Same traffic and responders, much lower pool cardinality—the migration contrast.',
     config: scenario((c) => {
-      c.fabric.nodes = 8;
+      c.fabric.nodes = 2;
       c.fabric.ownership = 'node';
       c.fabric.keyStrategy = 'endpoint';
       c.pool.minConnectionsPerKey = 0;
@@ -74,9 +75,9 @@ export const POOL_PRESETS: PoolPreset[] = [
     id: 'scale-out',
     name: 'Scale out ×2',
     description:
-      'Forty-eight RTB Fabric nodes split the same offered load. CPU headroom rises, but independent pool copies—and the warm connection floor—double.',
+      'Four RTB Fabric nodes split the same offered load. CPU headroom rises, but independent pool copies—and the warm connection floor—double.',
     config: scenario((c) => {
-      c.fabric.nodes = 48;
+      c.fabric.nodes = 4;
     }),
   },
   {
