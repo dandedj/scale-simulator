@@ -155,36 +155,27 @@ const GROUPS: GroupDef[] = [
     knobs: [
       {
         label: 'Links to responder', min: 1, max: 64, step: 1,
-        get: (c) => c.fabric.links, set: (c, v) => (c.fabric.links = v), format: count,
-        info: {
-          what: 'Requester→responder Links carrying traffic to this customer. Each Link references its own set of configured link endpoints.',
-          how: 'The model creates every Link as an entity, attaches its endpoint identities, and divides customer traffic across the Links.',
-          expect: 'More links grow connections linearly in the current design; sharing by endpoint or authority removes this multiplier.',
-        },
-      },
-      {
-        label: 'Link endpoints / Link', min: 1, max: 16, step: 1,
-        get: (c) => c.fabric.endpointsPerLink,
+        get: (c) => c.fabric.links,
         set: (c, v) => {
-          c.fabric.endpointsPerLink = v;
-          c.fabric.sharedEndpointsPerLink = Math.min(c.fabric.sharedEndpointsPerLink, v);
+          c.fabric.links = v;
+          c.fabric.uniqueEndpoints = Math.min(c.fabric.uniqueEndpoints, v);
         },
         format: count,
         info: {
-          what: 'Configured responder endpoint definitions referenced by every Link. An endpoint has a DNS authority, certificate identity, port, and resolved IP set.',
-          how: 'Total Link→endpoint bindings are Links × endpoints/Link. Some definitions can be exact shared identities; the remainder are private to one Link.',
-          expect: 'More endpoints create more routing choices and more pool keys. Whether repeated endpoints duplicate sockets depends on the key strategy.',
+          what: 'Requester→responder Links carrying traffic to this customer. Every Link points to exactly one configured endpoint.',
+          how: 'The model creates every Link as an entity, attaches its one endpoint identity, and divides customer traffic across the Links.',
+          expect: 'More Links grow connections linearly in the current design. Endpoint sharing removes this multiplier only where several Links point to the same endpoint.',
         },
       },
       {
-        label: 'Shared endpoints / Link', min: 0, max: 16, step: 1,
-        get: (c) => c.fabric.sharedEndpointsPerLink,
-        set: (c, v) => (c.fabric.sharedEndpointsPerLink = Math.min(v, c.fabric.endpointsPerLink)),
+        label: 'Unique Link endpoints', min: 1, max: 64, step: 1,
+        get: (c) => Math.min(c.fabric.uniqueEndpoints, c.fabric.links),
+        set: (c, v) => (c.fabric.uniqueEndpoints = Math.min(v, c.fabric.links)),
         format: count,
         info: {
-          what: 'Exact endpoint identities—host, certificate, and port—referenced in common by every Link.',
-          how: 'The value is clamped to endpoints/Link. Other endpoint definitions are generated as Link-private, so the board can show both converging and isolated routes.',
-          expect: 'Current Link-local pools still duplicate shared endpoints. IP+cert+port or DNS-authority sharing collapses only genuinely identical endpoints, not private ones.',
+          what: 'Distinct endpoint identities across all Links. Each identity has a DNS authority, certificate, port, and resolved IP set.',
+          how: 'The value cannot exceed the Link count. Links are distributed as evenly as possible across these endpoints: one endpoint means all Links converge; one per Link means all differ.',
+          expect: 'Fewer unique endpoints create more endpoint reuse. IP+cert+port or DNS-authority pooling can share those repeated identities; current Link-local pools cannot.',
         },
       },
       {
@@ -209,7 +200,7 @@ const GROUPS: GroupDef[] = [
         info: {
           what: 'RTB Fabric’s application-level partition above the library pool.',
           how: 'Current keys every Link→endpoint→IP binding. Endpoint de-duplicates identical IP/cert/port destinations across Links. DNS uses one scheme+authority key per unique endpoint, matching Hyper’s native key shape when one Client is shared.',
-          expect: 'Sharing removes only the multipliers caused by Links that reference the same endpoint identity; private link endpoints remain separate by design.',
+          expect: 'Sharing removes only duplicate Link references to the same endpoint identity. Links that point to different endpoints remain separate.',
         },
       },
     ],

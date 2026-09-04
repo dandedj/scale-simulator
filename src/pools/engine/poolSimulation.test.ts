@@ -40,8 +40,7 @@ describe('hyper-util semantics represented by the model', () => {
     a.fabric.nodes = 1;
     a.fabric.coresPerNode = 1;
     a.fabric.links = 1;
-    a.fabric.endpointsPerLink = 1;
-    a.fabric.sharedEndpointsPerLink = 1;
+    a.fabric.uniqueEndpoints = 1;
     a.fabric.ipsPerEndpoint = 1;
     a.pool.minConnectionsPerKey = 0;
     a.traffic.requestsPerSec = 10_000;
@@ -58,8 +57,7 @@ describe('hyper-util semantics represented by the model', () => {
     c.fabric.nodes = 1;
     c.fabric.coresPerNode = 1;
     c.fabric.links = 1;
-    c.fabric.endpointsPerLink = 1;
-    c.fabric.sharedEndpointsPerLink = 1;
+    c.fabric.uniqueEndpoints = 1;
     c.fabric.ipsPerEndpoint = 1;
     c.pool.minConnectionsPerKey = 0;
     c.traffic.requestsPerSec = 10_000;
@@ -79,8 +77,7 @@ describe('hyper-util semantics represented by the model', () => {
     h1.fabric.nodes = 1;
     h1.fabric.coresPerNode = 1;
     h1.fabric.links = 1;
-    h1.fabric.endpointsPerLink = 1;
-    h1.fabric.sharedEndpointsPerLink = 1;
+    h1.fabric.uniqueEndpoints = 1;
     h1.fabric.ipsPerEndpoint = 1;
     h1.traffic.requestsPerSec = 10_000;
     h1.traffic.responseTimeMs = 100;
@@ -113,43 +110,53 @@ describe('Links and configured link endpoints', () => {
     expect(snapshot.endpoints[0].linkIds).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(snapshot.endpoints[0].ips).toHaveLength(4);
     expect(snapshot.endpoints[0].authority).toContain(':443');
-    expect(snapshot.links.every((link) => link.endpointIds[0] === snapshot.endpoints[0].id)).toBe(true);
+    expect(snapshot.links.every((link) => link.endpointId === snapshot.endpoints[0].id)).toBe(true);
   });
 
-  it('distinguishes shared endpoint identities from Link-private endpoints', () => {
+  it('distinguishes repeated endpoint identities from different endpoints', () => {
     const cfg = basePoolConfig();
     cfg.fabric.nodes = 1;
     cfg.fabric.coresPerNode = 1;
     cfg.fabric.links = 3;
-    cfg.fabric.endpointsPerLink = 3;
-    cfg.fabric.sharedEndpointsPerLink = 1;
+    cfg.fabric.uniqueEndpoints = 2;
     cfg.fabric.ipsPerEndpoint = 2;
 
     const current = new PoolSimulation(cfg);
-    expect(current.snapshot().linkEndpointBindings).toBe(9);
-    expect(current.snapshot().uniqueEndpoints).toBe(7); // 1 shared + 3×2 private
-    expect(current.logicalKeysPerOwner()).toBe(18); // 9 bindings × 2 IPs
+    expect(current.snapshot().linkEndpointBindings).toBe(3); // exactly one endpoint / Link
+    expect(current.snapshot().uniqueEndpoints).toBe(2);
+    expect(current.logicalKeysPerOwner()).toBe(6); // 3 Links × 2 IPs
     const endpointIps = current.snapshot().endpoints.flatMap((endpoint) => endpoint.ips);
-    expect(new Set(endpointIps).size).toBe(14); // every unique endpoint has a distinct synthetic IP set
+    expect(new Set(endpointIps).size).toBe(4); // every unique endpoint has a distinct synthetic IP set
 
     cfg.fabric.keyStrategy = 'endpoint';
-    expect(new PoolSimulation(cfg).logicalKeysPerOwner()).toBe(14); // 7 unique × 2 IPs
+    expect(new PoolSimulation(cfg).logicalKeysPerOwner()).toBe(4); // 2 unique × 2 IPs
     cfg.fabric.keyStrategy = 'dns';
-    expect(new PoolSimulation(cfg).logicalKeysPerOwner()).toBe(7); // one authority key / unique endpoint
+    expect(new PoolSimulation(cfg).logicalKeysPerOwner()).toBe(2); // one authority key / unique endpoint
   });
 
-  it('routes every Link through its endpoint set and conserves endpoint traffic', () => {
+  it('routes every Link through exactly one endpoint and conserves endpoint traffic', () => {
     const cfg = basePoolConfig();
     cfg.fabric.links = 4;
-    cfg.fabric.endpointsPerLink = 2;
-    cfg.fabric.sharedEndpointsPerLink = 1;
+    cfg.fabric.uniqueEndpoints = 3;
     const sim = new PoolSimulation(cfg);
     const snapshot = sim.snapshot();
-    expect(snapshot.links.every((link) => link.endpointIds.length === 2)).toBe(true);
+    expect(snapshot.links.map((link) => link.endpointId)).toEqual([1, 2, 3, 1]);
     const endpointRate = snapshot.endpoints.reduce((sum, endpoint) => sum + endpoint.requestRate, 0);
     expect(endpointRate).toBeCloseTo(snapshot.effectiveRate, 6);
     expect(snapshot.endpoints.filter((endpoint) => endpoint.shared)).toHaveLength(1);
-    expect(snapshot.endpoints.filter((endpoint) => !endpoint.shared)).toHaveLength(4);
+    expect(snapshot.endpoints.filter((endpoint) => !endpoint.shared)).toHaveLength(2);
+    expect(snapshot.endpoints[0].linkIds).toEqual([1, 4]);
+  });
+
+  it('cannot create more unique endpoints than Links', () => {
+    const cfg = basePoolConfig();
+    cfg.fabric.links = 4;
+    cfg.fabric.uniqueEndpoints = 12;
+    const snapshot = new PoolSimulation(cfg).snapshot();
+    expect(snapshot.uniqueEndpoints).toBe(4);
+    expect(snapshot.sharedEndpoints).toBe(0);
+    expect(snapshot.links.map((link) => link.endpointId)).toEqual([1, 2, 3, 4]);
+    expect(snapshot.endpoints.every((endpoint) => endpoint.linkIds.length === 1)).toBe(true);
   });
 
   it('combines the traffic contributions of Links that share an endpoint', () => {
@@ -157,8 +164,7 @@ describe('Links and configured link endpoints', () => {
     cfg.fabric.nodes = 1;
     cfg.fabric.coresPerNode = 1;
     cfg.fabric.links = 4;
-    cfg.fabric.endpointsPerLink = 2;
-    cfg.fabric.sharedEndpointsPerLink = 1;
+    cfg.fabric.uniqueEndpoints = 3;
     cfg.fabric.ipsPerEndpoint = 1;
     cfg.fabric.keyStrategy = 'endpoint';
     cfg.pool.minConnectionsPerKey = 0;
@@ -172,13 +178,13 @@ describe('Links and configured link endpoints', () => {
 
     const snapshot = new PoolSimulation(cfg).snapshot();
     expect(snapshot.desiredConnections).toBe(80);
-    expect(snapshot.allowedConnections).toBe(60); // shared endpoint wants 40 but is capped at 20
+    expect(snapshot.allowedConnections).toBe(60); // EP1 wants 40 but is capped at 20
     const shared = snapshot.endpoints.find((endpoint) => endpoint.shared)!;
-    const privateEndpoints = snapshot.endpoints.filter((endpoint) => !endpoint.shared);
+    const singleLinkEndpoints = snapshot.endpoints.filter((endpoint) => !endpoint.shared);
     expect(shared.requestRate).toBe(400);
     expect(shared.estimatedConnections).toBe(20);
-    expect(privateEndpoints.every((endpoint) => endpoint.requestRate === 100)).toBe(true);
-    expect(privateEndpoints.every((endpoint) => endpoint.estimatedConnections === 10)).toBe(true);
+    expect(singleLinkEndpoints.every((endpoint) => endpoint.requestRate === 200)).toBe(true);
+    expect(singleLinkEndpoints.every((endpoint) => endpoint.estimatedConnections === 20)).toBe(true);
   });
 });
 

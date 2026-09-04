@@ -452,18 +452,19 @@ The board keeps the multiplier visible:
 ```
 owned pool keys = RTB nodes × pool owners/node × application keys/owner
 
-Link→endpoint bindings = Links × configured endpoints/Link
-unique endpoints = common endpoints + Links × private endpoints/Link
-current application keys/owner = Link→endpoint bindings × IPs/endpoint
+Link→endpoint bindings = Links (exactly one endpoint per Link)
+unique endpoints = distinct endpoint identities referenced by those Links
+current application keys/owner = Links × IPs/endpoint
 ```
 
 Links and Link endpoints are concrete entities in the model. Each Link owns a
-list of endpoint references; each unique endpoint has a DNS authority,
-certificate identity, port, resolved IP set, reverse Link membership, and its
-share of traffic and connections. The **Shared endpoints / Link** control makes
-some exact endpoint identities common to every Link, while the remaining
-endpoints are private to one Link. The board draws those actual relationships,
-so a shared endpoint visibly collects traffic from multiple Links.
+single endpoint reference; each unique endpoint has a DNS authority, certificate
+identity, port, resolved IP set, reverse Link membership, and its share of
+traffic and connections. The **Unique Link endpoints** control determines how
+many distinct identities those Links reference. One means every Link converges
+on the same endpoint; a value equal to the Link count means every Link points to
+a different endpoint. Intermediate values distribute Links as evenly as possible
+across endpoints. The board draws those actual relationships.
 
 In the default example, all eight Links reference the same endpoint identity,
 which resolves to four IPs. The current pool design still creates
@@ -484,25 +485,25 @@ cross-process.
 The application key choices are:
 
 - **Link × endpoint × IP** — the current RTB Fabric shape. Every Link gets a
-  separate pool for every configured endpoint reference and resolved IP, even
-  when several Links reference the same endpoint identity.
+  separate pool for its endpoint's resolved IPs, even when several Links point
+  to the same endpoint identity.
 - **IP + cert + port** — Links that reference the same endpoint identity share
   pool state for each IP. The Link multiplier disappears only for exact shared
-  endpoints; Link-private endpoints remain isolated.
+  endpoints; endpoints referenced by different Links remain isolated.
 - **DNS authority** — one authority-keyed pool per unique endpoint and owner,
   resolving connections across that endpoint's IPs. This matches Hyper's native
   key shape when the same client is shared, but changes where DNS/address
   selection responsibility lives.
 
-The fluid model first divides customer QPS across Links and then across each
-Link's endpoint references. Traffic converges when Links share an endpoint and
-remains separate for private endpoints. It converts each endpoint's traffic and
-response occupancy into mean concurrency using Little's Law, applies a headroom
-factor for arrival/latency variance, then rounds per independently owned key.
-Sparse keys contribute according to the probability that they were touched
-within the idle-retention window, so a theoretical key does not automatically
-hold a socket at extremely low traffic. The configured warm floor is applied
-afterward.
+The fluid model divides customer QPS across Links, then sends each Link's whole
+share to its one endpoint. Traffic converges when Links point to the same
+endpoint and remains separate when their endpoints differ. It converts each
+endpoint's traffic and response occupancy into mean concurrency using Little's
+Law, applies a headroom factor for arrival/latency variance, then rounds per
+independently owned key. Sparse keys contribute according to the probability
+that they were touched within the idle-retention window, so a theoretical key
+does not automatically hold a socket at extremely low traffic. The configured
+warm floor is applied afterward.
 
 ### Hyper behavior represented
 
@@ -568,8 +569,9 @@ unserved work but does not pretend the cap alone defines those semantics.
   key floor, despite unchanged total QPS.
 - **Share links** — IP + cert + port pooling de-duplicates exact endpoints
   across Links while retaining one pool key per IP.
-- **Mixed Link endpoints** — every Link has one common and two private endpoint
-  identities, exposing which portions a sharing strategy can and cannot merge.
+- **Partially shared endpoints** — eight Links are distributed across three
+  endpoint identities, exposing which repeated Link destinations a sharing
+  strategy can merge.
 - **DNS authority** — one authority key per unique endpoint removes repeated
   Link references and the per-IP pool-state multiplier.
 - **Bounded + shared** — combines endpoint sharing, a short idle lifetime, and a
@@ -593,10 +595,11 @@ treat connection creation. Horizontal or vertical RTB scaling should be checked
 against the pool-key equation every time because either can add independent
 floors even when customer QPS is unchanged.
 
-`npm test` covers Link membership, shared/private endpoint identity and traffic
-conservation, the pool multiplier, all key strategies, horizontal/vertical
-scale, max-idle-versus-max-active semantics, H2 multiplexing, sparse-key idle
-retention, responder resets, scenario traffic parity, and step-size stability.
+`npm test` covers one-endpoint-per-Link membership, repeated/distinct endpoint
+identities and traffic conservation, the pool multiplier, all key strategies,
+horizontal/vertical scale, max-idle-versus-max-active semantics, H2 multiplexing,
+sparse-key idle retention, responder resets, scenario traffic parity, and
+step-size stability.
 
 ## Scaling
 

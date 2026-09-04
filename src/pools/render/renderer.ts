@@ -65,7 +65,7 @@ export class PoolRenderer {
       ? `${sim.cfg.fabric.nodes} nodes × ${sim.cfg.fabric.coresPerNode} workers`
       : `${sim.cfg.fabric.nodes} nodes × 1 shared owner`;
     const keyTerm = sim.cfg.fabric.keyStrategy === 'link-ip'
-      ? `${s.linkEndpointBindings} Link→endpoint refs × ${sim.cfg.fabric.ipsPerEndpoint} IPs`
+      ? `${s.links.length} Links × 1 endpoint × ${sim.cfg.fabric.ipsPerEndpoint} IPs`
       : sim.cfg.fabric.keyStrategy === 'endpoint'
         ? `${s.uniqueEndpoints} unique endpoints × ${sim.cfg.fabric.ipsPerEndpoint} IPs`
         : `${s.uniqueEndpoints} unique endpoint authorities`;
@@ -111,7 +111,7 @@ export class PoolRenderer {
     this.panel(r, SURFACE.border);
     ctxText(this.ctx, 'LINKS', r.x + 10, r.y + 20, 13, SURFACE.textFaint, true);
     ctxText(this.ctx, `${s.links.length} requester → responder`, r.x + 10, r.y + 40, 11, SURFACE.text);
-    ctxText(this.ctx, `${s.linkEndpointBindings} endpoint bindings`, r.x + 10, r.y + 56, 10, SEMANTIC.inFlight);
+    ctxText(this.ctx, 'exactly 1 endpoint / Link', r.x + 10, r.y + 56, 10, SEMANTIC.inFlight);
 
     const shown = Math.min(s.links.length, this.maxRows(r, 72, 25, 14));
     const rowH = Math.max(18, Math.min(25, (r.h - 94) / Math.max(1, shown)));
@@ -125,8 +125,7 @@ export class PoolRenderer {
       ctxText(this.ctx, `L${link.id}`, r.x + 13, y + 13, 10, SEMANTIC.inFlight, true);
       ctxText(this.ctx, `${fmt(link.requestRate)}/s`, r.x + 36, y + 13, 9, SURFACE.textDim);
       this.ctx.textAlign = 'right';
-      const ids = link.endpointIds.slice(0, 3).map((id) => `EP${id}`).join(',');
-      ctxText(this.ctx, `${ids}${link.endpointIds.length > 3 ? '…' : ''}`, r.x + r.w - 12, y + 13, 9, SURFACE.text);
+      ctxText(this.ctx, `→ EP${link.endpointId}`, r.x + r.w - 12, y + 13, 9, SURFACE.text);
       this.ctx.textAlign = 'left';
     }
     if (shown < s.links.length) ctxText(this.ctx, `+${s.links.length - shown} Links`, r.x + 10, r.y + r.h - 11, 9, SURFACE.textDim);
@@ -136,7 +135,12 @@ export class PoolRenderer {
     const s = sim.snapshot();
     this.panel(r, s.capActive ? SEMANTIC.shed : SURFACE.border);
     ctxText(this.ctx, 'LINK ENDPOINTS → POOL KEYS', r.x + 10, r.y + 20, 13, SURFACE.textFaint, true);
-    ctxText(this.ctx, `${s.uniqueEndpoints} unique · ${s.sharedEndpoints} shared by every Link`, r.x + 10, r.y + 40, 11, SURFACE.text);
+    const sharing = s.uniqueEndpoints === 1
+      ? 'all Links converge'
+      : s.sharedEndpoints === 0
+        ? 'every Link differs'
+        : `${s.sharedEndpoints} reused by multiple Links`;
+    ctxText(this.ctx, `${s.uniqueEndpoints} unique · ${sharing}`, r.x + 10, r.y + 40, 11, SURFACE.text);
     ctxText(this.ctx, `${s.keysLabel} · ${sim.cfg.pool.protocol.toUpperCase()} · ${fmt(s.logicalKeysPerOwner)} keys/owner`, r.x + 10, r.y + 56, 9, SEMANTIC.tlsPulse);
 
     const bottomSpace = 86;
@@ -232,7 +236,7 @@ export class PoolRenderer {
     }
 
     // Actual Link→endpoint membership. Shared endpoints visibly collect lines
-    // from several Links; private endpoints receive exactly one.
+    // from several Links; distinct endpoints receive exactly one.
     const shownLinks = Math.min(s.links.length, this.maxRows(links, 72, 25, 14));
     const shownEndpoints = Math.min(s.endpoints.length, this.maxRows(endpoints, 72, 28, 86));
     const linkRowH = Math.max(18, Math.min(25, (links.h - 94) / Math.max(1, shownLinks)));
@@ -241,18 +245,16 @@ export class PoolRenderer {
     for (let i = 0; i < shownLinks; i++) {
       const link = s.links[i];
       const y1 = links.y + 68 + i * linkRowH + (linkRowH - 3) / 2;
-      for (const id of link.endpointIds) {
-        const index = endpointIndex.get(id);
-        if (index === undefined) continue;
-        const y2 = endpoints.y + 66 + index * endpointRowH + (endpointRowH - 3) / 2;
-        const endpoint = s.endpoints[index];
-        this.ctx.strokeStyle = withAlpha(endpoint.shared ? SEMANTIC.success : SEMANTIC.tlsPulse, endpoint.shared ? 0.34 : 0.22);
-        this.ctx.lineWidth = endpoint.shared ? 1.2 : 0.8;
-        this.ctx.beginPath();
-        this.ctx.moveTo(links.x + links.w, y1);
-        this.ctx.bezierCurveTo(links.x + links.w + 5, y1, endpoints.x - 5, y2, endpoints.x, y2);
-        this.ctx.stroke();
-      }
+      const index = endpointIndex.get(link.endpointId);
+      if (index === undefined) continue;
+      const y2 = endpoints.y + 66 + index * endpointRowH + (endpointRowH - 3) / 2;
+      const endpoint = s.endpoints[index];
+      this.ctx.strokeStyle = withAlpha(endpoint.shared ? SEMANTIC.success : SEMANTIC.tlsPulse, endpoint.shared ? 0.34 : 0.22);
+      this.ctx.lineWidth = endpoint.shared ? 1.2 : 0.8;
+      this.ctx.beginPath();
+      this.ctx.moveTo(links.x + links.w, y1);
+      this.ctx.bezierCurveTo(links.x + links.w + 5, y1, endpoints.x - 5, y2, endpoints.x, y2);
+      this.ctx.stroke();
     }
   }
 

@@ -2,8 +2,7 @@ import type { PoolPreset, PoolSimulationConfig } from './types';
 
 /**
  * A deliberately high-cardinality RTB Fabric shape. At 120k req/s the mean
- * concurrency is modest, but 24 nodes x 32 workers x 8 links x 1 endpoint/link
- * x 4 IPs creates
+ * concurrency is modest, but 24 nodes x 32 workers x 8 links x 4 IPs creates
  * 24,576 independently warm HTTP/1 pool keys before load requires that many.
  */
 export function basePoolConfig(): PoolSimulationConfig {
@@ -20,8 +19,7 @@ export function basePoolConfig(): PoolSimulationConfig {
       nodes: 24,
       coresPerNode: 32,
       links: 8,
-      endpointsPerLink: 1,
-      sharedEndpointsPerLink: 1,
+      uniqueEndpoints: 1,
       ipsPerEndpoint: 4,
       ownership: 'worker',
       keyStrategy: 'link-ip',
@@ -85,19 +83,18 @@ export const POOL_PRESETS: PoolPreset[] = [
     id: 'endpoint-shared',
     name: 'Share links',
     description:
-      'Pools are keyed by IP + certificate + port across Links. Exact shared link endpoints reuse sockets, while private endpoints stay isolated.',
+      'Pools are keyed by IP + certificate + port across Links. Links pointing to the same endpoint reuse sockets; different endpoints stay isolated.',
     config: scenario((c) => {
       c.fabric.keyStrategy = 'endpoint';
     }),
   },
   {
     id: 'mixed-endpoints',
-    name: 'Mixed Link endpoints',
+    name: 'Partially shared endpoints',
     description:
-      'Each Link references one common customer endpoint and two Link-private endpoints, making partial overlap and the limits of cross-Link sharing visible.',
+      'Eight Links are distributed across three endpoint identities. Some Links converge on the same endpoint while others point elsewhere.',
     config: scenario((c) => {
-      c.fabric.endpointsPerLink = 3;
-      c.fabric.sharedEndpointsPerLink = 1;
+      c.fabric.uniqueEndpoints = 3;
       c.fabric.ipsPerEndpoint = 2;
     }),
   },

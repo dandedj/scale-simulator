@@ -23,11 +23,9 @@ export interface FabricPoolTopologyConfig {
   coresPerNode: number;
   /** Requester→responder Links carrying traffic to this customer. */
   links: number;
-  /** Configured responder endpoint definitions referenced by each link. */
-  endpointsPerLink: number;
-  /** Exact endpoint identities (host/cert/port) common to every link. */
-  sharedEndpointsPerLink: number;
-  /** DNS addresses resolved by each configured link endpoint. */
+  /** Distinct endpoint identities distributed across the Links. */
+  uniqueEndpoints: number;
+  /** DNS addresses resolved by each Link's one endpoint. */
   ipsPerEndpoint: number;
   /** Current worker-process ownership, or a hypothetical node-shared client. */
   ownership: PoolOwnership;
@@ -108,14 +106,13 @@ export interface PoolEventLog {
   message: string;
 }
 
-/** One requester→responder Link and the endpoint definitions it references. */
+/** One requester→responder Link and its single configured endpoint. */
 export interface PoolLinkView {
   id: number;
   name: string;
-  endpointIds: number[];
+  /** A Link always points to exactly one endpoint. */
+  endpointId: number;
   requestRate: number;
-  /** Current-design link-local keys contributed by this Link per pool owner. */
-  localKeysPerOwner: number;
 }
 
 /** A unique host/certificate/port identity referenced by one or more Links. */

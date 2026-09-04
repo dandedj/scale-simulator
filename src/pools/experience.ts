@@ -18,7 +18,7 @@ const COMPARE_HELP = `
     <ul>
       <li><b>Same customer traffic.</b> Request rate, response occupancy, concurrency headroom, and retries apply to both panes.</li>
       <li><b>Independent pool designs.</b> Fleet size, process ownership, Link endpoint membership and overlap, keying, Hyper behavior, protocol, and responder limits are tuned per pane.</li>
-      <li><b>Follow the Link paths.</b> Every Link lists its endpoint IDs. Shared endpoint rows collect several paths; Link-private rows collect one.</li>
+      <li><b>Follow the Link paths.</b> Every Link points to exactly one endpoint ID. Shared endpoint rows collect several paths; distinct endpoint rows collect one.</li>
       <li><b>Read the multiplier first.</b> The top equation shows independently owned pool keys. One warm socket per key can dominate before throughput concurrency does.</li>
       <li><b>SURGE and RECONNECT ALL hit both panes together.</b> Compare pool growth, idle retention, responder pressure, resets, and served traffic on one clock.</li>
       <li><b>Max idle is not max active.</b> Hyper’s max-idle setting trims returned sockets; only the hypothetical bounded policy limits established + connecting sockets.</li>
