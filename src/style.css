@@ -713,7 +713,8 @@ main {
   color: var(--ok);
 }
 .preset-card[data-preset='endpoint-shared'] .preset-name,
-.preset-card[data-preset='dns-authority'] .preset-name {
+.preset-card[data-preset='dns-authority'] .preset-name,
+.preset-card[data-preset='short-idle'] .preset-name {
   color: var(--info);
 }
 

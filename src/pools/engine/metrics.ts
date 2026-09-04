@@ -1,10 +1,16 @@
-import type { PoolEventLog, PoolMetricsBucket, PoolSnapshot } from './types';
+import type { PoolAggregates, PoolEventLog, PoolMetricsBucket } from './types';
 
 export const POOL_BUCKET_MS = 1000;
 export const POOL_HISTORY_MS = 180_000;
 const MAX_BUCKETS = Math.ceil(POOL_HISTORY_MS / POOL_BUCKET_MS);
 
-export interface ConnectionDeltas {
+/** Counts from one internal tick (or one instantaneous event, with dtMs 0). */
+export interface PoolStepTally {
+  dtMs: number;
+  baseRequests: number;
+  effectiveRequests: number;
+  servedRequests: number;
+  failedRequests: number;
   attempts: number;
   opened: number;
   resets: number;
@@ -35,33 +41,31 @@ export class PoolMetricsCollector {
     return this.current.time + POOL_BUCKET_MS;
   }
 
-  accumulate(dtMs: number, s: PoolSnapshot): void {
-    const seconds = dtMs / 1000;
-    this.current.baseRequests += s.baseRate * seconds;
-    this.current.effectiveRequests += s.effectiveRate * seconds;
-    this.current.servedRequests += s.servedRate * seconds;
-    this.current.failedRequests += s.failedRate * seconds;
-    this.totals.baseRequests += s.baseRate * seconds;
-    this.totals.effectiveRequests += s.effectiveRate * seconds;
-    this.totals.servedRequests += s.servedRate * seconds;
-    this.totals.failedRequests += s.failedRate * seconds;
-    this.totals.connectionSeconds += s.established * seconds;
-    this.totals.peakConnections = Math.max(this.totals.peakConnections, s.established);
-    this.totals.peakHottestResponder = Math.max(this.totals.peakHottestResponder, s.hottestResponder);
+  record(step: PoolStepTally, agg: PoolAggregates): void {
+    const c = this.current;
+    const t = this.totals;
+    c.baseRequests += step.baseRequests;
+    c.effectiveRequests += step.effectiveRequests;
+    c.servedRequests += step.servedRequests;
+    c.failedRequests += step.failedRequests;
+    c.connectionAttempts += step.attempts;
+    c.connectionsOpened += step.opened;
+    c.connectionResets += step.resets;
+    c.connectionsClosed += step.closed;
+    t.baseRequests += step.baseRequests;
+    t.effectiveRequests += step.effectiveRequests;
+    t.servedRequests += step.servedRequests;
+    t.failedRequests += step.failedRequests;
+    t.connectionAttempts += step.attempts;
+    t.connectionsOpened += step.opened;
+    t.connectionResets += step.resets;
+    t.connectionsClosed += step.closed;
+    t.connectionSeconds += (agg.established * step.dtMs) / 1000;
+    t.peakConnections = Math.max(t.peakConnections, agg.established);
+    t.peakHottestResponder = Math.max(t.peakHottestResponder, agg.hottestResponder);
   }
 
-  connections(delta: ConnectionDeltas): void {
-    this.current.connectionAttempts += delta.attempts;
-    this.current.connectionsOpened += delta.opened;
-    this.current.connectionResets += delta.resets;
-    this.current.connectionsClosed += delta.closed;
-    this.totals.connectionAttempts += delta.attempts;
-    this.totals.connectionsOpened += delta.opened;
-    this.totals.connectionResets += delta.resets;
-    this.totals.connectionsClosed += delta.closed;
-  }
-
-  advance(now: number, s: PoolSnapshot): void {
+  advance(now: number, s: PoolAggregates): void {
     while (now >= this.current.time + POOL_BUCKET_MS - 1e-9) {
       this.current.baseRate = s.baseRate;
       this.current.effectiveRate = s.effectiveRate;

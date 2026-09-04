@@ -471,12 +471,16 @@ In the default example, all eight Links reference the same endpoint identity,
 which resolves to the eight responder IPs. The current pool design still creates
 `2 nodes × 32 worker processes × 8 Link references × 8 responder IPs` = **4,096
 independently owned keys** because the Link remains part of the application key.
-A warm floor of one connection per key creates 4,096 established sockets while
-Little's Law requires only 2,400 for the default throughput and response time.
-Scaling the same workload from two to four nodes doubles the floor to 8,192 and
-reaches the eight-Envoy ceiling once placement skew is included. This is the
+Each key sees about 29 requests/s at 20 ms occupancy, a mean concurrency of 0.6
+requests, yet the fleet settles around 23–25k established sockets against the
+2,400 that Little's Law requires for the default throughput and response time.
+The gap is the idle window: hyper checks idle sockets out most-recently-used
+first, so every key keeps the peak concurrency it reached in the last 90 s, and
+a key at 0.6 mean concurrency reaches 5 or 6 several times in 90 s. Scaling the
+same workload from two to four nodes doubles the key count; the retained peaks
+then exceed the eight-Envoy ceiling once placement skew is included. This is the
 main distinction the simulator is built to expose: connection pressure can be
-driven by *partition cardinality* rather than throughput.
+driven by *partition cardinality and idle retention* rather than throughput.
 
 Pool ownership is explicit. **worker-local** matches separate worker processes:
 process memory and its Hyper client cannot share sockets with another process.
@@ -500,15 +504,42 @@ The application key choices are:
   key shape when the same client is shared, but changes where DNS/address
   selection responsibility lives.
 
-The fluid model divides customer QPS across Links, then sends each Link's whole
-share to its one endpoint. Traffic converges when Links point to the same
-endpoint and remains separate when their endpoints differ. It converts each
-endpoint's traffic and response occupancy into mean concurrency using Little's
-Law, applies a headroom factor for arrival/latency variance, then rounds per
-independently owned key. Sparse keys contribute according to the probability
-that they were touched within the idle-retention window, so a theoretical key
-does not automatically hold a socket at extremely low traffic. The configured
-warm floor is applied afterward.
+### The per-key model
+
+Customer QPS is divided across Links, and each Link's whole share goes to its
+one endpoint, so traffic converges where Links point to the same endpoint and
+stays separate where they differ. Within an endpoint the traffic is spread over
+that endpoint's keys and, with placement skew, unevenly over the responder IPs.
+
+Every pool key is then simulated as its own small queue:
+
+- **Arrivals** are Poisson at the key's share of the offered rate. A slow
+  fleet-wide log-normal wave (correlation time ≈ 4 s, coefficient of variation
+  set by **Traffic burstiness**) multiplies every key's rate at once; zero leaves
+  pure Poisson arrivals. Sparse keys are already noisy on their own.
+- **Occupancy** is exponential around **Response occupancy**; HTTP/2 divides
+  concurrency by streams per connection.
+- **The pool** checks idle sockets out LIFO. A request that finds nothing idle
+  starts a connect (one per request on HTTP/1; one in flight per key on HTTP/2)
+  and waits on it while also racing for any socket that frees up meanwhile. A
+  connect that lands with nobody waiting goes idle, which is hyper's checkout
+  race. Idle sockets expire once they have sat for **Idle timeout**;
+  **Max idle / key** closes a returning socket when the idle list is already
+  that long; **Warm floor / key** is kept alive through expiry and re-opened
+  after a recycle. The hypothetical bounded policy refuses connects past
+  **Max active / key** and the requests they would have carried go unserved.
+- **The responder** is a set of instances with one IP each. A connect that lands
+  on an instance already at its limit resets, and the requests waiting on it
+  fail. A configurable share of failures returns as retry traffic.
+
+The fleet can hold millions of keys, so the engine simulates a stratified sample
+of up to 384 of them, spread evenly over Links and responder IPs, and scales
+each sampled key by the number of fleet keys it stands for; small fleets are
+simulated in full. Time advances in ticks of at most half the response occupancy
+(10 ms at the default), and all randomness comes from one seeded generator, so a
+scenario replays identically and A and B see the same traffic wave. A run starts
+in the state one idle window of steady traffic would leave behind; **⟳ RECONNECT
+ALL** shows the cold inflation instead.
 
 ### Connection justification with Little's Law
 
@@ -525,10 +556,10 @@ connection amplification = established connections ÷ Little's Law required
 The customer request rate is used rather than retry-amplified traffic so A/B
 scenarios compare against the same useful workload. `1×` means the established
 inventory equals the theoretical average-concurrency minimum. A value far above
-`1×` makes the excess visible; pool-key cardinality, warm floors, burst headroom,
-checkout races, and idle retention can explain the gap. A value below `1×`
-means the live inventory is below the concurrency needed to sustain the target
-throughput under the configured response time and protocol.
+`1×` makes the excess visible; pool-key cardinality, retained peaks, warm
+floors, checkout races, and idle retention can explain the gap. A value below
+`1×` means the live inventory is below the concurrency needed to sustain the
+target throughput under the configured response time and protocol.
 
 This is a diagnostic baseline, not a recommended production cap: it deliberately
 excludes safety headroom and does not count connecting sockets as established.
@@ -543,19 +574,23 @@ for connection count:
 - The library pool key is `(scheme, authority)`. RTB Fabric's link/IP split is
   therefore modeled as an application layer above the library pool.
 - Cloned Clients share the underlying pool.
+- Idle sockets are checked out most-recently-used first, which is why a key's
+  socket count tracks its peak concurrency over the idle window rather than its
+  mean.
 - `pool_idle_timeout` defaults to 90 seconds and requires a pool timer to take
   effect; `None` disables expiry.
 - `pool_max_idle_per_host` defaults to `usize::MAX`. It limits connections that
   have returned *idle*, not busy or connecting sockets. It is deliberately not
   presented as an active connection limit.
-- For HTTP/1, Hyper races an idle checkout against establishing a socket, and
-  does not serialize in-progress connects for a key. A connect that already
-  started can finish in the background after checkout wins, adding idle
-  inventory. The **H1 checkout-race factor** is an empirical sensitivity knob,
-  not a Hyper builder setting.
-- HTTP/2 reservations share a connection, and Hyper prevents multiple concurrent
+- For HTTP/1, hyper races an idle checkout against establishing a socket, and
+  does not serialize in-progress connects for a key. Every request that finds
+  nothing idle starts its own connect; if a socket is returned first, the request
+  takes it and the connect finishes in the background and joins the idle list.
+  The simulator models this directly, so a key pinned by a traffic wave opens
+  roughly one connect window of arrivals before the first new socket lands.
+- HTTP/2 reservations share a connection, and hyper prevents multiple concurrent
   H2 establishment tasks for the same key. The simulator applies the configured
-  stream concurrency and ignores the H1 race factor in H2 mode.
+  stream concurrency and keeps one connect in flight per key.
 
 Primary sources: the
 [`hyper_util::client::legacy::Builder` documentation](https://docs.rs/hyper-util/latest/hyper_util/client/legacy/struct.Builder.html),
@@ -570,17 +605,22 @@ application control, not one of those legacy Hyper builder options.
 
 ### Dynamics and responder pressure
 
-Each connection is busy, idle, or connecting. A surge raises per-key concurrency
-and starts on-demand connects; after it passes, excess sockets remain idle until
-the idle timeout, unless max-idle trims them sooner. **⟳ RECONNECT ALL** models a
-process/fleet recycle: existing sockets close and all required pools rebuild at
-once. Failed coverage feeds a configurable retry fraction back into demand.
+Each connection is busy, idle, or connecting. A surge raises per-key
+concurrency peaks and starts connects; when it passes, the sockets it opened sit
+idle until they age out, so the fleet total stays at its surge level for one full
+idle window and then drops in a wave. **⟳ RECONNECT ALL** models a process/fleet
+recycle: every socket closes and the pools inflate again as each key meets new
+peaks, quickly at first and then slowly over the rest of the window. The socket
+field under the board shows this per key: busy sockets at the bottom, idle ones
+above them fading as they approach the timeout, connects in flight on top. Failed
+coverage feeds a configurable retry fraction back into demand.
 
 The responder side tracks the **hottest instance**, not only an aggregate. A
-placement-skew knob makes one Envoy reach its limit before the theoretical total
-budget is full. New connections past that point reset, requests lose pool-key
-coverage, and retries can sustain connection-attempt churn. This is intentionally
-a connection-capacity model: it does not model responder CPU, request queue
+placement-skew knob gives the instances linearly uneven shares of each key's
+traffic, so one Envoy reaches its limit before the theoretical total budget is
+full. Connects that land there reset, the requests waiting on them fail, and
+retries can sustain connection-attempt churn. This is intentionally a
+connection-capacity model: it does not model responder CPU, request queue
 implementation, ephemeral-port limits, NAT, TLS CPU, or HTTP/2 protocol support.
 
 The **bounded alternative** is hypothetical. Its max is per application key, so
@@ -591,14 +631,15 @@ unserved work but does not pretend the cap alone defines those semantics.
 ### Scenarios and comparison
 
 - **Current RTB shape** — eight Links converge on one endpoint that resolves to
-  eight responder IPs,
-  but worker-local Link × endpoint × IP pools keep every copy separate; the
-  baseline starts with two Fabric nodes.
+  eight responder IPs, but worker-local Link × endpoint × IP pools keep every
+  copy separate; the baseline starts with two Fabric nodes and about six retained
+  sockets per key.
 - **Previous LB shape** — fewer, node-shared endpoint pools under identical
-  customer traffic.
+  customer traffic. Far fewer keys, but each carries enough traffic for hyper's
+  HTTP/1 connect cascade to matter.
 - **Scale out ×2** — four nodes instead of two and therefore twice the
-  independent warm-key floor, despite unchanged total QPS; this crosses the
-  configured responder ceiling.
+  independent keys, each retaining its own peaks, despite unchanged total QPS;
+  this crosses the configured responder ceiling.
 - **Share links** — IP + cert + port pooling de-duplicates exact endpoints
   across Links while retaining one pool key per IP.
 - **Partially shared endpoints** — eight Links are distributed across three
@@ -606,16 +647,20 @@ unserved work but does not pretend the cap alone defines those semantics.
   strategy can merge.
 - **DNS authority** — one authority key per unique endpoint removes repeated
   Link references and the per-IP pool-state multiplier.
+- **Short idle timeout** — the current shape with a 5 s `pool_idle_timeout`.
+  Every key forgets its peaks sooner; compare it with the baseline to see the
+  window's share of the socket count, and the reconnect churn it costs.
 - **Bounded + shared** — combines endpoint sharing, a short idle lifetime, and a
-  hypothetical active max.
+  hypothetical active max of sixteen per key.
 - **HTTP/2 multiplexed** — shared authority keys plus 100 streams per connection,
   if the responder supports H2.
 
 Comparison mode holds customer traffic identical while allowing topology, keying,
 pool behavior, protocol, and responder limits to differ. Useful pairings are
 Current vs Previous LB (migration), Current vs Scale out ×2 (horizontal scale),
-Current vs Share links (key design), DNS authority HTTP/1 vs HTTP/2 (multiplexing),
-and Hyper on-demand vs Bounded + shared (active admission).
+Current vs Share links (key design), Current vs Short idle timeout (retention),
+DNS authority HTTP/1 vs HTTP/2 (multiplexing), and Hyper on-demand vs Bounded +
+shared (active admission).
 
 The useful optimization order is visible in those comparisons: first verify how
 many process-local Client/pool owners really exist; then remove unnecessary link
@@ -628,10 +673,12 @@ against the pool-key equation every time because either can add independent
 floors even when customer QPS is unchanged.
 
 `npm test` covers one-endpoint-per-Link membership, repeated/distinct endpoint
-identities and traffic conservation, Little's Law connection amplification, the
-pool multiplier, all key strategies, horizontal/vertical scale,
-max-idle-versus-max-active semantics, H2 multiplexing, sparse-key idle retention,
-responder resets, scenario traffic parity, and step-size stability.
+identities and traffic conservation, the stratified key sample, Little's Law
+connection amplification, the pool multiplier, all key strategies,
+horizontal/vertical scale, max-idle-versus-max-active semantics, H2 multiplexing
+and connect coalescing, peak retention over the idle window, the surge-then-expiry
+wave, cold inflation after a recycle, responder resets and skew, scenario traffic
+parity, seeded replay, and step-size stability.
 
 ## Scaling
 

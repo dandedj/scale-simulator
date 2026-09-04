@@ -46,10 +46,13 @@ const CHARTS: ChartDef[] = [
     ],
   },
   {
-    title: 'RESPONDER PRESSURE %',
-    series: [{ label: 'hottest / limit', color: SEMANTIC.timeout, fill: true, value: (b) => b.responderPressure * 100 }],
-    threshold: () => ({ value: 100, label: 'limit' }),
-    yMax: (_sim, max) => Math.max(120, max * 1.1),
+    title: 'SOCKETS / KEY',
+    series: [{ label: 'retained per key', color: SEMANTIC.inFlight, fill: true, value: (b) => (b.poolKeys > 0 ? b.established / b.poolKeys : 0) }],
+    threshold: (sim) => {
+      const s = sim.snapshot();
+      return s.poolKeys > 0 ? { value: s.littleLawRequired / s.poolKeys, label: 'mean need' } : null;
+    },
+    yMax: (_sim, max) => Math.max(2, max * 1.15),
   },
   {
     title: 'POOL KEY COPIES',

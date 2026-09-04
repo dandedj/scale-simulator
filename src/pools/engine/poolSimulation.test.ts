@@ -1,6 +1,32 @@
 import { describe, expect, it } from 'vitest';
 import { basePoolConfig, clonePoolConfig, POOL_PRESETS } from './presets';
-import { PoolSimulation } from './poolSimulation';
+import { PoolSimulation, SAMPLE_BUDGET } from './poolSimulation';
+import type { PoolSimulationConfig } from './types';
+
+/** One key, one owner, one responder: the per-key mechanics in isolation. */
+function singleKey(tune: (c: PoolSimulationConfig) => void = () => {}): PoolSimulationConfig {
+  const c = basePoolConfig();
+  c.fabric.nodes = 1;
+  c.fabric.coresPerNode = 1;
+  c.fabric.links = 1;
+  c.fabric.uniqueEndpoints = 1;
+  c.responder.instances = 1;
+  c.responder.connectionLimit = 16_384;
+  c.responder.connectionSkew = 0;
+  c.pool.minConnectionsPerKey = 0;
+  c.traffic.burstiness = 0;
+  c.traffic.requestsPerSec = 10_000;
+  c.traffic.responseTimeMs = 100;
+  tune(c);
+  return c;
+}
+
+/** Time-averaged established sockets over a run, which smooths the traffic wave. */
+function meanEstablished(sim: PoolSimulation, ms: number): number {
+  const before = sim.metrics.totals.connectionSeconds;
+  sim.step(ms);
+  return ((sim.metrics.totals.connectionSeconds - before) * 1000) / ms;
+}
 
 describe('outbound pool cardinality', () => {
   it('multiplies current pools across nodes, workers, Link endpoints, and IPs', () => {
@@ -37,70 +63,111 @@ describe('outbound pool cardinality', () => {
     expect(basePoolConfig().fabric.nodes).toBe(2);
     expect(POOL_PRESETS.find((preset) => preset.id === 'scale-out')?.config.fabric.nodes).toBe(4);
   });
+
+  it('simulates every key of a small fleet and a stratified sample of a large one', () => {
+    const small = new PoolSimulation(POOL_PRESETS.find((p) => p.id === 'previous-lb')!.config).snapshot();
+    expect(small.sampledKeys).toBe(small.poolKeys);
+    expect(small.sampled.every((k) => k.weight === 1)).toBe(true);
+
+    const large = new PoolSimulation(basePoolConfig()).snapshot();
+    expect(large.sampledKeys).toBe(SAMPLE_BUDGET);
+    expect(large.sampled.reduce((sum, k) => sum + k.weight, 0)).toBeCloseTo(large.poolKeys, 6);
+    const perIp = new Map<number, number>();
+    const perLink = new Map<number, number>();
+    for (const k of large.sampled) {
+      perIp.set(k.ip, (perIp.get(k.ip) ?? 0) + 1);
+      perLink.set(k.link, (perLink.get(k.link) ?? 0) + 1);
+    }
+    expect(perIp.size).toBe(8);
+    expect(perLink.size).toBe(8);
+    expect(new Set(perIp.values()).size).toBe(1); // every IP equally represented
+    expect(new Set(perLink.values()).size).toBe(1);
+  });
 });
 
 describe('hyper-util semantics represented by the model', () => {
   it('does not mistake max idle per key for an active connection cap', () => {
-    const a = basePoolConfig();
-    a.fabric.nodes = 1;
-    a.fabric.coresPerNode = 1;
-    a.fabric.links = 1;
-    a.fabric.uniqueEndpoints = 1;
-    a.responder.instances = 1;
-    a.pool.minConnectionsPerKey = 0;
-    a.traffic.requestsPerSec = 10_000;
-    a.traffic.responseTimeMs = 100;
-    a.traffic.concurrencyHeadroom = 1;
-    a.pool.maxIdlePerKey = 1;
-    const sim = new PoolSimulation(a);
-    expect(sim.desiredConnectionCount()).toBe(1000);
-    expect(sim.snapshot().allowedConnections).toBe(1000);
+    const sim = new PoolSimulation(singleKey((c) => (c.pool.maxIdlePerKey = 1)));
+    sim.step(2_000);
+    const s = sim.snapshot();
+    expect(s.littleLawRequired).toBe(1000);
+    expect(s.idle).toBeLessThanOrEqual(1);
+    expect(s.established).toBeGreaterThan(900); // busy sockets are untouched by the idle limit
   });
 
   it('lets a hypothetical bounded library cap active connections per key', () => {
-    const c = basePoolConfig();
-    c.fabric.nodes = 1;
-    c.fabric.coresPerNode = 1;
-    c.fabric.links = 1;
-    c.fabric.uniqueEndpoints = 1;
-    c.responder.instances = 1;
-    c.pool.minConnectionsPerKey = 0;
-    c.traffic.requestsPerSec = 10_000;
-    c.traffic.responseTimeMs = 100;
-    c.traffic.concurrencyHeadroom = 1;
-    c.pool.policy = 'bounded';
-    c.pool.maxConnectionsPerKey = 64;
-    const sim = new PoolSimulation(c);
-    expect(sim.desiredConnectionCount()).toBe(1000);
-    expect(sim.snapshot().allowedConnections).toBe(64);
-    expect(sim.snapshot().capActive).toBe(true);
+    const sim = new PoolSimulation(singleKey((c) => {
+      c.pool.policy = 'bounded';
+      c.pool.maxConnectionsPerKey = 64;
+    }));
+    sim.step(2_000);
+    const s = sim.snapshot();
+    expect(s.established + s.pending).toBeLessThanOrEqual(64);
+    expect(s.allowedConnections).toBe(64);
+    expect(s.desiredConnections).toBeGreaterThan(64);
+    expect(s.capActive).toBe(true);
   });
 
   it('uses HTTP/2 stream multiplexing to reduce required connections', () => {
-    const h1 = basePoolConfig();
-    h1.pool.minConnectionsPerKey = 0;
-    h1.fabric.nodes = 1;
-    h1.fabric.coresPerNode = 1;
-    h1.fabric.links = 1;
-    h1.fabric.uniqueEndpoints = 1;
-    h1.responder.instances = 1;
-    h1.traffic.requestsPerSec = 10_000;
-    h1.traffic.responseTimeMs = 100;
-    h1.traffic.concurrencyHeadroom = 1;
-    const h2 = clonePoolConfig(h1);
-    h2.pool.protocol = 'http2';
-    h2.pool.h2StreamsPerConnection = 100;
-    expect(new PoolSimulation(h2).desiredConnectionCount()).toBeLessThan(new PoolSimulation(h1).desiredConnectionCount());
+    const h1 = new PoolSimulation(singleKey());
+    const h2 = new PoolSimulation(singleKey((c) => {
+      c.pool.protocol = 'http2';
+      c.pool.h2StreamsPerConnection = 100;
+    }));
+    h1.step(2_000);
+    h2.step(2_000);
+    expect(h2.snapshot().established).toBeLessThan(h1.snapshot().established / 10);
   });
 
-  it('uses idle timeout to avoid warming extremely sparse keys forever', () => {
+  it('retains the peak concurrency a key saw inside the idle window', () => {
+    // Mean concurrency of one request, but the pool keeps the peaks it saw.
+    const long = new PoolSimulation(singleKey((c) => {
+      c.traffic.requestsPerSec = 20;
+      c.traffic.responseTimeMs = 50;
+      c.pool.idleTimeoutMs = 60_000;
+    }));
+    const short = new PoolSimulation(singleKey((c) => {
+      c.traffic.requestsPerSec = 20;
+      c.traffic.responseTimeMs = 50;
+      c.pool.idleTimeoutMs = 100;
+    }));
+    long.step(30_000);
+    short.step(30_000);
+    expect(long.snapshot().littleLawRequired).toBe(1);
+    expect(long.snapshot().established).toBeGreaterThanOrEqual(3);
+    expect(short.snapshot().established).toBeLessThan(long.snapshot().established);
+    expect(short.metrics.totals.connectionsClosed).toBeGreaterThan(long.metrics.totals.connectionsClosed);
+  });
+
+  it('lets a shorter idle timeout hold fewer sockets at the same traffic', () => {
     const long = basePoolConfig();
     long.pool.minConnectionsPerKey = 0;
-    long.traffic.requestsPerSec = 10;
-    long.pool.idleTimeoutMs = 90_000;
     const short = clonePoolConfig(long);
-    short.pool.idleTimeoutMs = 100;
-    expect(new PoolSimulation(short).desiredConnectionCount()).toBeLessThan(new PoolSimulation(long).desiredConnectionCount());
+    short.pool.idleTimeoutMs = 5_000;
+    const a = new PoolSimulation(long);
+    const b = new PoolSimulation(short);
+    expect(meanEstablished(b, 60_000)).toBeLessThan(meanEstablished(a, 60_000) * 0.85);
+  });
+
+  it('starts one HTTP/1 connect per request that finds nothing idle, and one per key for HTTP/2', () => {
+    const h1 = new PoolSimulation(singleKey((c) => {
+      c.traffic.requestsPerSec = 1_000;
+      c.pool.connectTimeMs = 100;
+    }));
+    h1.reconnectAll();
+    h1.step(100);
+    // ~100 arrivals in the connect window, each spawning its own connect.
+    expect(h1.metrics.totals.connectionAttempts).toBeGreaterThan(60);
+    expect(h1.metrics.totals.connectionAttempts).toBeLessThan(140);
+
+    const h2 = new PoolSimulation(singleKey((c) => {
+      c.traffic.requestsPerSec = 1_000;
+      c.pool.connectTimeMs = 100;
+      c.pool.protocol = 'http2';
+    }));
+    h2.reconnectAll();
+    h2.step(100);
+    expect(h2.metrics.totals.connectionAttempts).toBeLessThanOrEqual(2);
   });
 });
 
@@ -109,15 +176,14 @@ describe("Little's Law connection justification", () => {
     const sim = new PoolSimulation(basePoolConfig());
     const snapshot = sim.snapshot();
     expect(snapshot.littleLawRequired).toBe(120_000 * 0.020);
-    expect(snapshot.established).toBe(4096);
-    expect(snapshot.connectionAmplification).toBeCloseTo(4096 / 2400, 8);
+    expect(snapshot.established).toBeGreaterThan(snapshot.poolKeys); // more than one socket per key
+    expect(snapshot.connectionAmplification).toBeCloseTo(snapshot.established / 2400, 8);
   });
 
-  it('accounts for HTTP/2 streams but excludes safety headroom and warm floors', () => {
+  it('accounts for HTTP/2 streams but excludes warm floors', () => {
     const cfg = basePoolConfig();
     cfg.pool.protocol = 'http2';
     cfg.pool.h2StreamsPerConnection = 100;
-    cfg.traffic.concurrencyHeadroom = 4;
     cfg.pool.minConnectionsPerKey = 8;
     const snapshot = new PoolSimulation(cfg).snapshot();
     expect(snapshot.littleLawRequired).toBe(24);
@@ -148,6 +214,7 @@ describe('Links and configured link endpoints', () => {
     expect(snapshot.endpoints[0].ips).toEqual(snapshot.responders.map((responder) => responder.ip));
     expect(snapshot.endpoints[0].authority).toContain(':443');
     expect(snapshot.links.every((link) => link.endpointId === snapshot.endpoints[0].id)).toBe(true);
+    expect(snapshot.endpoints[0].estimatedConnections).toBeCloseTo(snapshot.established, 6);
   });
 
   it('distinguishes repeated endpoint identities from different endpoints', () => {
@@ -183,6 +250,8 @@ describe('Links and configured link endpoints', () => {
     expect(snapshot.endpoints.filter((endpoint) => endpoint.shared)).toHaveLength(1);
     expect(snapshot.endpoints.filter((endpoint) => !endpoint.shared)).toHaveLength(2);
     expect(snapshot.endpoints[0].linkIds).toEqual([1, 4]);
+    const sampledPerEndpoint = snapshot.endpoints.map((e) => snapshot.sampled.filter((k) => k.endpointId === e.id).length);
+    expect(sampledPerEndpoint.every((n) => n > 0)).toBe(true);
   });
 
   it('cannot create more unique endpoints than Links', () => {
@@ -209,40 +278,41 @@ describe('Links and configured link endpoints', () => {
   });
 
   it('combines the traffic contributions of Links that share an endpoint', () => {
-    const cfg = basePoolConfig();
-    cfg.fabric.nodes = 1;
-    cfg.fabric.coresPerNode = 1;
-    cfg.fabric.links = 4;
-    cfg.fabric.uniqueEndpoints = 3;
-    cfg.responder.instances = 1;
-    cfg.fabric.keyStrategy = 'endpoint';
-    cfg.pool.minConnectionsPerKey = 0;
-    cfg.pool.policy = 'bounded';
-    cfg.pool.maxConnectionsPerKey = 20;
-    cfg.traffic.requestsPerSec = 800;
-    cfg.traffic.responseTimeMs = 100;
-    cfg.traffic.concurrencyHeadroom = 1;
-    cfg.responder.connectionLimit = 10_000;
-    cfg.responder.connectionSkew = 0;
+    const cfg = singleKey((c) => {
+      c.fabric.links = 4;
+      c.fabric.uniqueEndpoints = 3;
+      c.fabric.keyStrategy = 'endpoint';
+      c.pool.policy = 'bounded';
+      c.pool.maxConnectionsPerKey = 20;
+      c.traffic.requestsPerSec = 800;
+      c.traffic.responseTimeMs = 100;
+    });
 
-    const snapshot = new PoolSimulation(cfg).snapshot();
-    expect(snapshot.desiredConnections).toBe(80);
-    expect(snapshot.allowedConnections).toBe(60); // EP1 wants 40 but is capped at 20
+    const sim = new PoolSimulation(cfg);
+    sim.step(2_000);
+    const snapshot = sim.snapshot();
     const shared = snapshot.endpoints.find((endpoint) => endpoint.shared)!;
     const singleLinkEndpoints = snapshot.endpoints.filter((endpoint) => !endpoint.shared);
-    expect(shared.requestRate).toBe(400);
+    expect(shared.requestRate).toBeCloseTo(snapshot.effectiveRate / 2, 6);
+    expect(singleLinkEndpoints.every((endpoint) => Math.abs(endpoint.requestRate - snapshot.effectiveRate / 4) < 1e-6)).toBe(true);
+    // The shared endpoint wants ~40 sockets but is capped at 20; the others need fewer.
     expect(shared.estimatedConnections).toBe(20);
-    expect(singleLinkEndpoints.every((endpoint) => endpoint.requestRate === 200)).toBe(true);
-    expect(singleLinkEndpoints.every((endpoint) => endpoint.estimatedConnections === 20)).toBe(true);
+    expect(snapshot.allowedConnections).toBeLessThanOrEqual(60);
+    expect(snapshot.desiredConnections).toBeGreaterThan(snapshot.allowedConnections);
+    expect(snapshot.capActive).toBe(true);
   });
 });
 
 describe('responder pressure dynamics', () => {
   it('hits the configured Envoy limit after scaling the baseline from two to four nodes', () => {
+    const baseline = new PoolSimulation(basePoolConfig()).snapshot();
+    expect(baseline.responderPressure).toBeLessThan(0.97);
+    expect(baseline.limitActive).toBe(false);
+
     const cfg = basePoolConfig();
     cfg.fabric.nodes = 4;
     const sim = new PoolSimulation(cfg);
-    expect(sim.snapshot().responderPressure).toBeCloseTo(1, 5);
+    expect(sim.snapshot().responderPressure).toBeCloseTo(1, 2);
     expect(sim.snapshot().limitActive).toBe(true);
     expect(sim.snapshot().established).toBeLessThan(sim.snapshot().desiredConnections);
   });
@@ -252,15 +322,59 @@ describe('responder pressure dynamics', () => {
     cfg.fabric.nodes = 4;
     const sim = new PoolSimulation(cfg);
     sim.reconnectAll();
-    sim.step(500);
+    sim.step(90_000); // sparse keys need most of an idle window to inflate to the budget
     expect(sim.metrics.totals.connectionAttempts).toBeGreaterThan(0);
     expect(sim.metrics.totals.connectionResets).toBeGreaterThan(0);
     expect(sim.metrics.totals.failedRequests).toBeGreaterThan(0);
   });
 
+  it('places more sockets on the responder with the larger traffic share', () => {
+    const sim = new PoolSimulation(basePoolConfig());
+    sim.step(2_000);
+    const responders = sim.snapshot().responders;
+    expect(responders[0].estimatedConnections).toBeGreaterThan(responders[responders.length - 1].estimatedConnections);
+    expect(Math.max(...responders.map((r) => r.estimatedConnections))).toBeCloseTo(sim.snapshot().hottestResponder, 6);
+  });
+
+  it('keeps the sockets a surge opened until the idle window passes, then expires them', () => {
+    const sim = new PoolSimulation(basePoolConfig());
+    sim.step(5_000);
+    sim.triggerPulse(2, 30_000);
+    sim.step(30_000);
+    const atSurgeEnd = sim.snapshot().established;
+    sim.step(60_000); // 60 s after the surge, still inside the 90 s idle window
+    expect(sim.snapshot().established).toBeGreaterThan(atSurgeEnd * 0.9);
+    sim.step(40_000); // the surge sockets have now aged past the idle timeout
+    expect(sim.snapshot().established).toBeLessThan(atSurgeEnd * 0.85);
+  });
+
+  it('inflates cold pools over the idle window rather than instantly', () => {
+    const sim = new PoolSimulation(basePoolConfig());
+    sim.reconnectAll();
+    sim.step(1_000);
+    const early = sim.snapshot().established;
+    sim.step(30_000);
+    expect(early).toBeGreaterThan(0);
+    expect(sim.snapshot().established).toBeGreaterThan(early * 1.2);
+  });
+
   it('keeps scenario traffic identical for fair A/B comparisons', () => {
     const traffic = JSON.stringify(POOL_PRESETS[0].config.traffic);
     for (const preset of POOL_PRESETS) expect(JSON.stringify(preset.config.traffic)).toBe(traffic);
+  });
+
+  it('replays identically for one seed and differently for another', () => {
+    const a = new PoolSimulation(basePoolConfig());
+    const b = new PoolSimulation(basePoolConfig());
+    const other = basePoolConfig();
+    other.seed = 42;
+    const c = new PoolSimulation(other);
+    a.step(3_000);
+    b.step(3_000);
+    c.step(3_000);
+    expect(a.snapshot().established).toBe(b.snapshot().established);
+    expect(a.metrics.totals.servedRequests).toBe(b.metrics.totals.servedRequests);
+    expect(a.snapshot().established).not.toBe(c.snapshot().established);
   });
 
   it('is step-size stable at metrics-bucket boundaries', () => {

@@ -2,10 +2,11 @@ import type { PoolPreset, PoolSimulationConfig } from './types';
 
 /**
  * A deliberately high-cardinality RTB Fabric shape. At 120k req/s the mean
- * concurrency is modest, but 2 nodes x 32 workers x 8 links x 8 responder IPs
- * creates 4,096 independently warm HTTP/1 pool keys before load requires that
- * many. Scaling to four nodes doubles that inventory and crosses the responder
- * budget once connection-placement skew is included.
+ * concurrency per key is well under one request, but 2 nodes x 32 workers x
+ * 8 links x 8 responder IPs creates 4,096 independently owned HTTP/1 pool
+ * keys, and each of them holds the peak concurrency it saw inside the 90 s
+ * idle window. Scaling to four nodes doubles that inventory and crosses the
+ * responder budget once connection-placement skew is included.
  */
 export function basePoolConfig(): PoolSimulationConfig {
   return {
@@ -13,7 +14,7 @@ export function basePoolConfig(): PoolSimulationConfig {
     traffic: {
       requestsPerSec: 120_000,
       responseTimeMs: 20,
-      concurrencyHeadroom: 1.25,
+      burstiness: 0.15,
       retryFraction: 0.7,
       maxRetries: 2,
     },
@@ -32,13 +33,12 @@ export function basePoolConfig(): PoolSimulationConfig {
       maxIdlePerKey: 0,
       minConnectionsPerKey: 1,
       connectTimeMs: 30,
-      checkoutRaceFactor: 1.15,
       policy: 'hyper',
       maxConnectionsPerKey: 32,
     },
     responder: {
       instances: 8,
-      connectionLimit: 1024,
+      connectionLimit: 4096,
       connectionSkew: 0.12,
     },
   };
@@ -68,14 +68,13 @@ export const POOL_PRESETS: PoolPreset[] = [
       c.fabric.ownership = 'node';
       c.fabric.keyStrategy = 'endpoint';
       c.pool.minConnectionsPerKey = 0;
-      c.pool.checkoutRaceFactor = 1;
     }),
   },
   {
     id: 'scale-out',
     name: 'Scale out ×2',
     description:
-      'Four RTB Fabric nodes split the same offered load. CPU headroom rises, but independent pool copies—and the warm connection floor—double.',
+      'Four RTB Fabric nodes split the same offered load. CPU headroom rises, but independent pool copies—and the peaks each one retains—double.',
     config: scenario((c) => {
       c.fabric.nodes = 4;
     }),
@@ -108,15 +107,24 @@ export const POOL_PRESETS: PoolPreset[] = [
     }),
   },
   {
+    id: 'short-idle',
+    name: 'Short idle timeout',
+    description:
+      'The current shape with a 5 s pool_idle_timeout instead of 90 s. Each key forgets its concurrency peaks sooner, at the cost of more reconnects.',
+    config: scenario((c) => {
+      c.pool.idleTimeoutMs = 5_000;
+    }),
+  },
+  {
     id: 'bounded-shared',
     name: 'Bounded + shared',
     description:
-      'A hypothetical bounded pool, shared across links, with eight active connections per endpoint key and a short idle lifetime.',
+      'A hypothetical bounded pool, shared across links, with sixteen active connections per endpoint key and a short idle lifetime.',
     config: scenario((c) => {
       c.fabric.keyStrategy = 'endpoint';
       c.pool.policy = 'bounded';
-      c.pool.maxConnectionsPerKey = 8;
-      c.pool.maxIdlePerKey = 2;
+      c.pool.maxConnectionsPerKey = 16;
+      c.pool.maxIdlePerKey = 4;
       c.pool.minConnectionsPerKey = 0;
       c.pool.idleTimeoutMs = 15_000;
     }),
@@ -130,7 +138,6 @@ export const POOL_PRESETS: PoolPreset[] = [
       c.fabric.keyStrategy = 'dns';
       c.pool.protocol = 'http2';
       c.pool.minConnectionsPerKey = 0;
-      c.pool.checkoutRaceFactor = 1;
     }),
   },
 ];

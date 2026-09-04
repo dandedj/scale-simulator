@@ -57,7 +57,6 @@ const qps = (v: number) => `${fmtBig(v)}/s`;
 const ms = (v: number) => `${v.toFixed(0)}ms`;
 const duration = (v: number) => v === 0 ? 'disabled' : v >= 60_000 ? `${(v / 60_000).toFixed(1)}m` : `${(v / 1000).toFixed(0)}s`;
 const pct = (v: number) => `${Math.round(v * 100)}%`;
-const factor = (v: number) => `${v.toFixed(2)}×`;
 const unlimited = (v: number) => v === 0 ? 'unbounded' : String(Math.round(v));
 
 const GROUPS: GroupDef[] = [
@@ -78,18 +77,18 @@ const GROUPS: GroupDef[] = [
         label: 'Response occupancy', min: 1, max: 500, step: 1,
         get: (c) => c.traffic.responseTimeMs, set: (c, v) => (c.traffic.responseTimeMs = v), format: ms,
         info: {
-          what: 'How long a request occupies one HTTP connection, including responder service and network time.',
-          how: 'Required concurrency is request rate × response time. HTTP/1 carries one request per connection; HTTP/2 divides it by streams per connection.',
+          what: 'Mean time a request occupies one HTTP connection, including responder service and network time. Individual requests vary around it exponentially.',
+          how: 'Mean concurrency per key is request rate × occupancy. HTTP/1 carries one request per connection; HTTP/2 divides it by streams per connection.',
           expect: 'Slow responders drive more simultaneous sockets even at unchanged QPS; latency is often the strongest load-dependent connection driver.',
         },
       },
       {
-        label: 'Concurrency headroom', min: 1, max: 4, step: 0.05,
-        get: (c) => c.traffic.concurrencyHeadroom, set: (c, v) => (c.traffic.concurrencyHeadroom = v), format: factor,
+        label: 'Traffic burstiness', min: 0, max: 1, step: 0.05,
+        get: (c) => c.traffic.burstiness, set: (c, v) => (c.traffic.burstiness = v), format: pct,
         info: {
-          what: 'Safety factor for bursty arrivals and the long tail beyond mean response time.',
-          how: 'Multiplies Little’s Law concurrency before the per-key connection requirement is rounded up.',
-          expect: 'Lumpy traffic and latency variance lift each pool’s high-water mark; Hyper retains that extra idle inventory until expiry.',
+          what: 'How wavy the customer’s aggregate request rate is: the coefficient of variation of a slow (≈4 s) log-normal wave multiplied into every key’s arrival rate. Zero leaves pure Poisson arrivals.',
+          how: 'Each key’s arrivals are Poisson at its share of the wave. Sparse keys are already noisy on their own; the wave adds the correlated swings that push every key’s concurrency peak higher at once.',
+          expect: 'Higher waves lift the peak every key retains inside its idle window, and give an HTTP/1 pool more chances to be pinned and start a connect cascade.',
         },
       },
       {
@@ -205,8 +204,8 @@ const GROUPS: GroupDef[] = [
         get: (c) => c.pool.idleTimeoutMs, set: (c, v) => (c.pool.idleTimeoutMs = v), format: duration,
         info: {
           what: 'Hyper legacy pool_idle_timeout; the documented default is 90 seconds. Zero models None (disabled).',
-          how: 'Idle sockets survive until this age when a pool timer is installed. The model also uses the window to estimate how many sparse keys stay warm.',
-          expect: 'Shorter timeouts lower the idle high-water mark after a burst, but increase reconnect/TLS churn when traffic returns.',
+          how: 'Hyper checks idle sockets out most-recently-used first, so a key’s n-th socket is touched only when concurrency reaches n. Each key therefore holds the peak concurrency it saw inside the trailing window; sockets past that age expire. The warm floor is exempt.',
+          expect: 'A shorter window forgets peaks sooner and the socket field thins out after every burst; a longer one keeps them and the fleet total settles higher. The 90 s default typically retains several sockets per key at under one request of mean concurrency.',
         },
       },
       {
@@ -214,7 +213,7 @@ const GROUPS: GroupDef[] = [
         get: (c) => c.pool.maxIdlePerKey, set: (c, v) => (c.pool.maxIdlePerKey = v), format: unlimited,
         info: {
           what: 'Hyper legacy pool_max_idle_per_host. Zero represents the documented default usize::MAX (no practical limit).',
-          how: 'It limits only connections sitting idle for one pool key. Busy and connecting sockets are not an active-connection cap.',
+          how: 'A socket returning to a key whose idle list is already this long is closed instead of kept. Busy and connecting sockets are not counted, so it is not an active-connection cap.',
           expect: 'It trims a post-burst idle tail but cannot prevent a concurrent HTTP/1 connect surge from reaching the responder.',
         },
       },
@@ -223,8 +222,8 @@ const GROUPS: GroupDef[] = [
         get: (c) => c.pool.minConnectionsPerKey, set: (c, v) => (c.pool.minConnectionsPerKey = v), format: count,
         info: {
           what: 'RTB Fabric’s configured minimum warm connection count for each application pool key; this is not a Hyper legacy builder option.',
-          how: 'Multiplied by every owned key. The floor remains even when mean traffic concurrency is below one connection per key.',
-          expect: 'At the two-node baseline, a floor of one creates 4,096 sockets versus 2,400 required by Little’s Law. Scaling to four nodes doubles the floor and reaches the responder ceiling.',
+          how: 'Multiplied by every owned key, kept alive through idle expiry, and re-opened after a recycle. The floor only matters for keys whose retained peak is below it.',
+          expect: 'At the default shape, traffic peaks already keep several sockets per key, so the floor mostly shows up after RECONNECT ALL and for sparse keys.',
         },
       },
       {
@@ -232,17 +231,8 @@ const GROUPS: GroupDef[] = [
         get: (c) => c.pool.connectTimeMs, set: (c, v) => (c.pool.connectTimeMs = v), format: ms,
         info: {
           what: 'TCP plus TLS time before a newly opened socket can carry a request.',
-          how: 'Connection attempts remain visible as pending during this interval; failed requests can feed retries while it elapses.',
-          expect: 'Longer setup widens the cold-start failure window and lets more demand overlap connection establishment.',
-        },
-      },
-      {
-        label: 'H1 checkout-race factor', min: 1, max: 2, step: 0.05,
-        get: (c) => c.pool.checkoutRaceFactor, set: (c, v) => (c.pool.checkoutRaceFactor = v), format: factor,
-        info: {
-          what: 'Empirical overshoot from HTTP/1 requests racing an idle checkout against a new connect.',
-          how: 'Hyper’s source allows every HTTP/1 request to connect independently; if checkout wins after connect started, that connect finishes in the background and returns to the pool. The model multiplies a growth batch by this factor.',
-          expect: 'Higher concurrency during pool growth leaves more surplus idle sockets. Hyper coalesces HTTP/2 connection establishment, so this factor is ignored for H2.',
+          how: 'Requests wait on their connect and also race for any socket that frees up meanwhile. With HTTP/1, every request that arrives while a key has nothing idle starts its own connect, so a pinned key opens roughly one connect window of arrivals before the first socket lands.',
+          expect: 'Longer setup widens the cold-start failure window and makes the HTTP/1 connect cascade larger; the surplus lands idle and is retained for the idle window.',
         },
       },
       {
@@ -271,7 +261,7 @@ const GROUPS: GroupDef[] = [
         get: (c) => c.pool.protocol, set: (c, v) => (c.pool.protocol = v as HttpProtocol),
         info: {
           what: 'Protocol between RTB Fabric and the customer responder.',
-          how: 'HTTP/1 reserves a unique connection per in-flight request. HTTP/2 reservations are shared and Hyper suppresses duplicate connects for the same key.',
+          how: 'HTTP/1 reserves a unique connection per in-flight request and starts a connect for every request that finds nothing idle. HTTP/2 reservations share a connection and Hyper keeps one establishment in flight per key.',
           expect: 'H2 can sharply reduce connections when the bidder supports it, especially after combining it with a lower-cardinality key.',
         },
       },
@@ -305,7 +295,7 @@ const GROUPS: GroupDef[] = [
         get: (c) => c.responder.connectionLimit, set: (c, v) => (c.responder.connectionLimit = v), format: count,
         info: {
           what: 'Maximum concurrent sockets accepted by each customer Envoy/responder.',
-          how: 'New sockets beyond the hottest instance’s limit reset. The example configuration uses 1,024.',
+          how: 'A connect that lands on an instance already at its limit resets, and the requests waiting on it fail. The example configuration uses 4,096.',
           expect: 'Raising the limit buys room but can move the bottleneck to file descriptors, memory, or the bidder; reducing pool demand attacks the source.',
         },
       },
@@ -313,8 +303,8 @@ const GROUPS: GroupDef[] = [
         label: 'Connection placement skew', min: 0, max: 1, step: 0.05,
         get: (c) => c.responder.connectionSkew, set: (c, v) => (c.responder.connectionSkew = v), format: pct,
         info: {
-          what: 'How far the hottest responder’s connection count sits above the mean.',
-          how: 'A 20% skew means the hottest instance reaches its limit when the fleet-wide average is only 83% of that limit.',
+          what: 'How far the hottest responder’s traffic share sits above the mean.',
+          how: 'Responder IPs receive linearly uneven shares of each key’s requests, so the hottest instance holds proportionally more sockets. A 20% skew means it reaches its limit when the fleet-wide average is only 83% of that limit.',
           expect: 'More skew wastes aggregate responder capacity and starts resets earlier; inspect the hottest instance, not only total connections.',
         },
       },
@@ -466,9 +456,9 @@ export class PoolControlPanel {
     const p = el('div', 'pool-research-body');
     p.innerHTML =
       'Hyper legacy pools by <b>scheme + authority</b>; cloned Clients reuse one underlying pool. ' +
-      'Its documented controls are <code>pool_idle_timeout</code> (90s default) and ' +
-      '<code>pool_max_idle_per_host</code> (unbounded default). The latter is not an active cap. ' +
-      'HTTP/1 connects are independent; HTTP/2 establishment is coalesced per key. ' +
+      'Idle sockets are checked out most-recently-used first, so each key keeps the peak concurrency it saw within ' +
+      '<code>pool_idle_timeout</code> (90s default). <code>pool_max_idle_per_host</code> (unbounded default) trims returning sockets and is not an active cap. ' +
+      'Every HTTP/1 request without an idle socket starts its own connect and races it against a returning socket; HTTP/2 establishment is coalesced per key. ' +
       '<a href="https://docs.rs/hyper-util/latest/hyper_util/client/legacy/struct.Builder.html" target="_blank" rel="noreferrer">Builder docs</a> · ' +
       '<a href="https://docs.rs/hyper-util/latest/src/hyper_util/client/legacy/client.rs.html" target="_blank" rel="noreferrer">client source</a> · ' +
       '<a href="https://docs.rs/hyper-util/latest/src/hyper_util/client/legacy/pool.rs.html" target="_blank" rel="noreferrer">pool source</a>.';
@@ -609,6 +599,7 @@ const TOTALS: Array<{ label: string; color: string; get(sim: PoolSimulation): st
   { label: 'Established now', color: SEMANTIC.connEstablished, get: (s) => fmtBig(s.snapshot().established) },
   { label: "Little's Law required", color: SEMANTIC.success, get: (s) => fmtBig(s.snapshot().littleLawRequired) },
   { label: 'Actual / required', color: SEMANTIC.timeout, get: (s) => formatRatio(s.snapshot().connectionAmplification, s.snapshot().littleLawRequired) },
+  { label: 'Sockets / key', color: SEMANTIC.inFlight, get: (s) => (s.snapshot().established / Math.max(1, s.snapshot().poolKeys)).toFixed(2) },
   { label: 'Peak connections', color: SEMANTIC.tlsPulse, get: (s) => fmtBig(s.metrics.totals.peakConnections) },
   { label: 'Peak hottest', color: SEMANTIC.timeout, get: (s) => fmtBig(s.metrics.totals.peakHottestResponder) },
   { label: 'Connections opened', color: SEMANTIC.success, get: (s) => fmtBig(s.metrics.totals.connectionsOpened) },
