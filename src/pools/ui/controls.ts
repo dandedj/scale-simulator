@@ -173,18 +173,9 @@ const GROUPS: GroupDef[] = [
         set: (c, v) => (c.fabric.uniqueEndpoints = Math.min(v, c.fabric.links)),
         format: count,
         info: {
-          what: 'Distinct endpoint identities across all Links. Each identity has a DNS authority, certificate, port, and resolved IP set.',
+          what: 'Distinct endpoint identities across all Links. Each identity has a DNS authority, certificate, port, and resolves to the responder instances’ IPs.',
           how: 'The value cannot exceed the Link count. Links are distributed as evenly as possible across these endpoints: one endpoint means all Links converge; one per Link means all differ.',
           expect: 'Fewer unique endpoints create more endpoint reuse. IP+cert+port or DNS-authority pooling can share those repeated identities; current Link-local pools cannot.',
-        },
-      },
-      {
-        label: 'Resolved IPs / endpoint', min: 1, max: 64, step: 1,
-        get: (c) => c.fabric.ipsPerEndpoint, set: (c, v) => (c.fabric.ipsPerEndpoint = v), format: count,
-        info: {
-          what: 'IP addresses returned by each configured link endpoint authority.',
-          how: 'Current Link×endpoint×IP and IP+cert+port strategies make each address a key. DNS-authority pooling holds one key for the endpoint and resolves connections across its IPs.',
-          expect: 'More A records multiply per-IP pools. DNS-authority keying avoids the IP pool-state multiplier but changes address selection and balancing behavior.',
         },
       },
     ],
@@ -233,7 +224,7 @@ const GROUPS: GroupDef[] = [
         info: {
           what: 'RTB Fabric’s configured minimum warm connection count for each application pool key; this is not a Hyper legacy builder option.',
           how: 'Multiplied by every owned key. The floor remains even when mean traffic concurrency is below one connection per key.',
-          expect: 'A floor of one across 24,576 keys is already three times the aggregate 8×1,024 responder budget.',
+          expect: 'A floor of one across 49,152 keys is already six times the aggregate 8×1,024 responder budget.',
         },
       },
       {
@@ -304,9 +295,9 @@ const GROUPS: GroupDef[] = [
         label: 'Responder instances', min: 1, max: 64, step: 1,
         get: (c) => c.responder.instances, set: (c, v) => (c.responder.instances = v), format: count,
         info: {
-          what: 'Envoy or bidder instances receiving connections.',
-          how: 'The aggregate connection budget is instances × per-instance limit, reduced by uneven placement because the hottest instance fails first.',
-          expect: 'More instances raise total socket capacity, but they do not fix excess connection creation at RTB Fabric.',
+          what: 'Envoy or bidder instances receiving connections. Every responder owns one explicit destination IP.',
+          how: 'Every Link endpoint resolves to this responder IP set. The aggregate connection budget is instances × per-instance limit, reduced by uneven placement because the hottest instance fails first.',
+          expect: 'More instances raise capacity but also add per-IP pool keys under Link×endpoint×IP and IP+cert+port keying. DNS-authority keying avoids that pool-state multiplier.',
         },
       },
       {

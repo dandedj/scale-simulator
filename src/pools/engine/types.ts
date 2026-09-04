@@ -25,8 +25,6 @@ export interface FabricPoolTopologyConfig {
   links: number;
   /** Distinct endpoint identities distributed across the Links. */
   uniqueEndpoints: number;
-  /** DNS addresses resolved by each Link's one endpoint. */
-  ipsPerEndpoint: number;
   /** Current worker-process ownership, or a hypothetical node-shared client. */
   ownership: PoolOwnership;
   /** Application-level partitioning layered above hyper-util's own pool key. */
@@ -131,6 +129,15 @@ export interface PoolEndpointView {
   estimatedConnections: number;
 }
 
+/** One customer Envoy/bidder instance and its destination IP. */
+export interface PoolResponderView {
+  id: number;
+  name: string;
+  ip: string;
+  estimatedConnections: number;
+  pressure: number;
+}
+
 export interface PoolSnapshot {
   baseRate: number;
   effectiveRate: number;
@@ -163,4 +170,5 @@ export interface PoolSnapshot {
   closesPerSec: number;
   links: PoolLinkView[];
   endpoints: PoolEndpointView[];
+  responders: PoolResponderView[];
 }

@@ -6,8 +6,8 @@ describe('outbound pool cardinality', () => {
   it('multiplies current pools across nodes, workers, Link endpoints, and IPs', () => {
     const sim = new PoolSimulation(basePoolConfig());
     expect(sim.poolOwners()).toBe(24 * 32);
-    expect(sim.logicalKeysPerOwner()).toBe(8 * 4);
-    expect(sim.poolKeyCount()).toBe(24 * 32 * 8 * 4);
+    expect(sim.logicalKeysPerOwner()).toBe(8 * 8); // 8 Links × 8 responder IPs
+    expect(sim.poolKeyCount()).toBe(24 * 32 * 8 * 8);
     expect(sim.desiredConnectionCount()).toBeGreaterThanOrEqual(sim.poolKeyCount());
   });
 
@@ -17,10 +17,10 @@ describe('outbound pool cardinality', () => {
     expect(new PoolSimulation(c).poolKeyCount()).toBe(24 * 32);
 
     c.fabric.keyStrategy = 'endpoint';
-    expect(new PoolSimulation(c).poolKeyCount()).toBe(24 * 32 * 4);
+    expect(new PoolSimulation(c).poolKeyCount()).toBe(24 * 32 * 8);
 
     c.fabric.ownership = 'node';
-    expect(new PoolSimulation(c).poolKeyCount()).toBe(24 * 4);
+    expect(new PoolSimulation(c).poolKeyCount()).toBe(24 * 8);
   });
 
   it('shows horizontal and vertical scale multiplying independent pool copies', () => {
@@ -41,7 +41,7 @@ describe('hyper-util semantics represented by the model', () => {
     a.fabric.coresPerNode = 1;
     a.fabric.links = 1;
     a.fabric.uniqueEndpoints = 1;
-    a.fabric.ipsPerEndpoint = 1;
+    a.responder.instances = 1;
     a.pool.minConnectionsPerKey = 0;
     a.traffic.requestsPerSec = 10_000;
     a.traffic.responseTimeMs = 100;
@@ -58,7 +58,7 @@ describe('hyper-util semantics represented by the model', () => {
     c.fabric.coresPerNode = 1;
     c.fabric.links = 1;
     c.fabric.uniqueEndpoints = 1;
-    c.fabric.ipsPerEndpoint = 1;
+    c.responder.instances = 1;
     c.pool.minConnectionsPerKey = 0;
     c.traffic.requestsPerSec = 10_000;
     c.traffic.responseTimeMs = 100;
@@ -78,7 +78,7 @@ describe('hyper-util semantics represented by the model', () => {
     h1.fabric.coresPerNode = 1;
     h1.fabric.links = 1;
     h1.fabric.uniqueEndpoints = 1;
-    h1.fabric.ipsPerEndpoint = 1;
+    h1.responder.instances = 1;
     h1.traffic.requestsPerSec = 10_000;
     h1.traffic.responseTimeMs = 100;
     h1.traffic.concurrencyHeadroom = 1;
@@ -108,7 +108,9 @@ describe('Links and configured link endpoints', () => {
     expect(snapshot.linkEndpointBindings).toBe(8);
     expect(snapshot.sharedEndpoints).toBe(1);
     expect(snapshot.endpoints[0].linkIds).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
-    expect(snapshot.endpoints[0].ips).toHaveLength(4);
+    expect(snapshot.endpoints[0].ips).toHaveLength(8);
+    expect(snapshot.responders).toHaveLength(8);
+    expect(snapshot.endpoints[0].ips).toEqual(snapshot.responders.map((responder) => responder.ip));
     expect(snapshot.endpoints[0].authority).toContain(':443');
     expect(snapshot.links.every((link) => link.endpointId === snapshot.endpoints[0].id)).toBe(true);
   });
@@ -119,14 +121,14 @@ describe('Links and configured link endpoints', () => {
     cfg.fabric.coresPerNode = 1;
     cfg.fabric.links = 3;
     cfg.fabric.uniqueEndpoints = 2;
-    cfg.fabric.ipsPerEndpoint = 2;
+    cfg.responder.instances = 2;
 
     const current = new PoolSimulation(cfg);
     expect(current.snapshot().linkEndpointBindings).toBe(3); // exactly one endpoint / Link
     expect(current.snapshot().uniqueEndpoints).toBe(2);
     expect(current.logicalKeysPerOwner()).toBe(6); // 3 Links × 2 IPs
-    const endpointIps = current.snapshot().endpoints.flatMap((endpoint) => endpoint.ips);
-    expect(new Set(endpointIps).size).toBe(4); // every unique endpoint has a distinct synthetic IP set
+    expect(current.snapshot().endpoints[0].ips).toEqual(current.snapshot().endpoints[1].ips);
+    expect(current.snapshot().endpoints[0].ips).toEqual(current.snapshot().responders.map((responder) => responder.ip));
 
     cfg.fabric.keyStrategy = 'endpoint';
     expect(new PoolSimulation(cfg).logicalKeysPerOwner()).toBe(4); // 2 unique × 2 IPs
@@ -159,13 +161,25 @@ describe('Links and configured link endpoints', () => {
     expect(snapshot.endpoints.every((endpoint) => endpoint.linkIds.length === 1)).toBe(true);
   });
 
+  it('derives every endpoint IP from the responder instances', () => {
+    const cfg = basePoolConfig();
+    cfg.responder.instances = 18;
+    const snapshot = new PoolSimulation(cfg).snapshot();
+    const responderIps = snapshot.responders.map((responder) => responder.ip);
+    expect(snapshot.responders).toHaveLength(18);
+    expect(new Set(responderIps).size).toBe(18);
+    expect(snapshot.endpoints.every((endpoint) => endpoint.ips.length === 18)).toBe(true);
+    expect(snapshot.endpoints.every((endpoint) => endpoint.ips.join() === responderIps.join())).toBe(true);
+    expect(snapshot.logicalKeysPerOwner).toBe(8 * 18);
+  });
+
   it('combines the traffic contributions of Links that share an endpoint', () => {
     const cfg = basePoolConfig();
     cfg.fabric.nodes = 1;
     cfg.fabric.coresPerNode = 1;
     cfg.fabric.links = 4;
     cfg.fabric.uniqueEndpoints = 3;
-    cfg.fabric.ipsPerEndpoint = 1;
+    cfg.responder.instances = 1;
     cfg.fabric.keyStrategy = 'endpoint';
     cfg.pool.minConnectionsPerKey = 0;
     cfg.pool.policy = 'bounded';

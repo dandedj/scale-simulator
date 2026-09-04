@@ -2,8 +2,9 @@ import type { PoolPreset, PoolSimulationConfig } from './types';
 
 /**
  * A deliberately high-cardinality RTB Fabric shape. At 120k req/s the mean
- * concurrency is modest, but 24 nodes x 32 workers x 8 links x 4 IPs creates
- * 24,576 independently warm HTTP/1 pool keys before load requires that many.
+ * concurrency is modest, but 24 nodes x 32 workers x 8 links x 8 responder
+ * IPs creates 49,152 independently warm HTTP/1 pool keys before load requires
+ * that many.
  */
 export function basePoolConfig(): PoolSimulationConfig {
   return {
@@ -20,7 +21,6 @@ export function basePoolConfig(): PoolSimulationConfig {
       coresPerNode: 32,
       links: 8,
       uniqueEndpoints: 1,
-      ipsPerEndpoint: 4,
       ownership: 'worker',
       keyStrategy: 'link-ip',
     },
@@ -54,7 +54,7 @@ export const POOL_PRESETS: PoolPreset[] = [
     id: 'current',
     name: 'Current RTB shape',
     description:
-      'Eight Links all reference the same four-IP link endpoint, but current per-worker, per-Link, per-IP HTTP/1 pools cannot share those sockets.',
+      'Eight Links all reference the same endpoint and its eight responder IPs, but current per-worker, per-Link, per-IP HTTP/1 pools cannot share those sockets.',
     config: basePoolConfig(),
   },
   {
@@ -95,7 +95,6 @@ export const POOL_PRESETS: PoolPreset[] = [
       'Eight Links are distributed across three endpoint identities. Some Links converge on the same endpoint while others point elsewhere.',
     config: scenario((c) => {
       c.fabric.uniqueEndpoints = 3;
-      c.fabric.ipsPerEndpoint = 2;
     }),
   },
   {

@@ -22,6 +22,7 @@ import type {
   PoolEndpointView,
   PoolKeyStrategy,
   PoolLinkView,
+  PoolResponderView,
   PoolSimulationConfig,
   PoolSnapshot,
 } from './types';
@@ -133,7 +134,7 @@ export class PoolSimulation {
   }
 
   logicalKeysPerOwner(): number {
-    const ips = Math.max(1, Math.round(this.cfg.fabric.ipsPerEndpoint));
+    const ips = this.responderCount();
     switch (this.cfg.fabric.keyStrategy) {
       case 'link-ip':
         return this.linkCount() * ips;
@@ -166,7 +167,7 @@ export class PoolSimulation {
   }
 
   responderCapacity(): number {
-    const count = Math.max(1, Math.round(this.cfg.responder.instances));
+    const count = this.responderCount();
     const limit = Math.max(1, this.cfg.responder.connectionLimit);
     return (count * limit) / (1 + Math.max(0, this.cfg.responder.connectionSkew));
   }
@@ -251,12 +252,13 @@ export class PoolSimulation {
     const servedRate = effectiveRate * coverage;
     const busy = Math.min(this.established, this.busyConnectionCount(servedRate));
     const pending = this.pending.reduce((n, b) => n + b.count, 0);
-    const hottest = (this.established / Math.max(1, this.cfg.responder.instances)) *
+    const hottest = (this.established / this.responderCount()) *
       (1 + Math.max(0, this.cfg.responder.connectionSkew));
     const pressure = hottest / Math.max(1, this.cfg.responder.connectionLimit);
     const opensRate = this.lastDeltas.opened * (1000 / INTERNAL_TICK_MS);
     const reuse = effectiveRate > EPS ? Math.max(0, 1 - opensRate / effectiveRate) : 1;
     const topology = this.topologyViews(effectiveRate, this.established);
+    const responders = this.responderViews(this.established);
     return {
       baseRate,
       effectiveRate,
@@ -287,12 +289,13 @@ export class PoolSimulation {
       closesPerSec: this.lastDeltas.closed * (1000 / INTERNAL_TICK_MS),
       links: topology.links,
       endpoints: topology.endpoints,
+      responders,
     };
   }
 
   private connectionTarget(rate: number): { desired: number; allowed: number } {
     const links = this.linkCount();
-    const ipsPerEndpoint = Math.max(1, Math.round(this.cfg.fabric.ipsPerEndpoint));
+    const ipsPerEndpoint = this.responderCount();
     if (this.cfg.fabric.keyStrategy === 'link-ip') {
       // Every Link has one endpoint and carries an equal traffic share. Shared
       // endpoint identity is deliberately irrelevant to the current key.
@@ -376,17 +379,18 @@ export class PoolSimulation {
       f.coresPerNode,
       f.links,
       f.uniqueEndpoints,
-      f.ipsPerEndpoint,
       f.ownership,
       f.keyStrategy,
       p.protocol,
+      this.responderCount(),
     ].join('|');
   }
 
   private topologyViews(rate: number, established: number): { links: PoolLinkView[]; endpoints: PoolEndpointView[] } {
     const linkCount = this.linkCount();
     const endpointCount = this.uniqueEndpointCount();
-    const ipsPerEndpoint = Math.max(1, Math.round(this.cfg.fabric.ipsPerEndpoint));
+    const responderIps = Array.from({ length: this.responderCount() }, (_, i) => responderIp(i + 1));
+    const ipsPerEndpoint = responderIps.length;
     const endpoints: PoolEndpointView[] = [];
     const endpointById = new Map<number, PoolEndpointView>();
 
@@ -397,7 +401,9 @@ export class PoolSimulation {
         authority: `endpoint-${id}.bidder.example:443`,
         certificate: `customer-${id}`,
         port: 443,
-        ips: Array.from({ length: ipsPerEndpoint }, (_, ip) => endpointIp(id, ip)),
+        // Every configured endpoint targets this customer responder fleet, so
+        // it resolves to the explicit IP owned by every responder instance.
+        ips: [...responderIps],
         linkIds: [],
         shared: false,
         requestRate: 0,
@@ -452,6 +458,27 @@ export class PoolSimulation {
     return Math.max(1, Math.round(this.cfg.fabric.links));
   }
 
+  private responderCount(): number {
+    return Math.max(1, Math.round(this.cfg.responder.instances));
+  }
+
+  private responderViews(established: number): PoolResponderView[] {
+    const count = this.responderCount();
+    const skew = Math.max(0, this.cfg.responder.connectionSkew);
+    const limit = Math.max(1, this.cfg.responder.connectionLimit);
+    return Array.from({ length: count }, (_, index) => {
+      const uneven = count <= 1 ? 1 : 1 + skew * (1 - (2 * index) / (count - 1));
+      const estimatedConnections = (established / count) * uneven;
+      return {
+        id: index + 1,
+        name: `Responder ${index + 1}`,
+        ip: responderIp(index + 1),
+        estimatedConnections,
+        pressure: estimatedConnections / limit,
+      };
+    });
+  }
+
   private detectEdges(): void {
     const s = this.lastSnapshot;
     if (s.limitActive && !this.lastLimitActive) this.metrics.log(this.now, 'critical', this.limitMessage());
@@ -477,15 +504,11 @@ export function keyStrategyLabel(strategy: PoolKeyStrategy): string {
   }
 }
 
-function endpointIp(endpointId: number, index: number): string {
-  // Give every configured endpoint its own synthetic subnet so the generated
-  // IP+cert+port identities are genuinely distinct unless the endpoint entity
-  // itself is shared by Links.
-  const endpointIndex = endpointId - 1;
-  const second = 16 + Math.floor(endpointIndex / 254);
-  const third = endpointIndex % 254;
-  const fourth = index + 1;
-  return `172.${second}.${third}.${fourth}`;
+function responderIp(responderId: number): string {
+  const index = responderId - 1;
+  const third = Math.floor(index / 254);
+  const fourth = (index % 254) + 1;
+  return `172.20.${third}.${fourth}`;
 }
 
 function fmtCount(v: number): string {

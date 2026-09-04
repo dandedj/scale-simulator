@@ -454,21 +454,22 @@ owned pool keys = RTB nodes × pool owners/node × application keys/owner
 
 Link→endpoint bindings = Links (exactly one endpoint per Link)
 unique endpoints = distinct endpoint identities referenced by those Links
-current application keys/owner = Links × IPs/endpoint
+current application keys/owner = Links × responder IPs
 ```
 
 Links and Link endpoints are concrete entities in the model. Each Link owns a
 single endpoint reference; each unique endpoint has a DNS authority, certificate
-identity, port, resolved IP set, reverse Link membership, and its share of
-traffic and connections. The **Unique Link endpoints** control determines how
-many distinct identities those Links reference. One means every Link converges
-on the same endpoint; a value equal to the Link count means every Link points to
-a different endpoint. Intermediate values distribute Links as evenly as possible
-across endpoints. The board draws those actual relationships.
+identity, port, reverse Link membership, and its share of traffic and
+connections. Every responder instance owns one explicit IP, and every endpoint
+resolves to that responder IP set. The **Unique Link endpoints** control
+determines how many distinct identities those Links reference. One means every
+Link converges on the same endpoint; a value equal to the Link count means every
+Link points to a different endpoint. Intermediate values distribute Links as
+evenly as possible across endpoints. The board draws those actual relationships.
 
 In the default example, all eight Links reference the same endpoint identity,
-which resolves to four IPs. The current pool design still creates
-`24 nodes × 32 worker processes × 8 Link references × 4 IPs` = **24,576
+which resolves to the eight responder IPs. The current pool design still creates
+`24 nodes × 32 worker processes × 8 Link references × 8 responder IPs` = **49,152
 independently owned keys** because the Link remains part of the application key.
 A warm floor of one connection per key already exceeds eight Envoys at 1,024
 connections each, even though the whole customer workload needs far less mean
@@ -560,7 +561,8 @@ unserved work but does not pretend the cap alone defines those semantics.
 
 ### Scenarios and comparison
 
-- **Current RTB shape** — eight Links converge on one shared four-IP endpoint,
+- **Current RTB shape** — eight Links converge on one endpoint that resolves to
+  eight responder IPs,
   but worker-local Link × endpoint × IP pools keep every copy separate; the
   1,024-per-Envoy example starts at the ceiling.
 - **Previous LB shape** — fewer, node-shared endpoint pools under identical

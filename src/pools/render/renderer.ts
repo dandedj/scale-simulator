@@ -65,9 +65,9 @@ export class PoolRenderer {
       ? `${sim.cfg.fabric.nodes} nodes × ${sim.cfg.fabric.coresPerNode} workers`
       : `${sim.cfg.fabric.nodes} nodes × 1 shared owner`;
     const keyTerm = sim.cfg.fabric.keyStrategy === 'link-ip'
-      ? `${s.links.length} Links × 1 endpoint × ${sim.cfg.fabric.ipsPerEndpoint} IPs`
+      ? `${s.links.length} Links × 1 endpoint × ${s.responders.length} responder IPs`
       : sim.cfg.fabric.keyStrategy === 'endpoint'
-        ? `${s.uniqueEndpoints} unique endpoints × ${sim.cfg.fabric.ipsPerEndpoint} IPs`
+        ? `${s.uniqueEndpoints} unique endpoints × ${s.responders.length} responder IPs`
         : `${s.uniqueEndpoints} unique endpoint authorities`;
     ctxText(this.ctx, 'POOL CARDINALITY', x + 12, y + 20, 13, SURFACE.textFaint, true);
     ctxText(this.ctx, `${ownerTerm} × ${keyTerm}`, x + 12, y + 42, 14, SURFACE.text);
@@ -192,25 +192,23 @@ export class PoolRenderer {
     ctxText(this.ctx, `${sim.cfg.responder.instances} Envoy / bidder instances`, r.x + 10, r.y + 40, 12, SURFACE.text);
     ctxText(this.ctx, `${fmt(sim.cfg.responder.connectionLimit)} connection limit each`, r.x + 10, r.y + 57, 10, SURFACE.textDim);
 
-    const n = Math.max(1, Math.round(sim.cfg.responder.instances));
-    const maxShown = Math.min(24, n);
+    const n = s.responders.length;
     const startY = r.y + 76;
     const usableH = Math.max(30, r.h - 110);
+    const maxShown = Math.min(24, n, Math.max(1, Math.floor(usableH / 8)));
     const rowH = Math.max(8, Math.min(22, usableH / maxShown));
     for (let i = 0; i < maxShown; i++) {
-      const uneven = n <= 1 ? 1 : 1 + sim.cfg.responder.connectionSkew * (1 - (2 * i) / (n - 1));
-      const conn = (s.established / n) * uneven;
-      const pressure = conn / Math.max(1, sim.cfg.responder.connectionLimit);
+      const responder = s.responders[i];
       const y = startY + i * rowH;
-      ctxText(this.ctx, `E${i + 1}`, r.x + 9, y + rowH * 0.7, 9, SURFACE.textDim);
-      const bx = r.x + 34;
-      const bw = r.w - 78;
+      ctxText(this.ctx, responder.ip, r.x + 9, y + rowH * 0.7, 8, SURFACE.textDim);
+      const bx = r.x + Math.min(96, r.w * 0.42);
+      const bw = Math.max(12, r.w - (bx - r.x) - 52);
       this.ctx.fillStyle = SURFACE.panelRaised;
       this.ctx.fillRect(bx, y + 2, bw, Math.max(4, rowH - 5));
-      this.ctx.fillStyle = withAlpha(loadColor(pressure), 0.88);
-      this.ctx.fillRect(bx, y + 2, bw * Math.min(1, pressure), Math.max(4, rowH - 5));
+      this.ctx.fillStyle = withAlpha(loadColor(responder.pressure), 0.88);
+      this.ctx.fillRect(bx, y + 2, bw * Math.min(1, responder.pressure), Math.max(4, rowH - 5));
       this.ctx.textAlign = 'right';
-      ctxText(this.ctx, fmt(conn), r.x + r.w - 8, y + rowH * 0.7, 9, loadColor(pressure));
+      ctxText(this.ctx, fmt(responder.estimatedConnections), r.x + r.w - 8, y + rowH * 0.7, 9, loadColor(responder.pressure));
       this.ctx.textAlign = 'left';
     }
     ctxText(this.ctx, `hottest ${fmt(s.hottestResponder)} / ${fmt(sim.cfg.responder.connectionLimit)}`, r.x + 10, r.y + r.h - 14, 12,
