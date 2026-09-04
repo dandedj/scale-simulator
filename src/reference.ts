@@ -16,6 +16,7 @@ import { LINK_KEYS } from './deeplink';
 import { describeDnsOptions } from './dns/ui/controls';
 import type { Experience, ExperienceHosts, PlaybackController } from './experience';
 import type { OptionDoc, OptionSection } from './optionDoc';
+import { describePoolOptions } from './pools/ui/controls';
 import { describeScalingOptions } from './scaling/ui/controls';
 import { describeStormOptions } from './ui/controls';
 
@@ -57,6 +58,13 @@ function sections(): OptionSection[] {
       blurb:
         'Zone TTL, client re-resolution and pinning, server capacity, and the RST-shedding fast loop. Link with <code>?m=dns</code>.',
       options: describeDnsOptions(),
+    },
+    {
+      id: 'pools',
+      title: '⇉ Outbound Pools',
+      blurb:
+        'RTB Fabric pool ownership and key cardinality, Hyper idle behavior, hypothetical active caps, and customer responder limits. Link with <code>?m=pools</code>.',
+      options: describePoolOptions(),
     },
     {
       id: 'scaling',

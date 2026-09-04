@@ -9,6 +9,7 @@
 
 import { StormExperience } from './app';
 import { DnsExperience } from './dns/experience';
+import { PoolExperience } from './pools/experience';
 import { ScalingExperience } from './scaling/experience';
 import { encode, LINK_KEYS, readParams, writeUrl } from './deeplink';
 import type { Experience, ExperienceDef, ExperienceHosts, PlaybackController } from './experience';
@@ -32,6 +33,12 @@ const EXPERIENCES: ExperienceDef[] = [
     label: '⌖ DNS Distribution',
     subtitle: 'DNS load-distribution simulator',
     create: () => new DnsExperience(),
+  },
+  {
+    id: 'pools',
+    label: '⇉ Outbound Pools',
+    subtitle: 'responder connection-pool simulator',
+    create: () => new PoolExperience(),
   },
   {
     id: 'scaling',

@@ -1,6 +1,6 @@
 # RTB Fabric Simulators
 
-Three browser-based discrete-event simulations of RTB Fabric behavior under load,
+Four browser-based simulations of RTB Fabric behavior under load,
 switched with the **☰** nav in the header:
 
 - **Connection Storm** — TLS connection retry storms in a high-throughput RTB
@@ -11,13 +11,18 @@ switched with the **☰** nav in the header:
   TTL, overloaded servers shedding with RSTs, and the lag between the fast (RST)
   and slow (health + DNS + boot) control loops. See
   [DNS load distribution](#dns-load-distribution) below.
+- **Outbound Pools** — connection cardinality from RTB Fabric workers and links
+  to customer responder/Envoy systems: Hyper's on-demand HTTP/1 behavior, idle
+  retention, per-link/per-IP partitioning, responder connection ceilings, and
+  alternative keying, ownership, bounded-pool, and HTTP/2 designs. See
+  [Outbound responder pools](#outbound-responder-pools) below.
 - **Scaling** — how the fleet copes with a rapid demand ramp-up: the availability
   drop when capacity can't be added fast enough, and the scale rate the
   autoscaling pipeline (detection → provision → boot → health → DNS → client
   pickup) can actually achieve. See [Scaling](#scaling) below.
 
-The connection-storm model is described first; the DNS and Scaling models have
-their own sections at the end. All three share the shell (one playback clock, the
+The connection-storm model is described first; the DNS, Outbound Pools, and
+Scaling models have their own sections at the end. All four share the shell (one playback clock, the
 start gate, the comparison mode) and the engine primitives (event queue, seeded
 RNG, the strip charts).
 
@@ -433,9 +438,147 @@ any step granularity), and that each scenario still demonstrates its lesson.
 - Autoscaling lead time dominated by instance boot + warm-up, far longer than a
   short traffic surge — the reactive-vs-headroom trade.
 
+## Outbound responder pools
+
+Open it with **☰ → Outbound Pools** or `?m=pools`. This mode answers a different
+connection question from Connection Storm: not whether inbound TLS retries melt
+the fabric, but why a healthy RTB Fabric fleet can hold far more outbound sockets
+to a customer than the load balancer it replaced.
+
+### The cardinality model
+
+The board keeps the multiplier visible:
+
+```
+owned pool keys = RTB nodes × pool owners/node × application keys/owner
+
+current application keys/owner = links × resolved endpoint IPs
+```
+
+With the default example, `24 nodes × 32 worker processes × 8 links × 4 IPs`
+is **24,576 independently owned keys**. A warm floor of one connection per key
+already exceeds eight Envoys at 1,024 connections each, even though the whole
+customer workload needs far less mean HTTP concurrency. This is the main
+distinction the simulator is built to expose: connection pressure can be driven
+by *partition cardinality* rather than throughput.
+
+Pool ownership is explicit. **worker-local** matches separate worker processes:
+process memory and its Hyper client cannot share sockets with another process.
+**node-shared** is a hypothetical architectural comparison. Within one process,
+cloning a Hyper `Client` reuses its underlying pool; that does not make a pool
+cross-process.
+
+The application key choices are:
+
+- **link × IP** — the current RTB Fabric shape. Every link gets a separate pool
+  for each resolved IP.
+- **IP + cert + port** — links that target the same TLS identity and endpoint
+  share pool state, removing the link multiplier while retaining explicit IP
+  selection.
+- **DNS authority** — one authority-keyed pool per owner, resolving connections
+  across the endpoint IPs. This matches Hyper's native key shape when the same
+  client is shared, but it changes where DNS/address-selection responsibility
+  lives.
+
+The fluid model converts QPS and response occupancy into mean concurrency using
+Little's Law, applies a headroom factor for arrival/latency variance, then rounds
+per independently owned key. Sparse keys contribute according to the probability
+that they were touched within the idle-retention window, so a theoretical key
+does not automatically hold a socket at extremely low traffic. The configured
+warm floor is applied afterward.
+
+### Hyper behavior represented
+
+The model follows the current `hyper-util` legacy client behavior that matters
+for connection count:
+
+- The library pool key is `(scheme, authority)`. RTB Fabric's link/IP split is
+  therefore modeled as an application layer above the library pool.
+- Cloned Clients share the underlying pool.
+- `pool_idle_timeout` defaults to 90 seconds and requires a pool timer to take
+  effect; `None` disables expiry.
+- `pool_max_idle_per_host` defaults to `usize::MAX`. It limits connections that
+  have returned *idle*, not busy or connecting sockets. It is deliberately not
+  presented as an active connection limit.
+- For HTTP/1, Hyper races an idle checkout against establishing a socket, and
+  does not serialize in-progress connects for a key. A connect that already
+  started can finish in the background after checkout wins, adding idle
+  inventory. The **H1 checkout-race factor** is an empirical sensitivity knob,
+  not a Hyper builder setting.
+- HTTP/2 reservations share a connection, and Hyper prevents multiple concurrent
+  H2 establishment tasks for the same key. The simulator applies the configured
+  stream concurrency and ignores the H1 race factor in H2 mode.
+
+Primary sources: the
+[`hyper_util::client::legacy::Builder` documentation](https://docs.rs/hyper-util/latest/hyper_util/client/legacy/struct.Builder.html),
+the [legacy client source](https://docs.rs/hyper-util/latest/src/hyper_util/client/legacy/client.rs.html),
+and the [legacy pool source](https://docs.rs/hyper-util/latest/src/hyper_util/client/legacy/pool.rs.html).
+The newer `client::pool` module is composable infrastructure, not a drop-in
+claim that the legacy client now has an active max; it is useful design space for
+a custom bounded pool.
+
+RTB Fabric's **Warm floor / key** is modeled separately because it is an
+application control, not one of those legacy Hyper builder options.
+
+### Dynamics and responder pressure
+
+Each connection is busy, idle, or connecting. A surge raises per-key concurrency
+and starts on-demand connects; after it passes, excess sockets remain idle until
+the idle timeout, unless max-idle trims them sooner. **⟳ RECONNECT ALL** models a
+process/fleet recycle: existing sockets close and all required pools rebuild at
+once. Failed coverage feeds a configurable retry fraction back into demand.
+
+The responder side tracks the **hottest instance**, not only an aggregate. A
+placement-skew knob makes one Envoy reach its limit before the theoretical total
+budget is full. New connections past that point reset, requests lose pool-key
+coverage, and retries can sustain connection-attempt churn. This is intentionally
+a connection-capacity model: it does not model responder CPU, request queue
+implementation, ephemeral-port limits, NAT, TLS CPU, or HTTP/2 protocol support.
+
+The **bounded alternative** is hypothetical. Its max is per application key, so
+it still multiplies by key count. A production implementation also needs an
+explicit queue, deadline, and shed policy; the simulator shows the pressure and
+unserved work but does not pretend the cap alone defines those semantics.
+
+### Scenarios and comparison
+
+- **Current RTB shape** — worker-local, link × IP, HTTP/1, Hyper on demand; the
+  1,024-per-Envoy example starts at the ceiling.
+- **Previous LB shape** — fewer, node-shared endpoint pools under identical
+  customer traffic.
+- **Scale out ×2** — twice the nodes and therefore twice the independent warm
+  key floor, despite unchanged total QPS.
+- **Share links** — IP + cert + port pooling removes the link multiplier.
+- **DNS authority** — shared authority keys remove both link and IP pool-state
+  multipliers.
+- **Bounded + shared** — combines endpoint sharing, a short idle lifetime, and a
+  hypothetical active max.
+- **HTTP/2 multiplexed** — shared authority keys plus 100 streams per connection,
+  if the responder supports H2.
+
+Comparison mode holds customer traffic identical while allowing topology, keying,
+pool behavior, protocol, and responder limits to differ. Useful pairings are
+Current vs Previous LB (migration), Current vs Scale out ×2 (horizontal scale),
+Current vs Share links (key design), DNS authority HTTP/1 vs HTTP/2 (multiplexing),
+and Hyper on-demand vs Bounded + shared (active admission).
+
+The useful optimization order is visible in those comparisons: first verify how
+many process-local Client/pool owners really exist; then remove unnecessary link
+and IP key multipliers; tune the warm floor and idle retention; add an active
+budget with explicit wait/shed semantics if a hard responder guarantee is needed;
+and use HTTP/2 multiplexing where the responder contract supports it. Raising a
+customer's Envoy limit treats capacity, while key sharing and bounded admission
+treat connection creation. Horizontal or vertical RTB scaling should be checked
+against the pool-key equation every time because either can add independent
+floors even when customer QPS is unchanged.
+
+`npm test` covers the pool multiplier, all key strategies, horizontal/vertical
+scale, max-idle-versus-max-active semantics, H2 multiplexing, sparse-key idle
+retention, responder resets, scenario traffic parity, and step-size stability.
+
 ## Scaling
 
-The third mode (**☰** nav → **↗ Scaling**) focuses on a **rapid demand
+The fourth mode (**☰** nav → **↗ Scaling**) focuses on a **rapid demand
 ramp-up** and the autoscaling pipeline that has to keep up: how far availability
 drops when capacity lags demand, and what **scale rate** (TPS added per minute)
 the pipeline can actually achieve. Its own engine, renderer, and scenarios live
