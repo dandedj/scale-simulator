@@ -1,4 +1,4 @@
-/* RTB Fabric — Connection Storm Simulator
+/* RTB Fabric Simulators
    Dark ops war-room theme: Grafana-dark surfaces, Okabe-Ito semantics,
    Big Shoulders display type over IBM Plex Mono data type. */
 
@@ -162,7 +162,7 @@ body {
   color: var(--info);
 }
 
-/* ---------- Mode switch (Connection Storm / DNS Distribution) ---------- */
+/* ---------- Simulator mode switch ---------- */
 
 /* The simulator switch: a collapsed nav, kept visually distinct from the
    per-mode controls that sit beside it in the header. */
@@ -700,6 +700,63 @@ main {
 }
 .preset-card[data-preset='well-tuned'] .preset-name {
   color: var(--ok);
+}
+
+/* Outbound-pool scenario accents. */
+.preset-card[data-preset='current'] .preset-name,
+.preset-card[data-preset='scale-out'] .preset-name {
+  color: var(--bad);
+}
+.preset-card[data-preset='previous-lb'] .preset-name,
+.preset-card[data-preset='bounded-shared'] .preset-name,
+.preset-card[data-preset='http2'] .preset-name {
+  color: var(--ok);
+}
+.preset-card[data-preset='endpoint-shared'] .preset-name,
+.preset-card[data-preset='dns-authority'] .preset-name {
+  color: var(--info);
+}
+
+.pool-research {
+  color: var(--text-dim);
+}
+
+.pool-research summary {
+  cursor: pointer;
+  color: var(--info);
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.pool-research-body {
+  padding-top: 9px;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.pool-research-body a {
+  color: var(--info);
+}
+
+#pool-limit {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 1.2px;
+  color: var(--bad);
+  border: 1px solid var(--bad);
+  border-radius: 4px;
+  padding: 3px 8px;
+  opacity: 0;
+  transition: opacity 0.25s;
+  animation: storm-pulse 0.9s ease-in-out infinite;
+}
+
+#pool-limit.visible {
+  opacity: 1;
 }
 
 .preset-desc {

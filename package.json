@@ -1,6 +1,6 @@
 {
   "name": "rtb-storm-simulator",
-  "description": "Animated discrete-event simulation of TLS connection retry storms in an RTB proxy fabric",
+  "description": "Interactive simulations of RTB Fabric connection storms, outbound pools, DNS distribution, and scaling",
   "private": true,
   "version": "1.0.0",
   "type": "module",

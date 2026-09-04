@@ -1,8 +1,8 @@
 /**
  * The shell/experience seam.
  *
- * The app hosts two independent simulators — the connection storm and the DNS
- * load-distribution model, and the autoscaling ramp-up model — and switches
+ * The app hosts independent simulators — connection storm, DNS distribution,
+ * outbound responder pools, and autoscaling ramp-up — and switches
  * between them with the collapsed ☰ nav in the header.
  * Each is a self-contained `Experience` that builds its own stage + control DOM;
  * the single `Shell` (shell.ts) owns the one requestAnimationFrame loop, the

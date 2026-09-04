@@ -20,6 +20,8 @@ import {
 } from './deeplink';
 import { baseConfig as scalingBase, cloneScalingConfig } from './scaling/engine/presets';
 import { describeScalingOptions } from './scaling/ui/controls';
+import { basePoolConfig } from './pools/engine/presets';
+import { describePoolOptions } from './pools/ui/controls';
 
 describe('flatten and diff', () => {
   it('addresses nested fields and array entries by dot-path', () => {
@@ -164,5 +166,18 @@ describe('the options reference and the link parser agree', () => {
     expect(bake?.info?.what).toBeTruthy();
     expect(bake?.info?.how).toBeTruthy();
     expect(bake?.info?.expect).toBeTruthy();
+  });
+
+  it('accepts every documented outbound-pool path', () => {
+    const docs = describePoolOptions();
+    expect(docs.length).toBeGreaterThan(20);
+    for (const doc of docs) {
+      expect(doc.path, `${doc.group} / ${doc.label} has no path`).not.toBeNull();
+      const cfg = basePoolConfig();
+      const flat = flatten(cfg);
+      expect(Object.hasOwn(flat, doc.path!), `${doc.path} is not a config field`).toBe(true);
+      const sample = typeof flat[doc.path!] === 'string' ? String(flat[doc.path!]) : '1';
+      expect(applyPath(cfg, doc.path!, sample), `${doc.path} was rejected`).toBe(true);
+    }
   });
 });
