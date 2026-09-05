@@ -177,35 +177,69 @@ export class PoolRenderer {
     ctxText(this.ctx, `${fmt(s.logicalKeysPerOwner * ownersPerNode)} owned keys / node`, r.x + 10, r.y + r.h - 11, 11, SEMANTIC.tlsPulse, true);
   }
 
+  /**
+   * Every Link pool in the fleet, not one owner's set. Each row is a Link; the
+   * blocks along it are the owner copies that each hold their own pool for it.
+   * The count is the whole point of this model — a socket total is easy to read
+   * past, but sixty-four blocks per row is not — so the copies are drawn rather
+   * than asserted in a caption.
+   */
   private drawLinks(sim: PoolSimulation, r: Rect): void {
     const s = sim.snapshot();
     this.panel(r, SURFACE.border);
-    const ownersPerNode = sim.cfg.fabric.ownership === 'worker' ? Math.max(1, Math.round(sim.cfg.fabric.coresPerNode)) : 1;
+    const owners = Math.max(1, Math.round(s.poolOwners));
     const linkBased = sim.cfg.fabric.keyStrategy === 'link-ip';
-    ctxText(this.ctx, linkBased ? 'LINK-BASED POOLS / OWNER' : 'LINK ROUTES / OWNER', r.x + 10, r.y + 20, 13, SURFACE.textFaint, true);
-    ctxText(this.ctx, `${fmt(s.poolOwners)} identical owner copies fleet-wide`, r.x + 10, r.y + 40, 10, SURFACE.text);
-    ctxText(this.ctx, `${ownersPerNode}/node × all ${s.links.length} Links`, r.x + 10, r.y + 56, 10, SEMANTIC.inFlight);
+    const copies = owners * s.links.length;
+    ctxText(this.ctx, linkBased ? 'EVERY LINK POOL' : 'LINK ROUTES × OWNERS', r.x + 10, r.y + 20, 13, SURFACE.textFaint, true);
+    ctxText(this.ctx, `${fmt(copies)} pool copies`, r.x + 10, r.y + 40, 13, SEMANTIC.inFlight, true);
+    ctxText(this.ctx, `${fmt(owners)} owners × ${s.links.length} Links · one block each`, r.x + 10, r.y + 56, 9, SURFACE.textDim);
 
     const perLink = this.connectionsPerLink(s);
-    const shown = Math.min(s.links.length, this.maxRows(r, 72, 25, 14));
-    const rowH = Math.max(18, Math.min(25, (r.h - 94) / Math.max(1, shown)));
+    const maxPerLink = Math.max(1, ...perLink);
+    const shown = Math.min(s.links.length, this.maxRows(r, 70, 30, 16));
+    const rowH = Math.max(22, Math.min(30, (r.h - 86) / Math.max(1, shown)));
+    const stripX = r.x + 11;
+    const stripW = r.w - 22;
+
     for (let i = 0; i < shown; i++) {
       const link = s.links[i];
       const y = r.y + 68 + i * rowH;
-      this.ctx.fillStyle = withAlpha(SEMANTIC.inFlight, 0.12);
-      this.ctx.fillRect(r.x + 7, y, r.w - 14, rowH - 3);
-      this.ctx.strokeStyle = withAlpha(SEMANTIC.inFlight, 0.45);
-      this.ctx.strokeRect(r.x + 7.5, y + 0.5, r.w - 15, rowH - 4);
-      ctxText(this.ctx, `L${link.id}→EP${link.endpointId}`, r.x + 13, y + 13, 9, SEMANTIC.inFlight, true);
-      ctxText(this.ctx, `${fmt(link.requestRate)}/s`, r.x + Math.min(78, r.w * 0.42), y + 13, 8, SURFACE.textDim);
+      const level = perLink.length > i ? perLink[i] / maxPerLink : 1;
+      ctxText(this.ctx, `L${link.id}→EP${link.endpointId}`, stripX + 1, y + 9, 9, SEMANTIC.inFlight, true);
       this.ctx.textAlign = 'right';
-      const detail = linkBased && perLink.length > i
-        ? `${fmt(perLink[i])} sockets`
-        : linkBased ? `${s.responders.length} IP pools` : 'shared keys';
-      ctxText(this.ctx, detail, r.x + r.w - 12, y + 13, 8, SURFACE.text);
+      const sockets = perLink.length > i ? `${fmt(perLink[i])} sockets` : `${s.responders.length} IP pools`;
+      ctxText(this.ctx, `${fmt(link.requestRate)}/s · ${sockets}`, r.x + r.w - 11, y + 9, 8, SURFACE.text);
       this.ctx.textAlign = 'left';
+
+      // One block per owner copy of this Link's pool, packed to the row width.
+      // Below about a pixel each they stop reading as countable things, so the
+      // row becomes a solid band with the count called out instead.
+      const blockH = Math.max(6, rowH - 16);
+      const blockY = y + 13;
+      const gap = stripW / owners >= 3 ? 1 : 0;
+      const blockW = (stripW - gap * (owners - 1)) / owners;
+      const shade = withAlpha(SEMANTIC.tlsPulse, 0.3 + 0.55 * level);
+      if (blockW < 1) {
+        this.ctx.fillStyle = shade;
+        this.ctx.fillRect(stripX, blockY, stripW, blockH);
+        this.ctx.strokeStyle = withAlpha(SURFACE.canvas, 0.5);
+        this.ctx.lineWidth = 1;
+        // Tick marks per node keep the band from reading as one wide pool.
+        const nodes = Math.max(1, Math.round(sim.cfg.fabric.nodes));
+        for (let n = 1; n < nodes && nodes <= 64; n++) {
+          const x = Math.round(stripX + (stripW * n) / nodes) + 0.5;
+          this.ctx.beginPath(); this.ctx.moveTo(x, blockY); this.ctx.lineTo(x, blockY + blockH); this.ctx.stroke();
+        }
+      } else {
+        this.ctx.fillStyle = shade;
+        for (let o = 0; o < owners; o++) {
+          this.ctx.fillRect(stripX + o * (blockW + gap), blockY, blockW, blockH);
+        }
+      }
     }
-    if (shown < s.links.length) ctxText(this.ctx, `+${s.links.length - shown} Links`, r.x + 10, r.y + r.h - 11, 9, SURFACE.textDim);
+    if (shown < s.links.length) {
+      ctxText(this.ctx, `+${s.links.length - shown} Links, same shape`, r.x + 10, r.y + r.h - 11, 9, SURFACE.textDim);
+    }
   }
 
   private drawPools(sim: PoolSimulation, r: Rect): void {
